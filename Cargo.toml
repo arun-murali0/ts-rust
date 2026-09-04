@@ -23,6 +23,10 @@ wasm-bindgen = { version = "0.2", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
+# Heap-allocation profiling for examples/dhat_heap.rs. Optional and only
+# pulled in behind the `dhat-heap` feature below — never part of a normal
+# build, native or wasm.
+dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
@@ -33,9 +37,22 @@ criterion = "0.5"
 # for how it's wired into the Criterion harness and docs/VERIFICATION.md
 # for how to run it.
 pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
+# Instruction-count benchmarking via Valgrind's Callgrind — deterministic,
+# unlike Criterion's wall-clock numbers above, at the cost of needing
+# `valgrind` installed on whatever machine runs `cargo bench --bench
+# checker_iai`, plus a version-matched `iai-callgrind-runner` binary on
+# $PATH (`cargo install iai-callgrind-runner`). Version pinned loosely on
+# purpose: check crates.io for the current release before trusting this
+# number, this crate moves fast and this pin hasn't been verified against
+# a real build here.
+iai-callgrind = "0.16.1"
 
 [[bench]]
 name = "checker_benchmark"
+harness = false
+
+[[bench]]
+name = "checker_iai"
 harness = false
 
 [features]
@@ -43,6 +60,9 @@ default = []
 # Native builds never pull in wasm-bindgen. Enable explicitly when building
 # via wasm-pack.
 wasm = ["dep:wasm-bindgen", "dep:serde", "dep:serde-wasm-bindgen", "dep:console_error_panic_hook"]
+# examples/dhat_heap.rs only. Off by default so a normal `cargo build`
+# never overrides the global allocator.
+dhat-heap = ["dep:dhat"]
 
 [lib]
 name = "ts_rust"
