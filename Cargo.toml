@@ -1,0 +1,57 @@
+[package]
+name = "ts-rust"
+version = "0.1.0-beta.1"
+edition = "2021"
+description = "A from-scratch TypeScript type checker in Rust, built on Oxc."
+license = "Apache-2.0"
+repository = "https://github.com/arun-murali0/ts-rust"
+
+[dependencies]
+# Pinned to an exact patch, not a range: this crate matches 0.144.0's AST
+# field layout precisely. Bump deliberately, together, and re-run the
+# fixture suite before merging.
+oxc_allocator = "=0.144.0"
+oxc_ast = "=0.144.0"
+oxc_span = "=0.144.0"
+oxc_parser = "=0.144.0"
+oxc_semantic = "=0.144.0"
+
+thiserror = "2"
+tracing = "0.1"
+
+wasm-bindgen = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+criterion = "0.5"
+# Lets `cargo bench` emit a flamegraph.svg per benchmark group instead of
+# needing the separate `cargo-flamegraph` subcommand + perf setup. Linux
+# only (uses perf_event under the hood); see benches/checker_benchmark.rs
+# for how it's wired into the Criterion harness and docs/VERIFICATION.md
+# for how to run it.
+pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
+
+[[bench]]
+name = "checker_benchmark"
+harness = false
+
+[features]
+default = []
+# Native builds never pull in wasm-bindgen. Enable explicitly when building
+# via wasm-pack.
+wasm = ["dep:wasm-bindgen", "dep:serde", "dep:serde-wasm-bindgen", "dep:console_error_panic_hook"]
+
+[lib]
+name = "ts_rust"
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+# Applies to native release builds too, not just wasm. A native embedder
+# that needs `catch_unwind` should override this in its own profile.
+panic = "abort"
+opt-level = "s"
+
+[workspace]

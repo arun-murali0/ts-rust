@@ -1,0 +1,17 @@
+{
+  "name": "ts-rust",
+  "version": "0.1.0",
+  "description": "A from-scratch TypeScript type checker, written in Rust, compiled to WASM.",
+  "license": "MIT OR Apache-2.0",
+  "repository": "https://github.com/YOUR_ORG/ts-rust",
+  "main": "ts_rust.js",
+  "types": "ts_rust.d.ts",
+  "files": [
+    "ts_rust_bg.wasm",
+    "ts_rust.js",
+    "ts_rust.d.ts"
+  ],
+  "sideEffects": [
+    "./ts_rust.js"
+  ]
+}
