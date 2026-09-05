@@ -108,10 +108,15 @@ impl<'a> TypeNamespace<'a> {
     /// as interfaces), with the class's own members added on top and
     /// overriding anything the parent had under the same name.
     ///
-    /// Static members, getters/setters, and index signatures are skipped.
-    /// A field or method that isn't fully annotated is skipped
-    /// individually rather than failing the whole class, matching how a
-    /// partially-annotated top-level function is treated.
+    /// Static members, getters/setters, and index signatures are skipped
+    /// individually, since they're never part of the instance shape at
+    /// all. A field or method that *is* part of the instance shape but
+    /// isn't fully annotated fails the whole class instead of just that
+    /// member, same policy as `resolve_object_members` for interfaces: a
+    /// half-built object type would be worse than an honest unresolved
+    /// one, since every caller (a variable typed as this class, a `new`
+    /// call, an assignment) would otherwise silently check against an
+    /// incomplete shape with no indication anything was skipped.
     fn resolve_class(&mut self, class: &'a Class<'a>, arena: &mut TypeArena) -> Option<TypeId> {
         let mut properties: Vec<PropertyEntry> = Vec::new();
 
@@ -123,7 +128,7 @@ impl<'a> TypeNamespace<'a> {
                     }
                 }
                 // A circular or unresolved parent just means no inherited
-                // properties, not a failure of the whole class — the
+                // properties, not a failure of the whole class, the
                 // class's own members still get checked.
             }
             // A superclass expression more complex than a bare name
@@ -133,25 +138,42 @@ impl<'a> TypeNamespace<'a> {
         for element in &class.body.body {
             match element {
                 ClassElement::PropertyDefinition(prop) if !prop.r#static => {
-                    let PropertyKey::StaticIdentifier(key) = &prop.key else { continue };
-                    let Some(annotation) = &prop.type_annotation else { continue };
-                    let Some(type_id) = resolve_type_annotation(annotation, self, arena) else { continue };
+                    let PropertyKey::StaticIdentifier(key) = &prop.key else { return None };
+                    let Some(annotation) = &prop.type_annotation else { return None };
+                    let Some(type_id) = resolve_type_annotation(annotation, self, arena) else { return None };
                     upsert_property(&mut properties, key.name.to_string(), type_id, prop.optional);
                 }
                 ClassElement::MethodDefinition(method)
                     if !method.r#static && method.kind == MethodDefinitionKind::Method =>
                 {
-                    let PropertyKey::StaticIdentifier(key) = &method.key else { continue };
-                    let Some(params) = resolve_function_params(&method.value, self, arena) else { continue };
+                    let PropertyKey::StaticIdentifier(key) = &method.key else { return None };
                     let Some(return_type) =
                         method.value.return_type.as_ref().and_then(|rt| resolve_type_annotation(rt, self, arena))
                     else {
-                        continue;
+                        return None;
+                    };
+                    // An untyped parameter is a narrower gap than a
+                    // missing return type (handled above — still fails
+                    // the whole class, since there'd be nothing sound to
+                    // record for this method's type at all): the
+                    // method's presence, name, and return type are all
+                    // still known here, only its argument types aren't.
+                    // Registering it with `is_untyped`, the same
+                    // mechanism `declare.rs` already uses for a class
+                    // whose *constructor* has an untyped parameter,
+                    // keeps every other correctly-typed member of this
+                    // class checkable instead of discarding all of it
+                    // over one loosely-typed method. `check_callable`
+                    // (bridge/expressions.rs) is what actually reads
+                    // this flag to skip arity checking on calls to it.
+                    let (params, is_untyped) = match resolve_function_params(&method.value, self, arena) {
+                        Some(params) => (params, false),
+                        None => (Vec::new(), true),
                     };
                     let method_type = arena.alloc(Type::Function(crate::types::FunctionType {
                         params,
                         return_type,
-                        is_untyped: false,
+                        is_untyped,
                     }));
                     upsert_property(&mut properties, key.name.to_string(), method_type, false);
                 }

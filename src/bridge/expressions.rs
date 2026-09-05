@@ -240,7 +240,9 @@ fn infer_call_expression_type(
     };
 
     let not_callable = format!("'{callee_name}' is not callable.");
-    check_callable(callee_type, &call.arguments, call.span(), &not_callable, scoping, ctx)
+    let untyped_message =
+        format!("'{callee_name}' has an untyped parameter, so ts-rust can't check this call's arity yet.");
+    check_callable(callee_type, &call.arguments, call.span(), &not_callable, &untyped_message, scoping, ctx)
 }
 
 fn infer_new_expression_type(
@@ -255,48 +257,26 @@ fn infer_new_expression_type(
 
     let callee_type = resolve_identifier_type(callee_ident, scoping, ctx);
 
-    // declare.rs marks a class's constructor Function type `is_untyped`
-    // when a constructor exists but has a parameter without a type
-    // annotation, distinct from a class with no constructor at all
-    // (params: vec![], is_untyped: false, which is correctly
-    // arity-checked as zero-arg). Reading that flag here, rather than
-    // re-deriving it from the AST during Pass 2, keeps this a single
-    // lookup instead of duplicating declare.rs's own resolution work.
-    if let Type::Function(function_type) = ctx.arena.get(callee_type).clone() {
-        if function_type.is_untyped {
-            ctx.warning(
-                format!(
-                    "'{}' has a constructor with an untyped parameter, so ts-rust can't check \
-                     arity for `new {}(...)` yet.",
-                    callee_ident.name, callee_ident.name
-                ),
-                new_expr.span(),
-            );
-            // Still worth checking each argument on its own terms (catches
-            // e.g. `new Foo(1 + "x")`) even though arity itself is skipped.
-            for arg in &new_expr.arguments {
-                if let Some(arg_expr) = arg.as_expression() {
-                    infer_expression_type(arg_expr, scoping, ctx);
-                }
-            }
-            return function_type.return_type;
-        }
-    }
-
     let not_callable = format!("'{}' is not a constructor.", callee_ident.name);
-    check_callable(callee_type, &new_expr.arguments, new_expr.span(), &not_callable, scoping, ctx)
+    let untyped_message = format!(
+        "'{}' has a constructor with an untyped parameter, so ts-rust can't check arity for `new {}(...)` yet.",
+        callee_ident.name, callee_ident.name
+    );
+    check_callable(callee_type, &new_expr.arguments, new_expr.span(), &not_callable, &untyped_message, scoping, ctx)
 }
 
-/// Shared by `f(...)` and `new C(...)`: both are "resolve a function type,
-/// check arity, check each argument, return the function's return type."
-/// A `new` expression's "return type" here is the class's instance type,
-/// since `declare.rs` registers a class's constructor as a `Type::Function`
-/// whose return type already is the instance type.
+/// Shared by `f(...)`, `obj.method(...)`, and `new C(...)`: all three are
+/// "resolve a function type, check arity, check each argument, return
+/// the function's return type." A `new` expression's "return type" here
+/// is the class's instance type, since `declare.rs` registers a class's
+/// constructor as a `Type::Function` whose return type already is the
+/// instance type.
 fn check_callable(
     callee_type: TypeId,
     arguments: &[oxc_ast::ast::Argument],
     span: Span,
     not_callable_message: &str,
+    untyped_message: &str,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
@@ -306,6 +286,24 @@ fn check_callable(
         }
         return ctx.arena.error();
     };
+
+    // Set by declare.rs for a class whose constructor has an untyped
+    // parameter, or by namespace.rs's resolve_class for a method with
+    // one (see resolve_class's method branch): `params` is deliberately
+    // empty and not to be trusted for arity checking in either case.
+    // Every argument is still worth checking on its own terms, though —
+    // this only skips *arity* checking, e.g. `new Foo(1 + "x")` or
+    // `obj.method(1 + "x")` should still flag the `1 + "x"` mismatch
+    // even though how many arguments were expected is unknown.
+    if function_type.is_untyped {
+        ctx.warning(untyped_message, span);
+        for arg in arguments {
+            if let Some(arg_expr) = arg.as_expression() {
+                infer_expression_type(arg_expr, scoping, ctx);
+            }
+        }
+        return function_type.return_type;
+    }
 
     if arguments.len() != function_type.params.len() {
         ctx.error(format!("Expected {} argument(s), but got {}.", function_type.params.len(), arguments.len()), span);

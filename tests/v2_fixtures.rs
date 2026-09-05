@@ -184,3 +184,22 @@ fn function_parameters_are_usable_inside_their_own_body() {
         "parameters should be checkable inside their own function body, got: {diagnostics:?}"
     );
 }
+
+#[test]
+fn unresolvable_type_annotation_is_reported_not_silently_swallowed() {
+    // Regression test: a type annotation referencing a name that was
+    // never declared at all (a typo, most commonly) used to be
+    // indistinguishable from "no annotation was written" once resolution
+    // failed, since both collapsed to the same `None`. The variable's
+    // inferred type got registered with zero diagnostic anywhere,
+    // meaning `let x: DoesNotExist = 5;` type-checked cleanly with no
+    // indication `DoesNotExist` was never found.
+    //
+    // Fixed via bridge/statements.rs's AnnotationOutcome, which keeps
+    // "absent" and "present but unresolvable" as distinct outcomes.
+    let source = include_str!("fixtures/v2/unresolvable_type_annotation_is_reported.ts");
+    let diagnostics = check(source, "unresolvable_type_annotation_is_reported.ts");
+    assert_eq!(diagnostics.len(), 1, "expected exactly one diagnostic, got: {diagnostics:?}");
+    assert_eq!(diagnostics[0].severity, Severity::Warning);
+    assert!(diagnostics[0].message.contains("could not be resolved"));
+}

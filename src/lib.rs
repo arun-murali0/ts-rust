@@ -36,6 +36,7 @@ mod bridge;
 mod diagnostics;
 mod error;
 mod fxhash;
+mod line_index;
 mod namespace;
 mod subtyping;
 mod symbol_map;
@@ -49,6 +50,12 @@ pub use wasm::TsRustChecker;
 
 pub use diagnostics::{Diagnostic, Severity};
 pub use error::CheckerError;
+// `Diagnostic::format_with_position` takes a `&LineIndex` — without this
+// re-export, that type is unnameable outside the crate (a private-in-
+// public-interface bug: the method would exist but no external caller
+// could spell the type needed to call it), even though `line_index`
+// itself stays a private module like the others above.
+pub use line_index::LineIndex;
 
 // Not part of the stable public API; exists only so
 // benches/checker_benchmark.rs, which compiles as a separate crate, can

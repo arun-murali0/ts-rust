@@ -22,6 +22,16 @@ use super::context::CheckContext;
 use super::expressions::infer_expression_type;
 use super::narrow::narrow_condition;
 
+/// Distinguishes "no type annotation was written" from "one was written
+/// but couldn't be resolved," which used to collapse into the same
+/// `None` and get treated identically. See the `VariableDeclaration` arm
+/// below for what that silently broke.
+enum AnnotationOutcome {
+    Absent,
+    Resolved(crate::arena::TypeId),
+    Unresolvable,
+}
+
 #[tracing::instrument(skip_all, fields(statement_count = program.body.len()))]
 pub fn check_top_level(program: &Program, scoping: &Scoping, ctx: &mut CheckContext<'_, '_>) {
     for stmt in &program.body {
@@ -66,15 +76,56 @@ fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut CheckContext<'
                     continue;
                 };
 
-                let annotation_type = declarator
-                    .type_annotation
-                    .as_ref()
-                    .and_then(|a| resolve_type_annotation(a, &mut ctx.namespace, &mut ctx.arena));
+                // Three distinct outcomes, not two: no annotation was
+                // written at all, an annotation was written and resolved,
+                // or an annotation was written but couldn't be resolved
+                // (an unknown name, or a name whose own definition isn't
+                // fully understood, e.g. a class with an unresolvable
+                // member). Collapsing the last two into one `None` used
+                // to mean an unresolvable annotation was silently treated
+                // exactly like no annotation at all: the variable's
+                // inferred type got registered with zero diagnostic
+                // anywhere, and `let bad: TypoedName = value;` produced
+                // no signal that `TypoedName` was never found.
+                let annotation_outcome = match &declarator.type_annotation {
+                    None => AnnotationOutcome::Absent,
+                    Some(annotation) => {
+                        match resolve_type_annotation(annotation, &mut ctx.namespace, &mut ctx.arena) {
+                            Some(type_id) => AnnotationOutcome::Resolved(type_id),
+                            None => AnnotationOutcome::Unresolvable,
+                        }
+                    }
+                };
 
                 let inferred_type = declarator.init.as_ref().map(|init| infer_expression_type(init, scoping, ctx));
 
-                match (annotation_type, inferred_type) {
-                    (Some(declared), Some(actual)) => {
+                match (annotation_outcome, inferred_type) {
+                    // The annotation itself couldn't be resolved. The
+                    // initializer expression was still walked above (so a
+                    // real error inside it, e.g. `1 + "x"`, is still
+                    // caught), but there's nothing sound to compare it
+                    // against, and guessing a type here would be worse
+                    // than an honest gap. `id` is deliberately left
+                    // unregistered: a later reference to it hits the
+                    // existing "resolved symbol has no registered type"
+                    // warning in expressions.rs rather than silently
+                    // succeeding. This can double up with a warning
+                    // already raised at the failing type's own
+                    // declaration site (e.g. a class that failed to
+                    // resolve); that overlap is accepted, since silence
+                    // is worse than one redundant diagnostic.
+                    (AnnotationOutcome::Unresolvable, _) => {
+                        ctx.warning(
+                            format!(
+                                "Type annotation for '{}' could not be resolved (unknown name, \
+                                 or its definition isn't fully understood by ts-rust yet).",
+                                id.name
+                            ),
+                            declarator.span(),
+                        );
+                    }
+
+                    (AnnotationOutcome::Resolved(declared), Some(actual)) => {
                         if !crate::subtyping::is_subtype(&ctx.arena, actual, declared) {
                             ctx.error(
                                 format!(
@@ -102,7 +153,7 @@ fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut CheckContext<'
                     // the precise literal type (`const x = 5` gives `x`
                     // type `5`); `let`/`var` widen to the base primitive,
                     // since the value can change later.
-                    (None, Some(actual)) => {
+                    (AnnotationOutcome::Absent, Some(actual)) => {
                         let registered_type = if decl.kind == VariableDeclarationKind::Const {
                             actual
                         } else {
@@ -112,16 +163,17 @@ fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut CheckContext<'
                             ctx.symbols.declare(symbol_id, registered_type);
                         }
                     }
-                    // Annotated with no initializer (`let x: number;`).
-                    // Same registration gap as above: nothing to check
-                    // yet, but the binding still needs a type on record
-                    // before any later reference to it is checked.
-                    (Some(declared), None) => {
+                    // Annotated (and resolved) with no initializer
+                    // (`let x: number;`). Same registration gap as above:
+                    // nothing to check yet, but the binding still needs a
+                    // type on record before any later reference to it is
+                    // checked.
+                    (AnnotationOutcome::Resolved(declared), None) => {
                         if let Some(symbol_id) = id.symbol_id.get() {
                             ctx.symbols.declare(symbol_id, declared);
                         }
                     }
-                    (None, None) => {}
+                    (AnnotationOutcome::Absent, None) => {}
                 }
             }
         }
@@ -174,7 +226,26 @@ fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut CheckContext<'
             let Some(name) = class.id.as_ref() else { return };
             let instance_type = match ctx.namespace.resolve(&name.name, &mut ctx.arena) {
                 Resolution::Resolved(type_id) => type_id,
-                _ => return,
+                Resolution::Circular | Resolution::NotFound => {
+                    // Every other unsupported construct gets a visible
+                    // warning at its own site via push_unsupported; a
+                    // class that failed to resolve used to be the one
+                    // exception, silently skipped here with nothing
+                    // telling the reader why. This is also the one place
+                    // that reports it: `resolve()`'s result isn't cached
+                    // on failure, so this same failure would otherwise
+                    // repeat silently at every place the class is
+                    // referenced too.
+                    ctx.warning(
+                        format!(
+                            "Class '{}' uses a shape not yet checked by ts-rust: an unresolvable \
+                             field or method, or a superclass that isn't a plain class name.",
+                            name.name
+                        ),
+                        class.span(),
+                    );
+                    return;
+                }
             };
             let Type::Object(instance_object) = ctx.arena.get(instance_type).clone() else { return };
 
