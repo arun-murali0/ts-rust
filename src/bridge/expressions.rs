@@ -1,15 +1,17 @@
 //! Pass 2 (expression half): infers an expression's TypeId, pushing
 //! diagnostics for any mismatch found along the way.
 
-use oxc_ast::ast::{BinaryOperator, Expression, IdentifierReference, ObjectPropertyKind, PropertyKey};
+use oxc_ast::ast::{ArrowFunctionBody, BinaryOperator, Expression, Function, IdentifierReference, ObjectPropertyKind, PropertyKey};
 use oxc_semantic::Scoping;
 use oxc_span::{GetSpan, Span};
 
 use crate::arena::TypeId;
-use crate::types::{ObjectType, PropertyEntry, Type};
+use crate::type_annotation::{resolve_params_with_any_fallback, resolve_type_annotation};
+use crate::types::{FunctionType, ObjectType, PropertyEntry, Type};
 
 use super::context::CheckContext;
 use super::narrow::resolve_symbol_id;
+use super::statements::{bind_params, check_statement};
 
 /// Always returns a TypeId. On failure this is `ctx.arena.error()`, not
 /// `ctx.arena.unknown()`, so a caller checking the result against a
@@ -50,6 +52,10 @@ pub fn infer_expression_type(expr: &Expression, scoping: &Scoping, ctx: &mut Che
         Expression::ObjectExpression(object) => infer_object_expression_type(object, scoping, ctx),
 
         Expression::ArrayExpression(array) => infer_array_expression_type(array, scoping, ctx),
+
+        Expression::ArrowFunctionExpression(arrow) => infer_arrow_function_type(arrow, scoping, ctx),
+
+        Expression::FunctionExpression(func) => infer_function_expression_type(func, scoping, ctx),
 
         // `typeof x` always evaluates to a string at runtime, independent
         // of whatever narrowing decision the containing `if` makes about
@@ -114,6 +120,92 @@ fn infer_member_access_type(object_type: TypeId, property_name: &str, span: Span
             ctx.arena.error()
         }
     }
+}
+
+fn infer_arrow_function_type(
+    arrow: &oxc_ast::ast::ArrowFunctionExpression,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> TypeId {
+    let param_types = resolve_params_with_any_fallback(&arrow.params, &mut ctx.namespace, &mut ctx.arena);
+    bind_params(&arrow.params.items, &param_types, ctx);
+
+    let declared_return =
+        arrow.return_type.as_ref().and_then(|rt| resolve_type_annotation(rt, &mut ctx.namespace, &mut ctx.arena));
+
+    let return_type = if let Some(body_expr) = arrow.body.as_expression() {
+        let inferred = infer_expression_type(body_expr, scoping, ctx);
+        match declared_return {
+            Some(declared) => {
+                if !crate::subtyping::is_subtype(&ctx.arena, inferred, declared) {
+                    ctx.error(
+                        "Return type does not match the function's declared return type.",
+                        body_expr.span(),
+                    );
+                }
+                declared
+            }
+            None => inferred,
+        }
+    } else {
+        let ArrowFunctionBody::FunctionBody(body) = &arrow.body else {
+            unreachable!("as_expression() returned None, so this must be the block-body variant")
+        };
+        let return_type = declared_return.unwrap_or_else(|| ctx.arena.any());
+        let outer_return_type = ctx.current_return_type.replace(return_type);
+        for body_stmt in &body.statements {
+            check_statement(body_stmt, scoping, ctx);
+        }
+        ctx.current_return_type = outer_return_type;
+        return_type
+    };
+
+    ctx.arena.alloc(Type::Function(FunctionType { params: param_types, return_type, is_untyped: false }))
+}
+
+fn infer_function_expression_type(func: &Function, scoping: &Scoping, ctx: &mut CheckContext<'_, '_>) -> TypeId {
+    let param_types = resolve_params_with_any_fallback(&func.params, &mut ctx.namespace, &mut ctx.arena);
+    bind_params(&func.params.items, &param_types, ctx);
+
+    let declared_return =
+        func.return_type.as_ref().and_then(|rt| resolve_type_annotation(rt, &mut ctx.namespace, &mut ctx.arena));
+    let return_type = declared_return.unwrap_or_else(|| ctx.arena.any());
+
+    // A named function expression's own name (`const f = function named()
+    // {}`) is only usable for recursion inside its own body in real JS.
+    // That self-reference isn't registered here; a rare enough pattern
+    // that it's an accepted, undocumented-elsewhere gap rather than
+    // something worth the extra machinery right now.
+    if let Some(body) = &func.body {
+        let outer_return_type = ctx.current_return_type.replace(return_type);
+        // Unlike an arrow function (which lexically inherits `this` from
+        // its enclosing scope, so correctly leaves current_class_instance
+        // untouched — see infer_arrow_function_type), a plain `function`
+        // expression gets its own dynamic `this` binding in real JS,
+        // independent of any lexically enclosing class. Without clearing
+        // this, a function expression nested inside a class method would
+        // incorrectly resolve `this` to that class's instance type, e.g.:
+        //   class Counter {
+        //     count: number = 0;
+        //     scheduleIncrement() {
+        //       const cb = function () { this.count++; }; // `this` is
+        //       // NOT the Counter instance here at runtime — real tsc
+        //       // flags this; ts-rust silently accepted it before this
+        //       // fix, by leaking the enclosing class's instance type in.
+        //     }
+        //   }
+        // `None` here means Expression::ThisExpression resolves to Error
+        // instead (see its match arm above) — consistent with "we don't
+        // know this function's `this` type" rather than guessing wrong.
+        let outer_class_instance = ctx.current_class_instance.take();
+        for body_stmt in &body.statements {
+            check_statement(body_stmt, scoping, ctx);
+        }
+        ctx.current_class_instance = outer_class_instance;
+        ctx.current_return_type = outer_return_type;
+    }
+
+    ctx.arena.alloc(Type::Function(FunctionType { params: param_types, return_type, is_untyped: false }))
 }
 
 fn infer_object_expression_type(
@@ -281,8 +373,25 @@ fn check_callable(
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
     let Type::Function(function_type) = ctx.arena.get(callee_type).clone() else {
-        if !matches!(ctx.arena.get(callee_type), Type::Error) {
+        // Type::Any is deliberately excluded from the "not callable"
+        // error, alongside the existing Type::Error exclusion: calling a
+        // value of type `any` is always legal in real TS/JS — `any`
+        // erases all checking, including whether the thing is callable
+        // at all. (Mirrors infer_member_access_type's identical
+        // Any | Error exclusion a few lines above for the same reason.)
+        if !matches!(ctx.arena.get(callee_type), Type::Any | Type::Error) {
             ctx.error(not_callable_message, span);
+            return ctx.arena.error();
+        }
+        // Any/Error: the call itself can't be arity- or type-checked,
+        // but each argument is still worth checking on its own terms —
+        // `anyFn(1 + "x")` should still flag the `1 + "x"` mismatch
+        // inside the argument, same reasoning as the is_untyped branch
+        // below.
+        for arg in arguments {
+            if let Some(arg_expr) = arg.as_expression() {
+                infer_expression_type(arg_expr, scoping, ctx);
+            }
         }
         return ctx.arena.error();
     };

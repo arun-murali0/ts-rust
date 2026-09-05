@@ -4,7 +4,7 @@
 //! `x: Foo`) has to look itself up in the namespace, which can in turn
 //! call back in here to resolve an interface's property types.
 
-use oxc_ast::ast::{PropertyKey, TSSignature, TSType, TSTypeAnnotation, TSTypeName};
+use oxc_ast::ast::{FormalParameters, PropertyKey, TSSignature, TSType, TSTypeAnnotation, TSTypeName};
 
 use crate::arena::{TypeArena, TypeId};
 use crate::namespace::{Resolution, TypeNamespace};
@@ -43,6 +43,22 @@ pub fn resolve_ts_type(ty: &TSType, namespace: &mut TypeNamespace, arena: &mut T
 
         TSType::TSTypeLiteral(literal) => resolve_object_members(&literal.members, namespace, arena),
 
+        TSType::TSFunctionType(func_type) => {
+            // Uses the any-fallback resolver, not the strict
+            // resolve_function_params below: `(x) => number` written as
+            // a type (e.g. a callback parameter's own annotation) is
+            // exactly as legal in real TS as an untyped arrow-function
+            // *value* parameter, and should default to `any` the same
+            // way rather than making the whole annotation unresolvable.
+            // Previously this used resolve_function_params, which failed
+            // the entire TSFunctionType if even one of its own params
+            // lacked an annotation — inconsistent with how an actual
+            // arrow-function value handles the identical gap.
+            let params = resolve_params_with_any_fallback(&func_type.params, namespace, arena);
+            let return_type = resolve_type_annotation(&func_type.return_type, namespace, arena)?;
+            Some(arena.alloc(Type::Function(crate::types::FunctionType { params, return_type, is_untyped: false })))
+        }
+
         TSType::TSLiteralType(literal) => resolve_literal_type(&literal.literal, arena),
 
         TSType::TSTypeReference(reference) => {
@@ -75,18 +91,55 @@ fn resolve_literal_type(literal: &oxc_ast::ast::TSLiteral, arena: &mut TypeArena
 /// Resolves every parameter's type annotation, in order. Returns `None`
 /// (skip the whole function/method rather than guess) if even one
 /// parameter has no annotation, matching how declare.rs treats a plain
-/// function.
+/// function. Takes the parameter list directly, not a whole `&Function`,
+/// since a `TSFunctionType` (a function used as a *type*, e.g. the
+/// annotation `(x: number) => number`) has the same `FormalParameters`
+/// shape as a real function but isn't a `Function` node itself.
 pub fn resolve_function_params(
-    func: &oxc_ast::ast::Function,
+    params: &FormalParameters,
     namespace: &mut TypeNamespace,
     arena: &mut TypeArena,
 ) -> Option<Vec<TypeId>> {
-    let mut params = Vec::with_capacity(func.params.items.len());
-    for param in &func.params.items {
+    let mut resolved = Vec::with_capacity(params.items.len());
+    for param in &params.items {
         let annotation = param.type_annotation.as_ref()?;
-        params.push(resolve_type_annotation(annotation, namespace, arena)?);
+        resolved.push(resolve_type_annotation(annotation, namespace, arena)?);
     }
-    Some(params)
+    Some(resolved)
+}
+
+/// A parameter with no annotation gets `any` rather than being treated as
+/// a reason to reject the whole parameter list, unlike
+/// `resolve_function_params` above. That strict all-or-nothing behavior
+/// is right for a top-level `function` declaration or a class
+/// member (see `declare.rs` and `namespace.rs`'s resolve_class): nothing
+/// calls a function before pass 2 has fully hoisted it, so there's no
+/// harm in simply not registering a partially-annotated one. An arrow
+/// function or function expression, though — or a `TSFunctionType`
+/// written as an annotation, e.g. a callback parameter's own type
+/// `(x) => number` — IS the value (or governs the value) at the point
+/// it's written; callbacks like `arr.map(x => x + 1)` are exactly this
+/// shape and are extremely common with no annotation on `x` at all.
+/// Falling back to `any` per parameter is what lets the function still
+/// get a real `Type::Function` instead of degrading to the error
+/// sentinel for the single most common real-world use of a function
+/// value.
+pub fn resolve_params_with_any_fallback(
+    params: &FormalParameters,
+    namespace: &mut TypeNamespace,
+    arena: &mut TypeArena,
+) -> Vec<TypeId> {
+    params
+        .items
+        .iter()
+        .map(|param| {
+            param
+                .type_annotation
+                .as_ref()
+                .and_then(|annotation| resolve_type_annotation(annotation, namespace, arena))
+                .unwrap_or_else(|| arena.any())
+        })
+        .collect()
 }
 
 /// Builds an object type from a property list, sorting by name so

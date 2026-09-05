@@ -52,7 +52,7 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
                 let Some(name) = func.id.as_ref() else { continue };
                 let Some(symbol_id) = name.symbol_id.get() else { continue };
 
-                let params = resolve_function_params(func, &mut ctx.namespace, &mut ctx.arena);
+                let params = resolve_function_params(&func.params, &mut ctx.namespace, &mut ctx.arena);
                 let return_type =
                     func.return_type.as_ref().and_then(|rt| resolve_type_annotation(rt, &mut ctx.namespace, &mut ctx.arena));
 
@@ -92,7 +92,7 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
                 // bridge/expressions.rs's `infer_new_expression_type`.
                 let (constructor_params, constructor_is_untyped) = match find_constructor(class) {
                     None => (Vec::new(), false),
-                    Some(ctor) => match resolve_function_params(ctor, &mut ctx.namespace, &mut ctx.arena) {
+                    Some(ctor) => match resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena) {
                         Some(params) => (params, false),
                         None => (Vec::new(), true),
                     },

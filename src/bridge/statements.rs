@@ -39,7 +39,7 @@ pub fn check_top_level(program: &Program, scoping: &Scoping, ctx: &mut CheckCont
     }
 }
 
-fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut CheckContext<'_, '_>) {
+pub(super) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut CheckContext<'_, '_>) {
     match stmt {
         // A type alias or interface only ever contributes a type, and
         // that work happens once in declare.rs. There is nothing left to
@@ -255,7 +255,7 @@ fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut CheckContext<'
             // annotated.
             if let Some(ctor) = super::declare::find_constructor(class) {
                 if let Some(ctor_body) = &ctor.body {
-                    if let Some(params) = resolve_function_params(ctor, &mut ctx.namespace, &mut ctx.arena) {
+                    if let Some(params) = resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena) {
                         bind_params(&ctor.params.items, &params, ctx);
                         for body_stmt in &ctor_body.statements {
                             check_statement(body_stmt, scoping, ctx);
@@ -297,7 +297,7 @@ fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut CheckContext<'
     }
 }
 
-fn bind_params(
+pub(super) fn bind_params(
     params: &[oxc_ast::ast::FormalParameter<'_>],
     param_types: &[crate::arena::TypeId],
     ctx: &mut CheckContext<'_, '_>,

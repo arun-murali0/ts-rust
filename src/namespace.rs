@@ -166,7 +166,7 @@ impl<'a> TypeNamespace<'a> {
                     // over one loosely-typed method. `check_callable`
                     // (bridge/expressions.rs) is what actually reads
                     // this flag to skip arity checking on calls to it.
-                    let (params, is_untyped) = match resolve_function_params(&method.value, self, arena) {
+                    let (params, is_untyped) = match resolve_function_params(&method.value.params, self, arena) {
                         Some(params) => (params, false),
                         None => (Vec::new(), true),
                     };
