@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: Format, check, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run repository quality gates
+        run: ./scripts/ci.sh
+
+  security:
+    name: Dependency security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Audit dependencies
+        run: cargo audit
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject accidental large files
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad="$(find . -type f -not -path './.git/*' -size +10M -print)"
+          if [ -n "$bad" ]; then
+            echo "Large files found:"
+            echo "$bad"
+            exit 1
+          fi
+      - name: Check for common secret files
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in .env .env.local .env.production; do
+            if [ -e "$f" ]; then
+              echo "Forbidden secret file present: $f"
+              exit 1
+            fi
+          done
