@@ -25,7 +25,7 @@ crate-type = ["cdylib", "rlib"]
 oxc_allocator = "=0.144.0"
 oxc_ast = "=0.144.0"
 oxc_span = "=0.144.0"
-oxc_parser = "=0.144.0"
+oxc_parser = "=0.148.0"
 oxc_semantic = "=0.144.0"
 thiserror = "2"
 tracing = "0.1"
