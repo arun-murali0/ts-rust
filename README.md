@@ -4,7 +4,7 @@
 
 ## ⚠️ Experimental, not production-ready
 
-**ts-rust is experimental software. Do not use it as a production TypeScript compiler or as a drop-in replacement for `tsc`.**
+**ts-rust is experimental software. Do not use it as a production TypeScript compiler**
 
 The project is actively evolving. TypeScript compatibility is incomplete, generic inference is still under development, and the compatibility harness is an experimental comparison tool rather than a correctness proof.
 
