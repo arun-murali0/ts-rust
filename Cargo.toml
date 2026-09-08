@@ -1,0 +1,73 @@
+[package]
+name = "ts-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "A Rust-based TypeScript type checker built on Oxc."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/arun-murali0/ts-rust"
+readme = "README.md"
+keywords = ["typescript", "type-checker", "compiler", "oxc", "wasm"]
+categories = ["development-tools", "wasm"]
+exclude = [
+    "tests/",
+    ".harness/",
+    ".github/",
+    ".githooks/",
+    "scripts/harness.sh",
+]
+
+[lib]
+name = "ts_rust"
+crate-type = ["cdylib", "rlib"]
+
+[lints.clippy]
+collapsible_if = "allow"
+
+[dependencies]
+oxc_allocator = "=0.144.0"
+oxc_ast = "=0.144.0"
+oxc_span = "=0.144.0"
+oxc_parser = "=0.144.0"
+oxc_semantic = "=0.144.0"
+thiserror = "2"
+tracing = "0.1"
+wasm-bindgen = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+dhat = { version = "0.3", optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+criterion = "0.8.2"
+iai-callgrind = "0.16.1"
+
+[[bin]]
+name = "ts-rust"
+path = "bin/ts-rust.rs"
+
+[[bench]]
+name = "checker_benchmark"
+harness = false
+
+[[bench]]
+name = "checker_iai"
+harness = false
+
+[features]
+default = []
+wasm = [
+    "dep:wasm-bindgen",
+    "dep:serde",
+    "dep:serde-wasm-bindgen",
+    "dep:console_error_panic_hook",
+]
+dhat-heap = ["dep:dhat"]
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+
+[workspace]
+resolver = "2"
