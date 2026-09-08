@@ -21,6 +21,9 @@ exclude = [
 name = "ts_rust"
 crate-type = ["cdylib", "rlib"]
 
+[lints.clippy]
+collapsible_if = "allow"
+
 [dependencies]
 oxc_allocator = "=0.144.0"
 oxc_ast = "=0.144.0"
