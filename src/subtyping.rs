@@ -56,7 +56,8 @@ fn function_is_subtype(
         if let (Some(sub_param), Some(sup_param)) = (
             param_type_at(arena, &sub.params, position),
             param_type_at(arena, &sup.params, position),
-        ) && !is_subtype(arena, sup_param, sub_param) {
+        ) && !is_subtype(arena, sup_param, sub_param)
+        {
             return false;
         }
     }

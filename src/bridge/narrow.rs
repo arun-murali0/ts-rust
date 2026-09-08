@@ -255,11 +255,7 @@ fn narrow_truthy(arena: &mut TypeArena, id: TypeId, want_truthy: bool) -> TypeId
             } else {
                 !is_definitely_truthy(arena, id)
             };
-            if keep {
-                id
-            } else {
-                arena.never()
-            }
+            if keep { id } else { arena.never() }
         }
     }
 }

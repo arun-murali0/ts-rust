@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 use crate::line_index::LineIndex;
-use crate::{diagnostics::Diagnostic, TypeChecker as CoreChecker};
+use crate::{TypeChecker as CoreChecker, diagnostics::Diagnostic};
 
 #[cfg_attr(feature = "wasm", derive(serde::Serialize))]
 pub struct WasmDiagnostic {

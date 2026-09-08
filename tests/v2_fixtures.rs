@@ -101,9 +101,11 @@ fn function_arity_mismatches_are_caught_both_directions() {
         2,
         "expected exactly two diagnostics, got: {diagnostics:?}"
     );
-    assert!(diagnostics
-        .iter()
-        .all(|d| d.message.contains("Expected 2 argument")));
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.message.contains("Expected 2 argument"))
+    );
 }
 
 #[test]
@@ -169,7 +171,10 @@ fn circular_type_reference_does_not_infinite_loop() {
     let source = include_str!("fixtures/v2/circular_type_reference.ts");
     let diagnostics = check(source, "circular_type_reference.ts");
     assert!(
-        diagnostics.iter().any(|d| d.message.contains("could not be resolved") || d.message.contains("not yet checked")),
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("could not be resolved")
+                || d.message.contains("not yet checked")),
         "expected the circular reference to surface as an unresolved-annotation diagnostic, got: {diagnostics:?}"
     );
 }

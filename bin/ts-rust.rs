@@ -26,7 +26,10 @@ fn main() -> ExitCode {
     }
 
     let Some(project_root) = tsconfig_path.parent() else {
-        eprintln!("error: could not determine a project root from {}", tsconfig_path.display());
+        eprintln!(
+            "error: could not determine a project root from {}",
+            tsconfig_path.display()
+        );
         return ExitCode::from(2);
     };
 
@@ -35,7 +38,10 @@ fn main() -> ExitCode {
     source_files.sort();
 
     if source_files.is_empty() {
-        eprintln!("warning: no .ts/.tsx files found under {}", project_root.display());
+        eprintln!(
+            "warning: no .ts/.tsx files found under {}",
+            project_root.display()
+        );
         return ExitCode::SUCCESS;
     }
 
@@ -105,10 +111,14 @@ fn parse_project_arg(args: &[String]) -> Option<String> {
 fn collect_ts_files(dir: &Path, out: &mut Vec<PathBuf>) {
     const SKIPPED_DIRS: &[&str] = &["node_modules", "dist", "build", "out", "coverage", ".git"];
 
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
 
         if path.is_dir() {
             if name.starts_with('.') || SKIPPED_DIRS.contains(&name) {

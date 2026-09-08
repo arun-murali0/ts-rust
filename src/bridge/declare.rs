@@ -171,7 +171,7 @@ fn resolve_enum_members(
             TSEnumMemberName::String(s) => s.value.to_string(),
 
             TSEnumMemberName::ComputedString(_) | TSEnumMemberName::ComputedTemplateString(_) => {
-                return None
+                return None;
             }
         };
 

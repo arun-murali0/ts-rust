@@ -52,9 +52,11 @@ fn function_argument_mismatch_is_caught() {
         1,
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
-    assert!(diagnostics[0]
-        .message
-        .contains("not assignable to parameter"));
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("not assignable to parameter")
+    );
 }
 
 #[test]
