@@ -1,0 +1,28 @@
+target
+dhat-heap.json
+.harness/
+
+# wasm-pack build output (see pkg-template/ for the shipped package.json)
+/pkg/
+/pkg-*/
+
+# editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# local secrets — never commit these (CI's hygiene job also rejects them)
+.env
+.env.local
+.env.production
+
+# profiling / flamegraph output
+*.pdb
+perf.data
+perf.data.old
+flamegraph.svg

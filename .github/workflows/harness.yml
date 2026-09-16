@@ -1,0 +1,57 @@
+name: Compatibility Harness
+
+# Manual only: this is a measurement, not a pass/fail gate. It hits the
+# network (clones a fixture repo, installs its dependencies) and is
+# expected to report ts-rust diagnostics that disagree with tsc/tsgo, so
+# it must never run automatically on push/PR and must never fail the build.
+on:
+  workflow_dispatch:
+    inputs:
+      fixture_ref:
+        description: "Zustand git ref to benchmark against"
+        required: false
+        default: "main"
+      runs:
+        description: "Timed runs per compiler"
+        required: false
+        default: "3"
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    name: Run compatibility harness (manual)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Node (for tsc)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install tsc
+        run: npm install -g typescript
+
+      - name: Run harness
+        env:
+          ZUSTAND_REF: ${{ inputs.fixture_ref }}
+          HARNESS_RUNS: ${{ inputs.runs }}
+        run: |
+          chmod +x scripts/*.sh
+          ./scripts/harness.sh || true
+        # `|| true`: a nonzero exit from ts-rust finding diagnostics on the
+        # fixture is expected right now and must not fail this workflow.
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-results
+          path: .harness/results/
+          retention-days: 30
