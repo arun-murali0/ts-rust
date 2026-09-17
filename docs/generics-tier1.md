@@ -123,14 +123,51 @@ If a type parameter is never reached during argument inference, substitution fal
 back to `unknown` rather than `any`, so a failed inference cannot silently suppress
 further checking at the call site.
 
-## 7. What is still not covered
+## 7. Multi-candidate inference resolves through subtyping
+
+A second argument resolving to an already-bound type parameter no longer keeps only
+the first binding and rejects the rest. Checked against real TypeScript behavior
+first: `pair<T>(a: T, b: T)` called as `pair(1, "x")` is a genuine TypeScript error,
+not an inferred `T = number | string`, so this does not union candidates. Instead
+each new candidate is resolved against the existing binding through ordinary
+subtyping: if one is a supertype of the other, the binding widens to the supertype
+(`pick(dog, animal)` infers `T = Animal`); if neither is, the binding is left alone
+and the real mismatch is still caught by the ordinary per-argument assignability
+check, unchanged from before.
+
+## 8. Constraints (`T extends X`)
+
+A type parameter's own `extends` bound is now resolved and enforced for generic
+functions. `function f<T extends { length: number }>(value: T)` checks that
+whatever `T` is inferred as at each call site actually satisfies `{ length: number
+}`, using the same structural assignability check every other type relationship in
+this checker goes through.
+
+A constrained type parameter's own members are also usable inside the function's
+body: `value.length` type-checks against the constraint's shape, since a
+constraint is the one guarantee the checker actually has about what `T` could be.
+An *unconstrained* type parameter still has no members at all, matching before.
+
+Not implemented: defaults (`T = X`), and constraints on generic interfaces,
+aliases, or classes, since those declaration kinds are not generic at all yet (see
+Section 1).
+
+## 9. What is still not covered
 
 - Generic interfaces, type aliases, and classes (see Section 1).
 - Explicit call-site type arguments (`identity<string>(x)`).
-- Constraints (`T extends X`) and defaults (`T = X`).
-- Multiple candidates for one type parameter (`pair<T>(a: T, b: T)` called as
-  `pair(1, "x")` keeps only the first binding rather than unioning candidates).
-- A generics-specific recursion guard for self-referential generic types.
+- Defaults (`T = X`).
+- Instantiation memoization. Deliberately not built yet rather than built without a
+  case that exercises it: every generic function call already computes its own
+  bindings fresh from its own arguments, which is not wasteful repetition, and the
+  scenario that would actually justify a cache (the same `Box<number>` reference
+  appearing many times in one file) does not exist until generic interfaces and
+  classes do.
+- A generics-specific recursion guard for self-referential generic types. Checked
+  as unnecessary for now: the existing circular-resolution guard in namespace.rs
+  already prevents a self-referential generic declaration from resolving at all
+  (failing safely, not hanging), and substitution only ever walks an
+  already-resolved, therefore acyclic, type tree.
 - Construction-site inference (`new Box(5)` inferring `Box<number>`), which does not
   apply yet since generic classes are not supported at all.
 
