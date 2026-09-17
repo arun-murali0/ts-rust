@@ -102,3 +102,64 @@ fn type_param_does_not_leak_past_its_declaration() {
         "expected an 'unresolvable annotation' warning proving T did not leak, got: {diagnostics:?}"
     );
 }
+
+#[test]
+fn multi_candidate_widens_to_common_supertype() {
+    let source =
+        include_str!("fixtures/generics-tier1/multi_candidate_widens_to_common_supertype.ts");
+    let diagnostics = check(source, "multi_candidate_widens_to_common_supertype.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected T to widen to Base (Extended's supertype), got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn multi_candidate_with_no_common_type_is_still_caught() {
+    let source = include_str!(
+        "fixtures/generics-tier1/multi_candidate_with_no_common_type_is_still_caught.ts"
+    );
+    let diagnostics = check(
+        source,
+        "multi_candidate_with_no_common_type_is_still_caught.ts",
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "number and string share no common type; expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[0].message.contains("not assignable"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn constraint_is_satisfied_and_usable_in_body() {
+    let source =
+        include_str!("fixtures/generics-tier1/constraint_is_satisfied_and_usable_in_body.ts");
+    let diagnostics = check(source, "constraint_is_satisfied_and_usable_in_body.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "Box satisfies HasLength (extra fields are fine) and value.length should be \
+         usable inside logLength's own body via T's constraint, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn constraint_violation_is_caught() {
+    let source = include_str!("fixtures/generics-tier1/constraint_violation_is_caught.ts");
+    let diagnostics = check(source, "constraint_violation_is_caught.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "NoLength is missing 'length' and does not satisfy HasLength; expected exactly \
+         one diagnostic, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("does not satisfy the constraint"),
+        "got: {diagnostics:?}"
+    );
+}
