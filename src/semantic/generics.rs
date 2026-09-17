@@ -1,13 +1,21 @@
 use crate::arena::{TypeArena, TypeId};
+use crate::subtyping::is_subtype;
 use crate::types::{FunctionType, ObjectType, PropertyEntry, Type};
 
 // Structural inference: walks a generic function's declared parameter type
 // alongside a call's actual argument type in lockstep, recording a binding the
 // first time it reaches a GenericParameter leaf. Only argument-driven inference
-// is supported; there is no explicit call-site syntax like identity<string>(x),
-// and a type parameter bound once here is not revisited by a later argument that
-// resolves to the same parameter, so pair<T>(a: T, b: T) called as pair(1, "x")
-// keeps only the first binding rather than combining both into a union.
+// is supported; there is no explicit call-site syntax like identity<string>(x).
+//
+// A second argument resolving to an already-bound parameter does not start a
+// union (real TypeScript does not do this either: pair(1, "x") for
+// pair<T>(a: T, b: T) is a genuine type error in TypeScript, not T = number |
+// string). Instead the two candidates are resolved through ordinary subtyping:
+// if one is already a supertype of the other, the binding widens to cover both,
+// matching pick(new Dog(), new Animal()) inferring T = Animal. Two candidates
+// with no subtype relationship in either direction are left as the first
+// binding; the real mismatch is still caught afterward by the normal
+// per-argument assignability check in calls.rs, the same way it always was.
 pub(crate) fn infer_type_param_bindings(
     arena: &TypeArena,
     param_type: TypeId,
@@ -15,12 +23,21 @@ pub(crate) fn infer_type_param_bindings(
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
 ) {
     match arena.get(param_type) {
-        Type::GenericParameter(id, _) => {
-            if !bindings.iter().any(|(bound, _)| bound == id) {
-                // Widened so identity(5) infers number, matching what a
-                // TypeScript author expects from a bare generic call, rather
-                // than the checker binding T to the narrower literal type 5.
-                bindings.push((*id, crate::types::widen(arena, arg_type)));
+        Type::GenericParameter(id, _, _) => {
+            // Widened so identity(5) infers number, matching what a
+            // TypeScript author expects from a bare generic call, rather than
+            // the checker binding T to the narrower literal type 5.
+            let candidate = crate::types::widen(arena, arg_type);
+
+            match bindings.iter_mut().find(|(bound, _)| bound == id) {
+                None => bindings.push((*id, candidate)),
+                Some((_, existing)) => {
+                    if is_subtype(arena, candidate, *existing) {
+                        // The existing binding already covers this candidate.
+                    } else if is_subtype(arena, *existing, candidate) {
+                        *existing = candidate;
+                    }
+                }
             }
         }
         Type::Array(param_element) => {
@@ -79,7 +96,7 @@ pub(crate) fn substitute_type_params(
     }
 
     match arena.get(type_id).clone() {
-        Type::GenericParameter(id, _) => bindings
+        Type::GenericParameter(id, _, _) => bindings
             .iter()
             .find(|(bound, _)| *bound == id)
             .map(|(_, resolved)| *resolved)
@@ -130,7 +147,7 @@ pub(crate) fn substitute_type_params(
 
 pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
     match arena.get(type_id) {
-        Type::GenericParameter(_, _) => true,
+        Type::GenericParameter(_, _, _) => true,
         Type::Array(element) => contains_type_param(arena, *element),
         Type::Function(f) => {
             f.params
@@ -168,4 +185,46 @@ pub(crate) fn expected_param_type(
     } else {
         param.type_id
     })
+}
+
+// Walks type_id the same way contains_type_param does, but collects every
+// constrained GenericParameter it finds instead of just checking for their
+// presence. Used once per call, after inference finishes, to find which of a
+// generic function's own type parameters actually have an `extends` bound to
+// check the inferred argument against. A parameter found more than once (T
+// appearing in two parameter positions, for instance) is only recorded once,
+// since its constraint is the same wherever it appears. The name travels
+// alongside the constraint purely so the diagnostic that checks these can name
+// the offending type parameter; it plays no role in matching.
+pub(crate) fn collect_generic_param_constraints(
+    arena: &TypeArena,
+    type_id: TypeId,
+    constraints: &mut Vec<(crate::types::TypeParameterId, String, TypeId)>,
+) {
+    match arena.get(type_id) {
+        Type::GenericParameter(id, name, Some(constraint)) => {
+            if !constraints.iter().any(|(existing, _, _)| existing == id) {
+                constraints.push((*id, name.clone(), *constraint));
+            }
+        }
+        Type::GenericParameter(_, _, None) => {}
+        Type::Array(element) => collect_generic_param_constraints(arena, *element, constraints),
+        Type::Function(f) => {
+            for param in &f.params {
+                collect_generic_param_constraints(arena, param.type_id, constraints);
+            }
+            collect_generic_param_constraints(arena, f.return_type, constraints);
+        }
+        Type::Object(o) => {
+            for property in &o.properties {
+                collect_generic_param_constraints(arena, property.type_id, constraints);
+            }
+        }
+        Type::Union(members) => {
+            for &member in members {
+                collect_generic_param_constraints(arena, member, constraints);
+            }
+        }
+        _ => {}
+    }
 }
