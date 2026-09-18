@@ -103,36 +103,36 @@ fn type_param_does_not_leak_past_its_declaration() {
     );
 }
 
-// #[test]
-// fn multi_candidate_widens_to_common_supertype() {
-//     let source =
-//         include_str!("fixtures/generics-tier1/multi_candidate_widens_to_common_supertype.ts");
-//     let diagnostics = check(source, "multi_candidate_widens_to_common_supertype.ts");
-//     assert!(
-//         diagnostics.is_empty(),
-//         "expected T to widen to Base (Extended's supertype), got: {diagnostics:?}"
-//     );
-// }
+#[test]
+fn multi_candidate_widens_to_common_supertype() {
+    let source =
+        include_str!("fixtures/generics-tier1/multi_candidate_widens_to_common_supertype.ts");
+    let diagnostics = check(source, "multi_candidate_widens_to_common_supertype.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected T to widen to Base (Extended's supertype), got: {diagnostics:?}"
+    );
+}
 
-// #[test]
-// fn multi_candidate_with_no_common_type_is_still_caught() {
-//     let source = include_str!(
-//         "fixtures/generics-tier1/multi_candidate_with_no_common_type_is_still_caught.ts"
-//     );
-//     let diagnostics = check(
-//         source,
-//         "multi_candidate_with_no_common_type_is_still_caught.ts",
-//     );
-//     assert_eq!(
-//         diagnostics.len(),
-//         1,
-//         "number and string share no common type; expected exactly one diagnostic, got: {diagnostics:?}"
-//     );
-//     assert!(
-//         diagnostics[0].message.contains("not assignable"),
-//         "got: {diagnostics:?}"
-//     );
-// }
+#[test]
+fn multi_candidate_with_no_common_type_is_still_caught() {
+    let source = include_str!(
+        "fixtures/generics-tier1/multi_candidate_with_no_common_type_is_still_caught.ts"
+    );
+    let diagnostics = check(
+        source,
+        "multi_candidate_with_no_common_type_is_still_caught.ts",
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "number and string share no common type; expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[0].message.contains("not assignable"),
+        "got: {diagnostics:?}"
+    );
+}
 
 #[test]
 fn constraint_is_satisfied_and_usable_in_body() {
