@@ -126,10 +126,26 @@ impl<'a> TypeNamespace<'a> {
         for (index, param) in decl.params.iter().enumerate() {
             let name = param.name.name.to_string();
             let id = TypeParameterId::new(param.span().start, index as u32);
-            let type_id = *self
-                .type_param_cache
-                .entry(id)
-                .or_insert_with(|| arena.alloc(Type::GenericParameter(id, name.clone())));
+
+            // Resolved before touching the cache entry, not inside its
+            // or_insert_with closure: resolving a constraint needs a full &mut
+            // self (it can reference other named types), which would conflict
+            // with the field-level borrow entry() already holds on
+            // type_param_cache. Only resolved on a genuine cache miss, so a
+            // constraint referencing something expensive is still only resolved
+            // once per declaration, not once per push_type_params call.
+            let type_id = match self.type_param_cache.get(&id).copied() {
+                Some(cached) => cached,
+                None => {
+                    let constraint = param.constraint.as_ref().and_then(|c| {
+                        crate::type_annotation::resolve_ts_type(c, self, arena)
+                    });
+                    let type_id =
+                        arena.alloc(Type::GenericParameter(id, name.clone(), constraint));
+                    self.type_param_cache.insert(id, type_id);
+                    type_id
+                }
+            };
 
             saved.push((name.clone(), self.entries.remove(&name)));
             self.insert_resolved(&name, type_id);
