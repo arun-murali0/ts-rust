@@ -28,7 +28,11 @@ pub enum Type {
 
     Never,
 
-    GenericParameter(TypeParameterId, String),
+    // The Option is the parameter's own `extends` bound (`T extends { length:
+    // number }`), resolved once when the placeholder is first created and reused
+    // from the same TypeParameterId cache as everything else about this
+    // parameter. `None` means fully unconstrained.
+    GenericParameter(TypeParameterId, String, Option<TypeId>),
 }
 
 // Identifies a declared type parameter by where it is written in source, not by an
