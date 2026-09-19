@@ -329,7 +329,14 @@ fn parse_tsc_line(line: &str) -> Option<(u32, u32, bool, String)> {
     let row: u32 = row_str.trim().parse().ok()?;
     let col: u32 = col_str.trim().parse().ok()?;
 
-    let rest = line[close + 1..].trim_start().trim_start_matches(':').trim_start();
+    let rest = line[close + 1..]
+        .trim_start()
+        .trim_start_matches(':')
+        .trim_start();
+
+    // ---------need to check later--------//
+
+    #[allow(clippy::question_mark)] //gonna remove later
     let (kind, message) = if let Some(message) = rest.strip_prefix("error") {
         (true, message)
     } else if let Some(message) = rest.strip_prefix("warning") {
@@ -337,6 +344,8 @@ fn parse_tsc_line(line: &str) -> Option<(u32, u32, bool, String)> {
     } else {
         return None;
     };
+
+    // ---------need to check later--------//
 
     Some((row, col, kind, message.trim_start().to_owned()))
 }
