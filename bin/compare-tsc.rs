@@ -1,17 +1,17 @@
 //! Compares ts-rust's own diagnostics against a real `tsc` run, in-process.
 //!
 //! Unlike scripts/harness.sh and scripts/compare-local.sh, this binary never
-//! shells out to ts-rust as a subprocess — it calls `TypeChecker::check_source`
+//! shells out to ts-rust as a subprocess -- it calls `TypeChecker::check_source`
 //! directly, the same entry point bin/ts-rust.rs uses, and only shells out to
 //! `tsc` itself (there is no Rust API for that side of the comparison).
 //!
-//! Comparison is by (line, severity), not by message text. ts-rust's
+//! Pass/fail is decided by (line, severity), errors only. ts-rust's
 //! `Diagnostic` currently carries no TS#### error code and writes its own
 //! message text, so comparing message strings verbatim against tsc's wording
-//! would report near-constant false mismatches. Position + severity is the
-//! honest signal available today: did ts-rust flag an error where tsc did,
-//! and nowhere tsc didn't. Full messages are still printed on a mismatch, as
-//! context for a human, not as part of the pass/fail check.
+//! would report near-constant false mismatches. Warnings are excluded from
+//! both the pass/fail check and the table: every warning ts-rust currently
+//! emits is a "not yet checked" implementation-status marker (see
+//! bridge/statements/support.rs), which has no tsc equivalent at all.
 //!
 //! Fixtures live under tests/tsc-conformance/, a directory dedicated to this
 //! comparison. tests/fixtures/ is NOT used here: several of those fixtures
@@ -19,9 +19,24 @@
 //! a class with one unresolvable member being treated as wholly unsupported)
 //! and are expected to diverge from tsc, so mixing them in would produce
 //! constant, meaningless failures.
+//!
+//!
+//!
+//!
+//! =================================MY OWN REFERENCE==========================
+//! ===============after finishing module resolution it will test against   real world repo================
+//!
+//!
+//! IMPORTANT: this binary cannot yet point at a real multi-file project
+//! (e.g. zustand). ts-rust has no cross-file import/export resolution yet,
+//! so every file in a multi-file project would report spurious "cannot see
+//! this import" noise -- see the module resolution design work for why.
+//! Single-file conformance fixtures are the only meaningful input today.
 
 use std::{
+    collections::BTreeMap,
     env, fs,
+    io::IsTerminal,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
@@ -31,17 +46,66 @@ use ts_rust::{LineIndex, Severity, TypeChecker};
 const REFERENCE_FILE: &str = "tests/tsc-reference.txt";
 const CONFORMANCE_DIR: &str = "tests/tsc-conformance";
 const TSC_BIN_ENV: &str = "TSC_BIN";
+const NO_COLOR_ENV: &str = "NO_COLOR";
+
+// --- minimal hand-rolled ANSI styling, no crate for this one --------------
+
+struct Style {
+    enabled: bool,
+}
+
+impl Style {
+    fn detect() -> Self {
+        let enabled = env::var_os(NO_COLOR_ENV).is_none() && std::io::stdout().is_terminal();
+        Self { enabled }
+    }
+
+    fn paint(&self, code: &str, text: &str) -> String {
+        if self.enabled {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_owned()
+        }
+    }
+
+    fn bold(&self, text: &str) -> String {
+        self.paint("1", text)
+    }
+    fn dim(&self, text: &str) -> String {
+        self.paint("2", text)
+    }
+    fn green(&self, text: &str) -> String {
+        self.paint("32", text)
+    }
+    fn red(&self, text: &str) -> String {
+        self.paint("31", text)
+    }
+    fn yellow(&self, text: &str) -> String {
+        self.paint("33", text)
+    }
+    fn cyan(&self, text: &str) -> String {
+        self.paint("36", text)
+    }
+}
+
+// --- diagnostic model -------------------------------------------------------
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ComparablePosition {
     line: u32,
-    is_error: bool,
+}
+
+#[derive(Clone)]
+struct Entry {
+    line: u32,
+    column: u32,
+    code: Option<String>,
+    message: String,
 }
 
 struct SideDiagnostics {
     positions: Vec<ComparablePosition>,
-    // Kept only for human-readable output on a mismatch, never compared.
-    full_lines: Vec<String>,
+    entries: Vec<Entry>,
 }
 
 fn main() -> ExitCode {
@@ -60,6 +124,7 @@ fn run() -> Result<bool, String> {
         return Ok(true);
     };
 
+    let style = Style::detect();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let expected_version = read_reference_version(&root.join(REFERENCE_FILE))?;
     let tsc_bin = options.tsc_bin.clone();
@@ -81,7 +146,18 @@ fn run() -> Result<bool, String> {
     }
 
     let checker = TypeChecker::new();
-    let mut mismatches = 0usize;
+    let mut passed = 0usize;
+    let mut failed = 0usize;
+
+    println!(
+        "{}",
+        style.dim(&format!(
+            "comparing against tsc {expected_version}  ({} fixture{})",
+            cases.len(),
+            if cases.len() == 1 { "" } else { "s" }
+        ))
+    );
+    println!();
 
     for case in &cases {
         let source = fs::read_to_string(case)
@@ -90,43 +166,158 @@ fn run() -> Result<bool, String> {
 
         let ts_rust_side = ts_rust_diagnostics(&checker, &source, &file_name)?;
         let tsc_side = tsc_diagnostics(&tsc_bin, case)?;
-
         let relative = case.strip_prefix(root).unwrap_or(case);
-        if ts_rust_side.positions == tsc_side.positions {
-            println!("ok   {}", relative.display());
+        let ok = ts_rust_side.positions == tsc_side.positions;
+
+        if ok {
+            passed += 1;
         } else {
-            mismatches += 1;
-            println!("FAIL {}", relative.display());
-            print_side("ts-rust", &ts_rust_side);
-            print_side("tsc", &tsc_side);
+            failed += 1;
+        }
+
+        print_case(&style, relative, ok, &ts_rust_side, &tsc_side);
+        println!();
+    }
+
+    print_summary(&style, passed, failed, &expected_version);
+
+    Ok(failed == 0)
+}
+
+// --- rendering ---------------------------------------------------------
+
+const LINE_COL_WIDTH: usize = 6;
+const MSG_COL_WIDTH: usize = 42;
+
+fn print_case(
+    style: &Style,
+    relative: &Path,
+    ok: bool,
+    ts_rust_side: &SideDiagnostics,
+    tsc_side: &SideDiagnostics,
+) {
+    let title = relative.display().to_string();
+    let verdict = if ok {
+        style.green("MATCH")
+    } else {
+        style.red("DIFFER")
+    };
+    let rule = "─".repeat(LINE_COL_WIDTH + 2 * MSG_COL_WIDTH + 7);
+
+    println!("{}", style.dim(&rule));
+    println!("  {}  {}", style.bold(&title), verdict);
+    println!("{}", style.dim(&rule));
+
+    println!(
+        "  {:<width$}  {:<msg$}  {:<msg$}",
+        "line",
+        "ts-rust",
+        "tsc",
+        width = LINE_COL_WIDTH,
+        msg = MSG_COL_WIDTH,
+    );
+    println!(
+        "  {}  {}  {}",
+        "─".repeat(LINE_COL_WIDTH),
+        "─".repeat(MSG_COL_WIDTH),
+        "─".repeat(MSG_COL_WIDTH),
+    );
+
+    let mut by_line: BTreeMap<u32, (Vec<&Entry>, Vec<&Entry>)> = BTreeMap::new();
+    for entry in &ts_rust_side.entries {
+        by_line.entry(entry.line).or_default().0.push(entry);
+    }
+    for entry in &tsc_side.entries {
+        by_line.entry(entry.line).or_default().1.push(entry);
+    }
+
+    for (line, (ts_rust_entries, tsc_entries)) in &by_line {
+        let both_present = !ts_rust_entries.is_empty() && !tsc_entries.is_empty();
+        let rows = ts_rust_entries.len().max(tsc_entries.len()).max(1);
+
+        for row in 0..rows {
+            let left = ts_rust_entries
+                .get(row)
+                .map(|e| truncate(&e.message, MSG_COL_WIDTH))
+                .unwrap_or_else(|| style.dim("—"));
+            let right = tsc_entries
+                .get(row)
+                .map(|e| {
+                    let with_code = match &e.code {
+                        Some(code) if !code.is_empty() => format!("{code} {}", e.message),
+                        _ => e.message.clone(),
+                    };
+                    truncate(&with_code, MSG_COL_WIDTH)
+                })
+                .unwrap_or_else(|| style.dim("—"));
+
+            let line_label = if row == 0 {
+                format!("{line}")
+            } else {
+                String::new()
+            };
+            let colored_line = if both_present {
+                style.green(&line_label)
+            } else if !line_label.is_empty() {
+                style.yellow(&line_label)
+            } else {
+                line_label
+            };
+
+            println!(
+                "  {:<width$}  {:<msg$}  {:<msg$}",
+                colored_line,
+                left,
+                right,
+                width = LINE_COL_WIDTH,
+                msg = MSG_COL_WIDTH,
+            );
+        }
+
+        if !both_present {
+            let diagnosis = if tsc_entries.is_empty() {
+                "ts-rust flagged an error tsc did not -- likely a false positive, or a \
+                 check that's stricter than real TS semantics here"
+            } else {
+                "tsc flagged an error ts-rust did not -- likely a detection gap: this \
+                 construct may not be checked yet"
+            };
+            println!(
+                "  {}  {}",
+                " ".repeat(LINE_COL_WIDTH),
+                style.cyan(&format!("↳ {diagnosis}"))
+            );
         }
     }
+}
 
-    if mismatches == 0 {
+fn print_summary(style: &Style, passed: usize, failed: usize, expected_version: &str) {
+    let total = passed + failed;
+    if failed == 0 {
         println!(
-            "all {} fixture(s) agree with tsc {expected_version} on error position/severity",
-            cases.len()
+            "{} all {total} fixture(s) agree with tsc {expected_version} on error position/severity",
+            style.green("✓")
         );
-        Ok(true)
     } else {
-        eprintln!(
-            "{mismatches} of {} fixture(s) disagree with tsc {expected_version}",
-            cases.len()
+        println!(
+            "{} {failed} of {total} fixture(s) disagree with tsc {expected_version} ({passed} agree)",
+            style.red("✗")
         );
-        Ok(false)
     }
 }
 
-fn print_side(label: &str, side: &SideDiagnostics) {
-    if side.full_lines.is_empty() {
-        println!("  {label}: (no diagnostics)");
-        return;
-    }
-    println!("  {label}:");
-    for line in &side.full_lines {
-        println!("    {line}");
+fn truncate(text: &str, width: usize) -> String {
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= width {
+        collapsed
+    } else {
+        let mut out: String = collapsed.chars().take(width.saturating_sub(1)).collect();
+        out.push('…');
+        out
     }
 }
+
+// --- options / setup -----------------------------------------------------
 
 struct Options {
     tsc_bin: String,
@@ -176,13 +367,15 @@ fn print_usage() {
         "Usage: cargo run --bin compare-tsc -- [--case <fixture>] [--tsc <command>]\n\
          \n\
          Compares ts-rust's diagnostics against tsc for every fixture under\n\
-         {CONFORMANCE_DIR}/, by (line, severity) only -- see the module doc\n\
-         comment in bin/compare-tsc.rs for why message text is not compared.\n\
+         {CONFORMANCE_DIR}/, by (line, severity) only, errors only -- see the\n\
+         module doc comment in bin/compare-tsc.rs for why.\n\
          \n\
          The installed tsc must report the exact version pinned in\n\
          {REFERENCE_FILE}; a mismatch is a hard error, not a warning.\n\
          \n\
-         {TSC_BIN_ENV} may be used instead of --tsc."
+         {TSC_BIN_ENV} may be used instead of --tsc.\n\
+         {NO_COLOR_ENV}=1 disables colored output; color is also auto-disabled\n\
+         when stdout is not a terminal (e.g. piped to a file or CI log)."
     );
 }
 
@@ -234,6 +427,8 @@ fn case_matches(path: &Path, requested: &str) -> bool {
     })
 }
 
+// --- collecting each side's diagnostics -----------------------------------
+
 fn ts_rust_diagnostics(
     checker: &TypeChecker,
     source: &str,
@@ -244,32 +439,26 @@ fn ts_rust_diagnostics(
         .map_err(|error| format!("{file_name}: ts-rust failed to parse: {error}"))?;
     let line_index = LineIndex::new(source);
 
-    let mut positions = Vec::with_capacity(result.diagnostics.len());
-    let mut full_lines = Vec::with_capacity(result.diagnostics.len());
+    let mut positions = Vec::new();
+    let mut entries = Vec::new();
     for diagnostic in &result.diagnostics {
-        let (line, column) = line_index.line_col_utf8(diagnostic.start, source);
-        let is_error = matches!(diagnostic.severity, Severity::Error);
-        full_lines.push(format!(
-            "{line}:{column} {} {}",
-            if is_error { "error" } else { "warning" },
-            diagnostic.message
-        ));
-        if !is_error {
-            // Warnings in ts-rust are currently all "not yet checked" markers
-            // (see bridge/statements/support.rs and friends) -- implementation
-            // status, not a type-checking verdict. tsc has no equivalent
-            // concept, so including them here would compare against nothing
-            // and report spurious disagreement on every unimplemented
-            // construct. Still printed above for human visibility on FAIL.
+        if !matches!(diagnostic.severity, Severity::Error) {
+            // Warnings are all "not yet checked" implementation-status
+            // markers with no tsc equivalent -- see the module doc comment.
             continue;
         }
-        positions.push(ComparablePosition { line, is_error });
+        let (line, column) = line_index.line_col_utf8(diagnostic.start, source);
+        positions.push(ComparablePosition { line });
+        entries.push(Entry {
+            line,
+            column,
+            code: None,
+            message: diagnostic.message.clone(),
+        });
     }
     positions.sort();
-    Ok(SideDiagnostics {
-        positions,
-        full_lines,
-    })
+    entries.sort_by_key(|entry| entry.line);
+    Ok(SideDiagnostics { positions, entries })
 }
 
 fn tsc_diagnostics(tsc_bin: &str, case: &Path) -> Result<SideDiagnostics, String> {
@@ -293,36 +482,33 @@ fn tsc_diagnostics(tsc_bin: &str, case: &Path) -> Result<SideDiagnostics, String
     let text = format!("{stdout}{stderr}");
 
     let mut positions = Vec::new();
-    let mut full_lines = Vec::new();
+    let mut entries = Vec::new();
     for line in text.lines() {
-        let Some(parsed) = parse_tsc_line(line) else {
+        let Some((row, col, is_error, code, message)) = parse_tsc_line(line) else {
             continue;
         };
-        let (row, col, is_error, message) = parsed;
-        full_lines.push(format!(
-            "{row}:{col} {} {message}",
-            if is_error { "error" } else { "warning" }
-        ));
         if !is_error {
             continue;
         }
-        positions.push(ComparablePosition {
+        positions.push(ComparablePosition { line: row });
+        entries.push(Entry {
             line: row,
-            is_error,
+            column: col,
+            code: Some(code),
+            message,
         });
     }
     positions.sort();
-    Ok(SideDiagnostics {
-        positions,
-        full_lines,
-    })
+    entries.sort_by_key(|entry| entry.line);
+    Ok(SideDiagnostics { positions, entries })
 }
 
 // Parses one line of `tsc --pretty false` output, shaped like:
 //   file.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
-// Returns (line, column, is_error, message) on a match, without a regex
-// dependency -- tsc's format is stable and simple enough for plain string ops.
-fn parse_tsc_line(line: &str) -> Option<(u32, u32, bool, String)> {
+// Returns (line, column, is_error, code, message) on a match, without a
+// regex dependency -- tsc's format is stable and simple enough for plain
+// string ops.
+fn parse_tsc_line(line: &str) -> Option<(u32, u32, bool, String, String)> {
     let open = line.find('(')?;
     let close = line[open..].find(')')? + open;
     let (row_str, col_str) = line[open + 1..close].split_once(',')?;
@@ -333,21 +519,22 @@ fn parse_tsc_line(line: &str) -> Option<(u32, u32, bool, String)> {
         .trim_start()
         .trim_start_matches(':')
         .trim_start();
-
-    // ---------need to check later--------//
-
-    #[allow(clippy::question_mark)] //gonna remove later
-    let (kind, message) = if let Some(message) = rest.strip_prefix("error") {
-        (true, message)
-    } else if let Some(message) = rest.strip_prefix("warning") {
-        (false, message)
+    let (is_error, after_kind) = if let Some(rest) = rest.strip_prefix("error") {
+        (true, rest)
     } else {
-        return None;
+        let rest = rest.strip_prefix("warning")?;
+        (false, rest)
     };
 
-    // ---------need to check later--------//
+    let after_kind = after_kind.trim_start();
+    let (code, message) = match after_kind.split_once(':') {
+        Some((code, message)) if code.starts_with("TS") => {
+            (code.trim().to_owned(), message.trim_start().to_owned())
+        }
+        _ => (String::new(), after_kind.to_owned()),
+    };
 
-    Some((row, col, kind, message.trim_start().to_owned()))
+    Some((row, col, is_error, code, message))
 }
 
 fn run_shell(command: &str, args: &[&str]) -> std::io::Result<std::process::Output> {
