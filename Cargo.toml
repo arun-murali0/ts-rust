@@ -25,11 +25,11 @@ crate-type = ["cdylib", "rlib"]
 collapsible_if = "allow"
 
 [dependencies]
-oxc_allocator = "=0.144.0"
-oxc_ast = "=0.144.0"
-oxc_span = "=0.144.0"
-oxc_parser = "=0.144.0"
-oxc_semantic = "=0.144.0"
+oxc_allocator = "=0.150.0"
+oxc_ast = "=0.150.0"
+oxc_span = "=0.150.0"
+oxc_parser = "=0.150.0"
+oxc_semantic = "=0.150.0"
 thiserror = "2"
 tracing = "0.1"
 wasm-bindgen = { version = "0.2", optional = true }
