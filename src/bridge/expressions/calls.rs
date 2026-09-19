@@ -194,9 +194,7 @@ fn check_callable(
         };
         if !ctx.semantic().is_assignable(*bound, *constraint) {
             ctx.error(
-                format!(
-                    "Type does not satisfy the constraint of type parameter '{name}'."
-                ),
+                format!("Type does not satisfy the constraint of type parameter '{name}'."),
                 span,
             );
         }

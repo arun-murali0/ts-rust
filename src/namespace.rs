@@ -137,11 +137,11 @@ impl<'a> TypeNamespace<'a> {
             let type_id = match self.type_param_cache.get(&id).copied() {
                 Some(cached) => cached,
                 None => {
-                    let constraint = param.constraint.as_ref().and_then(|c| {
-                        crate::type_annotation::resolve_ts_type(c, self, arena)
-                    });
-                    let type_id =
-                        arena.alloc(Type::GenericParameter(id, name.clone(), constraint));
+                    let constraint = param
+                        .constraint
+                        .as_ref()
+                        .and_then(|c| crate::type_annotation::resolve_ts_type(c, self, arena));
+                    let type_id = arena.alloc(Type::GenericParameter(id, name.clone(), constraint));
                     self.type_param_cache.insert(id, type_id);
                     type_id
                 }
