@@ -47,6 +47,10 @@ iai-callgrind = "0.16.1"
 name = "ts-rust"
 path = "bin/ts-rust.rs"
 
+[[bin]]
+name = "compare-tsc"
+path = "bin/compare-tsc.rs"
+
 [[bench]]
 name = "checker_benchmark"
 harness = false
