@@ -1,11 +1,21 @@
 name: CI
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Safety net independent of push/PR frequency — fires ~3x/day on main only.
+    # Scheduled workflows never run on forks, so this is effectively owner-only.
+    - cron: "0 2,10,18 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
