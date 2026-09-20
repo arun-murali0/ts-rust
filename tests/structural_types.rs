@@ -18,7 +18,7 @@ fn check(fixture_source: &str, file_name: &str) -> Vec<ts_rust::Diagnostic> {
 }
 
 #[test]
-fn extra_property_on_object_literal_is_allowed() {
+fn extra_property_on_a_non_fresh_object_is_allowed() {
     let source = include_str!("fixtures/structural-types/width_subtyping_extra_prop_ok.ts");
     let diagnostics = check(source, "width_subtyping_extra_prop_ok.ts");
     assert!(
@@ -83,13 +83,56 @@ fn interfaces_can_reference_each_other_regardless_of_declaration_order() {
 }
 
 #[test]
-fn excess_property_on_a_fresh_literal_is_a_known_gap_not_a_silent_pass() {
+fn excess_property_on_a_fresh_literal_is_an_error() {
     let source = include_str!("fixtures/structural-types/excess_property_literal.ts");
     let diagnostics = check(source, "excess_property_literal.ts");
-    assert!(
-        diagnostics.is_empty(),
-        "known-gap fixture behavior changed, got: {diagnostics:?}"
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
     );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("Object literal may only specify known properties"),
+        "got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[0].message.contains("'b'"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn excess_property_in_a_nested_literal_is_an_error() {
+    let source = include_str!("fixtures/structural-types/nested_excess_property_literal.ts");
+    let diagnostics = check(source, "nested_excess_property_literal.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0].message.contains("'extra'"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn excess_property_is_caught_in_return_and_argument_positions() {
+    let source =
+        include_str!("fixtures/structural-types/excess_property_in_return_and_argument.ts");
+    let diagnostics = check(source, "excess_property_in_return_and_argument.ts");
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "expected one diagnostic for the return and one for the argument, got: {diagnostics:?}"
+    );
+    assert!(diagnostics.iter().all(|d| d.severity == Severity::Error));
+    assert!(diagnostics.iter().any(|d| d.message.contains("'y'")));
+    assert!(diagnostics.iter().any(|d| d.message.contains("'z'")));
 }
 
 #[test]
@@ -181,7 +224,7 @@ fn circular_type_reference_does_not_infinite_loop() {
 }
 
 #[test]
-fn nested_object_subtyping() {
+fn nested_object_subtyping_allows_extra_properties_on_non_fresh_objects() {
     let source = include_str!("fixtures/structural-types/nested_object_subtyping.ts");
     let diagnostics = check(source, "nested_object_subtyping.ts");
     assert!(
@@ -210,6 +253,11 @@ fn unresolvable_type_annotation_is_reported_not_silently_swallowed() {
         1,
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
-    assert_eq!(diagnostics[0].severity, Severity::Warning);
-    assert!(diagnostics[0].message.contains("could not be resolved"));
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("Cannot find name 'DoesNotExist'"),
+        "got: {diagnostics:?}"
+    );
 }

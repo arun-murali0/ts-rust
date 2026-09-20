@@ -1,4 +1,4 @@
-use ts_rust::TypeChecker;
+use ts_rust::{Severity, TypeChecker};
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -46,9 +46,17 @@ fn untyped_arrow_param_defaults_to_any_instead_of_blocking_the_function() {
         "fixtures/expression-program-checking/arrow_function_untyped_param_defaults_to_any.ts"
     );
     let diagnostics = check(source, "arrow_function_untyped_param_defaults_to_any.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected only the implicit-any error and nothing blocked downstream, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
     assert!(
-        diagnostics.is_empty(),
-        "expected no false positives, got: {diagnostics:?}"
+        diagnostics[0]
+            .message
+            .contains("Parameter 'x' implicitly has an 'any' type"),
+        "got: {diagnostics:?}"
     );
 }
 
@@ -127,12 +135,22 @@ fn callback_type_annotation_with_untyped_param_still_registers() {
 
     assert_eq!(
         diagnostics.len(),
-        1,
-        "expected exactly one diagnostic (apply's body should now actually be checked), got: {diagnostics:?}"
+        2,
+        "expected the body mismatch plus the implicit-any error on the callback type, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("not assignable"),
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not assignable")),
         "expected the `const result: string = fn(value)` mismatch inside apply's body, got: {diagnostics:?}"
+    );
+    let implicit_any = diagnostics
+        .iter()
+        .find(|d| d.message.contains("implicitly has an 'any' type"));
+    assert_eq!(
+        implicit_any.map(|diagnostic| diagnostic.severity),
+        Some(Severity::Error),
+        "expected an implicit-any error for the callback's `x`, got: {diagnostics:?}"
     );
 }
 

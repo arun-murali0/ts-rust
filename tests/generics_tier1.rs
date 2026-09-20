@@ -1,4 +1,4 @@
-use ts_rust::TypeChecker;
+use ts_rust::{Severity, TypeChecker};
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -97,9 +97,10 @@ fn type_param_does_not_leak_past_its_declaration() {
         1,
         "expected exactly one diagnostic either way, got: {diagnostics:?}"
     );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
     assert!(
-        diagnostics[0].message.contains("could not be resolved"),
-        "expected an 'unresolvable annotation' warning proving T did not leak, got: {diagnostics:?}"
+        diagnostics[0].message.contains("Cannot find name 'T'"),
+        "expected a 'Cannot find name' error proving T did not leak, got: {diagnostics:?}"
     );
 }
 

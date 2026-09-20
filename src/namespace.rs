@@ -2,7 +2,7 @@ use oxc_ast::ast::{
     Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, TSInterfaceDeclaration,
     TSType,
 };
-use oxc_span::GetSpan;
+use oxc_span::{GetSpan, Span};
 
 use crate::arena::{TypeArena, TypeId};
 use crate::fxhash::FxHashMap;
@@ -46,6 +46,13 @@ pub struct TypeNamespace<'a> {
     // agree on the exact same GenericParameter node for T. Without this, a T[]
     // annotation inside the body would never match the parameter T came from.
     type_param_cache: FxHashMap<TypeParameterId, TypeId>,
+
+    // Untyped parameters found inside function *type annotations* such as
+    // `(x) => number`. Type resolution has no access to the diagnostics list, so
+    // they are collected here, deduplicated by source position (the same
+    // annotation can be resolved more than once), and drained into real
+    // diagnostics once checking finishes. See bridge::check_program.
+    implicit_any_params: Vec<(String, Span)>,
 }
 
 pub enum Resolution {
@@ -60,7 +67,36 @@ impl<'a> TypeNamespace<'a> {
         Self {
             entries: FxHashMap::default(),
             type_param_cache: FxHashMap::default(),
+            implicit_any_params: Vec::new(),
         }
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.entries.contains_key(name)
+    }
+
+    pub fn note_implicit_any_params(&mut self, params: &oxc_ast::ast::FormalParameters) {
+        for param in &params.items {
+            if param.type_annotation.is_some() {
+                continue;
+            }
+            let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &param.pattern else {
+                continue;
+            };
+            if self
+                .implicit_any_params
+                .iter()
+                .any(|(_, span)| span.start == id.span.start)
+            {
+                continue;
+            }
+            self.implicit_any_params
+                .push((id.name.to_string(), id.span));
+        }
+    }
+
+    pub fn take_implicit_any_params(&mut self) -> Vec<(String, Span)> {
+        std::mem::take(&mut self.implicit_any_params)
     }
 
     pub fn insert_type_alias(&mut self, name: &str, body: &'a TSType<'a>) {

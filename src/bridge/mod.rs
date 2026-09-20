@@ -35,6 +35,13 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
     declare::declare_top_level(&program, &mut ctx);
     statements::check_top_level(&program, &scoping, &mut ctx);
 
+    for (name, span) in ctx.namespace.take_implicit_any_params() {
+        ctx.error(
+            crate::diagnostic_messages::messages::parameter_implicitly_any(&name),
+            span,
+        );
+    }
+
     tracing::info!(diagnostic_count = ctx.diagnostics.len(), "check complete");
     Ok(ctx.diagnostics)
 }

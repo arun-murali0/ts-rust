@@ -10,11 +10,13 @@ use super::context::CheckContext;
 mod binary;
 mod calls;
 mod core;
+mod excess;
 mod functions;
 mod logical;
 mod members;
 mod objects;
 
+pub(super) use excess::check_excess_properties;
 pub(super) use members::infer_member_access_type;
 
 pub(super) use crate::semantic::{

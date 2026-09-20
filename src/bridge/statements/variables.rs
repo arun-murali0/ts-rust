@@ -1,4 +1,4 @@
-use oxc_ast::ast::{BindingPattern, VariableDeclarationKind, VariableDeclarator};
+use oxc_ast::ast::{BindingPattern, Expression, VariableDeclarationKind, VariableDeclarator};
 use oxc_semantic::Scoping;
 use oxc_span::GetSpan;
 
@@ -6,8 +6,9 @@ use crate::arena::TypeId;
 use crate::type_annotation::resolve_type_annotation;
 
 use super::super::context::CheckContext;
-use super::super::expressions::infer_expression_type;
+use super::super::expressions::{check_excess_properties, infer_expression_type};
 use super::bind_pattern;
+use super::support::{find_unresolved_type_name, report_implicit_any_params};
 
 /// What we know about a declarator's declared type after attempting to
 /// resolve its type annotation (if any). Kept separate from the inferred
@@ -60,6 +61,22 @@ fn check_identifier_declarator(
         }
     };
 
+    // With no annotation on the variable there is no contextual type for the
+    // function on the right, so any untyped parameter of it is a genuine
+    // implicit any. Reported before the body is inferred so the diagnostics come
+    // out in source order.
+    if declarator.type_annotation.is_none() {
+        match &declarator.init {
+            Some(Expression::ArrowFunctionExpression(arrow)) => {
+                report_implicit_any_params(&arrow.params, ctx);
+            }
+            Some(Expression::FunctionExpression(func)) => {
+                report_implicit_any_params(&func.params, ctx);
+            }
+            _ => {}
+        }
+    }
+
     let inferred_type = declarator
         .init
         .as_ref()
@@ -67,10 +84,19 @@ fn check_identifier_declarator(
 
     match (annotation_outcome, inferred_type) {
         (AnnotationOutcome::Unresolvable, _) => {
-            ctx.warning(
-                crate::diagnostic_messages::messages::unresolvable_type_annotation(&id.name),
-                declarator.span(),
-            );
+            let unknown_name = declarator.type_annotation.as_ref().and_then(|annotation| {
+                find_unresolved_type_name(&annotation.type_annotation, scoping, &ctx.namespace)
+            });
+            match unknown_name {
+                Some((name, span)) => ctx.error(
+                    crate::diagnostic_messages::messages::unresolved_identifier(&name),
+                    span,
+                ),
+                None => ctx.warning(
+                    crate::diagnostic_messages::messages::unresolvable_type_annotation(&id.name),
+                    declarator.span(),
+                ),
+            }
         }
 
         (AnnotationOutcome::Resolved(declared), Some(actual)) => {
@@ -82,6 +108,8 @@ fn check_identifier_declarator(
                         .as_ref()
                         .map_or(declarator.span(), GetSpan::span),
                 );
+            } else if let Some(init) = &declarator.init {
+                check_excess_properties(init, declared, ctx);
             }
 
             if let Some(symbol_id) = id.symbol_id.get() {
@@ -141,17 +169,29 @@ fn check_destructured_declarator(
 
     let source_type = match (annotation_outcome, inferred_type) {
         (AnnotationOutcome::Unresolvable, _) => {
-            ctx.warning(
-                crate::diagnostic_messages::messages::unresolvable_destructuring_type_annotation(),
-                declarator.span(),
-            );
+            let unknown_name = declarator.type_annotation.as_ref().and_then(|annotation| {
+                find_unresolved_type_name(&annotation.type_annotation, scoping, &ctx.namespace)
+            });
+            match unknown_name {
+                Some((name, span)) => ctx.error(
+                    crate::diagnostic_messages::messages::unresolved_identifier(&name),
+                    span,
+                ),
+                None => ctx.warning(
+                    crate::diagnostic_messages::messages::unresolvable_destructuring_type_annotation(),
+                    declarator.span(),
+                ),
+            }
             return;
         }
         (AnnotationOutcome::Resolved(declared), Some(actual)) => {
             if !ctx.semantic().is_assignable(actual, declared) {
                 ctx.error(
                     crate::diagnostic_messages::messages::destructuring_pattern_type_mismatch(),
-                    declarator.init.as_ref().map_or(declarator.span(), GetSpan::span),
+                    declarator
+                        .init
+                        .as_ref()
+                        .map_or(declarator.span(), GetSpan::span),
                 );
             }
             declared

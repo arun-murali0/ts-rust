@@ -47,6 +47,7 @@ pub fn resolve_ts_type(
         }
 
         TSType::TSFunctionType(func_type) => {
+            namespace.note_implicit_any_params(&func_type.params);
             let params = resolve_params_with_any_fallback(&func_type.params, namespace, arena);
             let return_type = resolve_type_annotation(&func_type.return_type, namespace, arena)?;
             Some(arena.alloc(Type::Function(crate::types::FunctionType {

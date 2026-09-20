@@ -3,7 +3,7 @@ use oxc_semantic::Scoping;
 use oxc_span::GetSpan;
 
 use super::context::CheckContext;
-use super::expressions::infer_expression_type;
+use super::expressions::{check_excess_properties, infer_expression_type};
 
 mod classes;
 mod control_flow;
@@ -40,13 +40,15 @@ pub(super) fn check_return_statement(
         None => ctx.arena.undefined(),
     };
 
-    if let Some(expected) = ctx.current_return_type
-        && !ctx.semantic().is_assignable(actual, expected)
-    {
-        ctx.error(
-            crate::diagnostic_messages::messages::return_type_mismatch(),
-            ret.span(),
-        );
+    if let Some(expected) = ctx.current_return_type {
+        if !ctx.semantic().is_assignable(actual, expected) {
+            ctx.error(
+                crate::diagnostic_messages::messages::return_type_mismatch(),
+                ret.span(),
+            );
+        } else if let Some(argument) = &ret.argument {
+            check_excess_properties(argument, expected, ctx);
+        }
     }
 }
 

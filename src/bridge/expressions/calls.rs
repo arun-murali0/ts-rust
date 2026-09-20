@@ -8,8 +8,9 @@ use crate::types::Type;
 use super::super::context::CheckContext;
 use super::infer_expression_type;
 use super::{
-    collect_generic_param_constraints, expected_param_type, infer_member_access_type,
-    infer_type_param_bindings, resolve_identifier_type, substitute_type_params,
+    check_excess_properties, collect_generic_param_constraints, expected_param_type,
+    infer_member_access_type, infer_type_param_bindings, resolve_identifier_type,
+    substitute_type_params,
 };
 
 pub(super) fn infer_call_expression_type(
@@ -219,6 +220,8 @@ fn check_callable(
                 crate::diagnostic_messages::messages::argument_not_assignable(),
                 arg_expr.span(),
             );
+        } else {
+            check_excess_properties(arg_expr, expected, ctx);
         }
     }
 

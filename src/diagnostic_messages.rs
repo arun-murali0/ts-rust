@@ -79,6 +79,22 @@ pub mod messages {
         )
     }
 
+    pub fn excess_property(name: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::ExcessProperty,
+            format!(
+                "Object literal may only specify known properties, and '{name}' does not exist in the target type."
+            ),
+        )
+    }
+
+    pub fn parameter_implicitly_any(name: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::ImplicitAnyParameter,
+            format!("Parameter '{name}' implicitly has an 'any' type."),
+        )
+    }
+
     pub fn not_callable(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::NotCallable,

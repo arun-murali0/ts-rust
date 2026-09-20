@@ -25,6 +25,7 @@ pub enum DiagnosticCode {
     DestructuringPatternTypeMismatch,
     StaticFieldInitializerMismatch,
     TypeArgumentConstraintViolation,
+    ExcessProperty,
 
     // 1100s -- calls
     NotCallable,
@@ -36,6 +37,9 @@ pub enum DiagnosticCode {
 
     // 1300s -- destructuring
     ArrayDestructuringRequiresArray,
+
+    // 1400s -- implicit any
+    ImplicitAnyParameter,
 
     // 9000s -- not yet implemented (all currently emitted as warnings)
     UnimplementedCallExpressionKind,
@@ -64,6 +68,7 @@ impl DiagnosticCode {
             DestructuringPatternTypeMismatch => "TSR1005",
             StaticFieldInitializerMismatch => "TSR1006",
             TypeArgumentConstraintViolation => "TSR1007",
+            ExcessProperty => "TSR1008",
 
             NotCallable => "TSR1101",
             ArgumentArityMismatch => "TSR1102",
@@ -72,6 +77,8 @@ impl DiagnosticCode {
             PropertyDoesNotExist => "TSR1202",
 
             ArrayDestructuringRequiresArray => "TSR1301",
+
+            ImplicitAnyParameter => "TSR1401",
 
             UnimplementedCallExpressionKind => "TSR9001",
             UnimplementedNewExpressionTarget => "TSR9002",

@@ -1,4 +1,9 @@
-interface Inner { value: number }
-interface Outer { inner: Inner }
+interface Inner {
+  value: number;
+}
+interface Outer {
+  inner: Inner;
+}
 
-const obj: Outer = { inner: { value: 42, extra: "ignored" } }
+const inner = { value: 42, extra: "ignored" };
+const obj: Outer = { inner: inner };

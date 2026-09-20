@@ -89,11 +89,25 @@ fn untyped_constructor_param_skips_arity_check_instead_of_false_flagging() {
     let diagnostics = check(source, "untyped_constructor_param_skips_arity_check.ts");
     assert_eq!(
         diagnostics.len(),
-        1,
-        "expected exactly one diagnostic, got: {diagnostics:?}"
+        3,
+        "expected two implicit-any errors (x and y) and one skipped-arity warning, got: {diagnostics:?}"
     );
-    assert_eq!(diagnostics[0].severity, Severity::Warning);
-    assert!(diagnostics[0].message.contains("untyped parameter"));
+
+    let implicit_any: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("implicitly has an 'any' type"))
+        .collect();
+    assert_eq!(implicit_any.len(), 2, "got: {diagnostics:?}");
+    assert!(implicit_any.iter().all(|d| d.severity == Severity::Error));
+
+    let skipped_arity = diagnostics
+        .iter()
+        .find(|d| d.message.contains("untyped parameter"));
+    assert_eq!(
+        skipped_arity.map(|diagnostic| diagnostic.severity),
+        Some(Severity::Warning),
+        "got: {diagnostics:?}"
+    );
 }
 
 #[test]
@@ -107,11 +121,24 @@ fn one_unresolvable_member_makes_the_whole_class_unsupported() {
     );
     assert_eq!(
         diagnostics.len(),
-        1,
-        "expected exactly one diagnostic, got: {diagnostics:?}"
+        2,
+        "expected the implicit-any error and the unsupported-class warning, got: {diagnostics:?}"
     );
-    assert_eq!(diagnostics[0].severity, Severity::Warning);
-    assert!(diagnostics[0].message.contains("Point"));
+
+    let implicit_any = diagnostics
+        .iter()
+        .find(|d| d.message.contains("implicitly has an 'any' type"));
+    assert_eq!(
+        implicit_any.map(|diagnostic| diagnostic.severity),
+        Some(Severity::Error),
+        "got: {diagnostics:?}"
+    );
+
+    let unsupported = diagnostics.iter().find(|d| d.severity == Severity::Warning);
+    assert!(
+        unsupported.is_some_and(|d| d.message.contains("Point")),
+        "got: {diagnostics:?}"
+    );
 }
 
 #[test]
@@ -126,8 +153,17 @@ fn untyped_method_param_skips_arity_not_whole_class() {
 
     assert_eq!(
         diagnostics.len(),
-        3,
-        "expected exactly three diagnostics, got: {diagnostics:?}"
+        4,
+        "expected exactly four diagnostics, got: {diagnostics:?}"
+    );
+
+    let implicit_any = diagnostics
+        .iter()
+        .find(|d| d.message.contains("implicitly has an 'any' type"));
+    assert_eq!(
+        implicit_any.map(|diagnostic| diagnostic.severity),
+        Some(Severity::Error),
+        "expected an implicit-any error for `value`, got: {diagnostics:?}"
     );
 
     let count_mismatch = diagnostics

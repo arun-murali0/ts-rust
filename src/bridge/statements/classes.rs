@@ -8,6 +8,7 @@ use crate::types::Type;
 
 use super::super::context::CheckContext;
 use super::super::expressions::infer_expression_type;
+use super::support::report_implicit_any_params;
 use super::{bind_params, check_statement};
 
 pub(super) fn check_class_declaration(
@@ -15,6 +16,15 @@ pub(super) fn check_class_declaration(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) {
+    // Reported up front, before anything below can bail out, so a class this
+    // checker treats as wholly unsupported still gets its untyped parameters
+    // flagged the way tsc would.
+    for element in &class.body.body {
+        if let ClassElement::MethodDefinition(method) = element {
+            report_implicit_any_params(&method.value.params, ctx);
+        }
+    }
+
     let Some(name) = class.id.as_ref() else {
         return;
     };

@@ -2,6 +2,7 @@ use oxc_ast::ast::Function;
 use oxc_semantic::Scoping;
 
 use super::super::context::CheckContext;
+use super::support::report_implicit_any_params;
 use super::{bind_params, check_statement};
 
 pub(super) fn check_function_declaration(
@@ -9,6 +10,8 @@ pub(super) fn check_function_declaration(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) {
+    report_implicit_any_params(&func.params, ctx);
+
     let Some(body) = &func.body else { return };
     let Some(name) = func.id.as_ref() else { return };
     let Some(symbol_id) = name.symbol_id.get() else {
