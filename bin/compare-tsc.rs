@@ -5,13 +5,20 @@
 //! directly, the same entry point bin/ts-rust.rs uses, and only shells out to
 //! `tsc` itself (there is no Rust API for that side of the comparison).
 //!
-//! Pass/fail is decided by (line, severity), errors only. ts-rust's
-//! `Diagnostic` currently carries no TS#### error code and writes its own
-//! message text, so comparing message strings verbatim against tsc's wording
-//! would report near-constant false mismatches. Warnings are excluded from
-//! both the pass/fail check and the table: every warning ts-rust currently
-//! emits is a "not yet checked" implementation-status marker (see
-//! bridge/statements/support.rs), which has no tsc equivalent at all.
+//! Pass/fail is decided by line number alone, errors only -- severity is a
+//! filter applied before comparison (only Severity::Error diagnostics ever
+//! become an Entry on either side), not a field the comparison itself
+//! checks. ts-rust's own code (TSR####, see diagnostic_codes.rs) is its own
+//! namespace, not tsc's TS#### numbering, and message wording is
+//! independently written -- so comparing message text or code text
+//! verbatim against tsc's own would report near-constant false mismatches
+//! even on a real agreement. Both codes are still shown side by side in the
+//! table, as context for a human, just not used for the pass/fail check
+//! itself. Warnings are excluded entirely, not just from the check: every
+//! warning ts-rust currently emits is a "not yet checked" implementation-
+//! status marker (see bridge/statements/support.rs), which has no tsc
+//! equivalent at all, so a warning never becomes an Entry on the ts-rust
+//! side and is filtered out of tsc's own output the same way.
 //!
 //! Fixtures live under tests/tsc-conformance/, a directory dedicated to this
 //! comparison. tests/fixtures/ is NOT used here: several of those fixtures
@@ -183,6 +190,16 @@ fn run() -> Result<bool, String> {
 const LINE_COL_WIDTH: usize = 6;
 const MSG_COL_WIDTH: usize = 42;
 
+fn box_line(left: char, mid: char, right: char) -> String {
+    let segment = |width: usize| "─".repeat(width + 2);
+    format!(
+        "{left}{}{mid}{}{mid}{}{right}",
+        segment(LINE_COL_WIDTH),
+        segment(MSG_COL_WIDTH),
+        segment(MSG_COL_WIDTH),
+    )
+}
+
 fn print_case(
     style: &Style,
     relative: &Path,
@@ -196,26 +213,18 @@ fn print_case(
     } else {
         style.red("DIFFER")
     };
-    let rule = "─".repeat(LINE_COL_WIDTH + 2 * MSG_COL_WIDTH + 7);
 
-    println!("{}", style.dim(&rule));
     println!("  {}  {}", style.bold(&title), verdict);
-    println!("{}", style.dim(&rule));
-
+    println!("  {}", style.dim(&box_line('┌', '┬', '┐')));
     println!(
-        "  {:<width$}  {:<msg$}  {:<msg$}",
+        "  │ {:<lw$} │ {:<mw$} │ {:<mw$} │",
         "line",
         "ts-rust",
         "tsc",
-        width = LINE_COL_WIDTH,
-        msg = MSG_COL_WIDTH,
+        lw = LINE_COL_WIDTH,
+        mw = MSG_COL_WIDTH,
     );
-    println!(
-        "  {}  {}  {}",
-        "─".repeat(LINE_COL_WIDTH),
-        "─".repeat(MSG_COL_WIDTH),
-        "─".repeat(MSG_COL_WIDTH),
-    );
+    println!("  {}", style.dim(&box_line('├', '┼', '┤')));
 
     let mut by_line: BTreeMap<u32, (Vec<&Entry>, Vec<&Entry>)> = BTreeMap::new();
     for entry in &ts_rust_side.entries {
@@ -225,14 +234,24 @@ fn print_case(
         by_line.entry(entry.line).or_default().1.push(entry);
     }
 
-    for (line, (ts_rust_entries, tsc_entries)) in &by_line {
+    for (group_index, (line, (ts_rust_entries, tsc_entries))) in by_line.iter().enumerate() {
+        if group_index > 0 {
+            println!("  {}", style.dim(&box_line('├', '┼', '┤')));
+        }
+
         let both_present = !ts_rust_entries.is_empty() && !tsc_entries.is_empty();
         let rows = ts_rust_entries.len().max(tsc_entries.len()).max(1);
 
         for row in 0..rows {
             let left = ts_rust_entries
                 .get(row)
-                .map(|e| truncate(&e.message, MSG_COL_WIDTH))
+                .map(|e| {
+                    let with_code = match &e.code {
+                        Some(code) if !code.is_empty() => format!("{code} {}", e.message),
+                        _ => e.message.clone(),
+                    };
+                    truncate(&with_code, MSG_COL_WIDTH)
+                })
                 .unwrap_or_else(|| style.dim("—"));
             let right = tsc_entries
                 .get(row)
@@ -259,12 +278,12 @@ fn print_case(
             };
 
             println!(
-                "  {:<width$}  {:<msg$}  {:<msg$}",
+                "  │ {:<lw$} │ {:<mw$} │ {:<mw$} │",
                 colored_line,
                 left,
                 right,
-                width = LINE_COL_WIDTH,
-                msg = MSG_COL_WIDTH,
+                lw = LINE_COL_WIDTH,
+                mw = MSG_COL_WIDTH,
             );
         }
 
@@ -276,13 +295,22 @@ fn print_case(
                 "tsc flagged an error ts-rust did not -- likely a detection gap: this \
                  construct may not be checked yet"
             };
+            // Spans the two message columns as one wide cell -- the merged
+            // width matches MSG_COL_WIDTH*2+3 (each column plus the " │ "
+            // divider between them), so the right border still lines up
+            // even though there's no internal divider for this one row.
+            let merged_width = MSG_COL_WIDTH * 2 + 3;
+            let text = truncate(&format!("↳ {diagnosis}"), merged_width);
             println!(
-                "  {}  {}",
-                " ".repeat(LINE_COL_WIDTH),
-                style.cyan(&format!("↳ {diagnosis}"))
+                "  │ {:<lw$} │ {} │",
+                "",
+                style.cyan(&format!("{text:<merged_width$}")),
+                lw = LINE_COL_WIDTH,
             );
         }
     }
+
+    println!("  {}", style.dim(&box_line('└', '┴', '┘')));
 }
 
 fn print_summary(style: &Style, passed: usize, failed: usize, expected_version: &str) {
