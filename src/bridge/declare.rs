@@ -1,4 +1,4 @@
-use oxc_ast::ast::{BindingPattern, Program, Statement};
+use oxc_ast::ast::{BinaryOperator, BindingPattern, Expression, Program, Statement, UnaryOperator};
 
 use crate::type_annotation::{resolve_function_params, resolve_type_annotation};
 use crate::types::{ObjectType, PropertyEntry, Type};
@@ -179,9 +179,12 @@ fn resolve_enum_members(
     decl: &oxc_ast::ast::TSEnumDeclaration,
     arena: &mut crate::arena::TypeArena,
 ) -> Option<Vec<(String, crate::arena::TypeId)>> {
-    use oxc_ast::ast::{Expression, TSEnumMemberName};
+    use oxc_ast::ast::TSEnumMemberName;
 
     let mut members = Vec::with_capacity(decl.body.members.len());
+    // Every numeric member's value so far, by name, so a later initializer can
+    // refer to an earlier member (`ReadWrite = Read | Write`).
+    let mut numeric_values: Vec<(String, f64)> = Vec::new();
     // Tracks the running value for TypeScript's own auto-increment rule: a
     // numeric member with no initializer takes the previous numeric member's
     // value plus one. Reset to None whenever a string member breaks that chain,
@@ -202,16 +205,22 @@ fn resolve_enum_members(
         };
 
         let member_type = match &member.initializer {
-            Some(Expression::NumericLiteral(n)) => {
-                prev_numeric = Some(n.value);
-                arena.alloc(Type::NumberLiteral(n.value))
-            }
             Some(Expression::StringLiteral(s)) => {
                 prev_numeric = None;
                 arena.alloc(Type::StringLiteral(s.value.to_string()))
             }
 
-            Some(_) => return None,
+            // Any other initializer is only usable if it is a constant
+            // expression this checker can fully evaluate, as tsc does for
+            // `1 << 0` or `Read | Write`. One it cannot evaluate, such as a
+            // function call, leaves the whole enum unresolved rather than
+            // guessing a value.
+            Some(initializer) => {
+                let value = eval_enum_constant(initializer, &numeric_values)?;
+                prev_numeric = Some(value);
+                numeric_values.push((name.clone(), value));
+                arena.alloc(Type::NumberLiteral(value))
+            }
             None => {
                 let next = match prev_numeric {
                     Some(n) => n + 1.0,
@@ -220,6 +229,7 @@ fn resolve_enum_members(
                     None => return None,
                 };
                 prev_numeric = Some(next);
+                numeric_values.push((name.clone(), next));
                 arena.alloc(Type::NumberLiteral(next))
             }
         };
@@ -228,4 +238,67 @@ fn resolve_enum_members(
     }
 
     Some(members)
+}
+
+// Evaluates the constant numeric expressions tsc accepts as an enum member
+// initializer: numeric literals, parentheses, unary + - ~, the arithmetic and
+// bitwise binary operators, and references to earlier members of the same enum.
+// Anything else, or a result that is not a finite number, is None, which leaves
+// the enum unresolved the same way an unsupported initializer always has.
+fn eval_enum_constant(expr: &Expression, known: &[(String, f64)]) -> Option<f64> {
+    let value = match expr {
+        Expression::NumericLiteral(n) => n.value,
+        Expression::ParenthesizedExpression(inner) => eval_enum_constant(&inner.expression, known)?,
+        Expression::Identifier(id) => known.iter().find(|(name, _)| name == id.name.as_str())?.1,
+        Expression::UnaryExpression(unary) => {
+            let operand = eval_enum_constant(&unary.argument, known)?;
+            match unary.operator {
+                UnaryOperator::UnaryPlus => operand,
+                UnaryOperator::UnaryNegation => -operand,
+                UnaryOperator::BitwiseNot => f64::from(!to_int32(operand)),
+                _ => return None,
+            }
+        }
+        Expression::BinaryExpression(binary) => {
+            let left = eval_enum_constant(&binary.left, known)?;
+            let right = eval_enum_constant(&binary.right, known)?;
+            match binary.operator {
+                BinaryOperator::Addition => left + right,
+                BinaryOperator::Subtraction => left - right,
+                BinaryOperator::Multiplication => left * right,
+                BinaryOperator::Division => left / right,
+                BinaryOperator::Remainder => left % right,
+                BinaryOperator::Exponential => left.powf(right),
+                BinaryOperator::ShiftLeft => {
+                    f64::from(to_int32(left).wrapping_shl(to_uint32(right) & 31))
+                }
+                BinaryOperator::ShiftRight => {
+                    f64::from(to_int32(left).wrapping_shr(to_uint32(right) & 31))
+                }
+                BinaryOperator::ShiftRightZeroFill => {
+                    f64::from(to_uint32(left).wrapping_shr(to_uint32(right) & 31))
+                }
+                BinaryOperator::BitwiseAnd => f64::from(to_int32(left) & to_int32(right)),
+                BinaryOperator::BitwiseOR => f64::from(to_int32(left) | to_int32(right)),
+                BinaryOperator::BitwiseXOR => f64::from(to_int32(left) ^ to_int32(right)),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    value.is_finite().then_some(value)
+}
+
+// JavaScript's ToUint32 and ToInt32: truncate, then wrap modulo 2^32. The bitwise
+// operators and shifts are defined on these 32-bit views of a number, not on the
+// f64 itself.
+fn to_uint32(n: f64) -> u32 {
+    if !n.is_finite() {
+        return 0;
+    }
+    n.trunc().rem_euclid(4_294_967_296.0) as u32
+}
+
+fn to_int32(n: f64) -> i32 {
+    to_uint32(n) as i32
 }
