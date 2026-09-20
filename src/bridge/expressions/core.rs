@@ -17,7 +17,10 @@ pub(crate) fn resolve_identifier_type(
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
     let Some(symbol_id) = resolve_symbol_id(ident, scoping) else {
-        ctx.error(format!("Cannot find name '{}'.", ident.name), ident.span());
+        ctx.error(
+            crate::diagnostic_messages::messages::unresolved_identifier(&ident.name),
+            ident.span(),
+        );
         return ctx.arena.error();
     };
 

@@ -8,8 +8,8 @@ use crate::types::Type;
 use super::super::context::CheckContext;
 use super::infer_expression_type;
 use super::{
-    collect_generic_param_constraints, expected_param_type, infer_member_access_type,
-    infer_type_param_bindings, resolve_identifier_type, substitute_type_params,
+    expected_param_type, infer_member_access_type, infer_type_param_bindings,
+    resolve_identifier_type, substitute_type_params,
 };
 
 pub(super) fn infer_call_expression_type(
@@ -30,23 +30,19 @@ pub(super) fn infer_call_expression_type(
         }
         _ => {
             ctx.warning(
-                "This kind of call expression is not yet checked by ts-rust.",
+                crate::diagnostic_messages::messages::unimplemented_call_expression_kind(),
                 call.span(),
             );
             return ctx.arena.error();
         }
     };
 
-    let not_callable = format!("'{callee_name}' is not callable.");
-    let untyped_message = format!(
-        "'{callee_name}' has an untyped parameter, so ts-rust can't check this call's arity yet."
-    );
     check_callable(
         callee_type,
         &call.arguments,
         call.span(),
-        &not_callable,
-        &untyped_message,
+        &callee_name,
+        false,
         scoping,
         ctx,
     )
@@ -59,7 +55,7 @@ pub(super) fn infer_new_expression_type(
 ) -> TypeId {
     let Expression::Identifier(callee_ident) = &new_expr.callee else {
         ctx.warning(
-            "`new` on anything other than a plain name is not yet checked by ts-rust.",
+            crate::diagnostic_messages::messages::unimplemented_new_expression_target(),
             new_expr.span(),
         );
         return ctx.arena.error();
@@ -67,17 +63,12 @@ pub(super) fn infer_new_expression_type(
 
     let callee_type = resolve_identifier_type(callee_ident, scoping, ctx);
 
-    let not_callable = format!("'{}' is not a constructor.", callee_ident.name);
-    let untyped_message = format!(
-        "'{}' has a constructor with an untyped parameter, so ts-rust can't check arity for `new {}(...)` yet.",
-        callee_ident.name, callee_ident.name
-    );
     check_callable(
         callee_type,
         &new_expr.arguments,
         new_expr.span(),
-        &not_callable,
-        &untyped_message,
+        &callee_ident.name,
+        true,
         scoping,
         ctx,
     )
@@ -87,8 +78,8 @@ fn check_callable(
     callee_type: TypeId,
     arguments: &[oxc_ast::ast::Argument],
     span: Span,
-    not_callable_message: &str,
-    untyped_message: &str,
+    callee_name: &str,
+    is_new: bool,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
@@ -98,7 +89,12 @@ fn check_callable(
         // Arguments are still checked for their own independent problems even
         // though the call itself is not.
         if !matches!(ctx.arena.get(callee_type), Type::Any | Type::Error) {
-            ctx.error(not_callable_message, span);
+            let message = if is_new {
+                crate::diagnostic_messages::messages::not_a_constructor(callee_name)
+            } else {
+                crate::diagnostic_messages::messages::not_callable(callee_name)
+            };
+            ctx.error(message, span);
             return ctx.arena.error();
         }
 
@@ -114,7 +110,14 @@ fn check_callable(
     // left it untyped) means arity cannot be verified honestly, so it is skipped
     // with a warning rather than silently allowed or wrongly flagged.
     if function_type.is_untyped {
-        ctx.warning(untyped_message, span);
+        let message = if is_new {
+            crate::diagnostic_messages::messages::untyped_constructor_parameter_skips_arity_check(
+                callee_name,
+            )
+        } else {
+            crate::diagnostic_messages::messages::untyped_parameter_skips_arity_check(callee_name)
+        };
+        ctx.warning(message, span);
         for arg in arguments {
             if let Some(arg_expr) = arg.as_expression() {
                 infer_expression_type(arg_expr, scoping, ctx);
@@ -175,31 +178,6 @@ fn check_callable(
         }
     }
 
-    // Checked once per call, after every argument has had its chance to inform a
-    // binding, and before the per-argument assignability loop below: a type
-    // parameter with an `extends` bound (function f<T extends { length: number
-    // }>(...)) must have its final, fully-inferred binding satisfy that bound.
-    // A parameter nothing ever bound (bindings has no entry for it) is skipped
-    // here entirely, matching the same graceful "left unresolved" treatment an
-    // uninferred parameter already gets everywhere else.
-    let mut constraints = Vec::new();
-    for param in &function_type.params {
-        collect_generic_param_constraints(&ctx.arena, param.type_id, &mut constraints);
-    }
-    collect_generic_param_constraints(&ctx.arena, function_type.return_type, &mut constraints);
-
-    for (id, name, constraint) in &constraints {
-        let Some((_, bound)) = bindings.iter().find(|(bound_id, _)| bound_id == id) else {
-            continue;
-        };
-        if !ctx.semantic().is_assignable(*bound, *constraint) {
-            ctx.error(
-                format!("Type does not satisfy the constraint of type parameter '{name}'."),
-                span,
-            );
-        }
-    }
-
     for (index, arg) in arguments.iter().enumerate() {
         let Some(arg_expr) = arg.as_expression() else {
             continue;
@@ -213,7 +191,7 @@ fn check_callable(
         let expected = substitute_type_params(&mut ctx.arena, param_type, &bindings);
         if !ctx.semantic().is_assignable(arg_type, expected) {
             ctx.error(
-                "Argument type is not assignable to parameter type.",
+                crate::diagnostic_messages::messages::argument_not_assignable(),
                 arg_expr.span(),
             );
         }
@@ -222,12 +200,11 @@ fn check_callable(
     substitute_type_params(&mut ctx.arena, function_type.return_type, &bindings)
 }
 
-fn arity_message(required: usize, max: Option<usize>, got: usize) -> String {
+fn arity_message(required: usize, max: Option<usize>, got: usize) -> crate::diagnostic_messages::DiagnosticMessage {
+    use crate::diagnostic_messages::messages;
     match max {
-        Some(max) if max == required => {
-            format!("Expected {required} argument(s), but got {got}.")
-        }
-        Some(max) => format!("Expected {required}-{max} argument(s), but got {got}."),
-        None => format!("Expected at least {required} argument(s), but got {got}."),
+        Some(max) if max == required => messages::argument_arity_exact(required, got),
+        Some(max) => messages::argument_arity_range(required, max, got),
+        None => messages::argument_arity_at_least(required, got),
     }
 }

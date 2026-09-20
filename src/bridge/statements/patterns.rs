@@ -72,7 +72,7 @@ fn bind_object_pattern(
     for property in &object.properties {
         let PropertyKey::StaticIdentifier(key) = &property.key else {
             ctx.warning(
-                "Computed or non-identifier destructuring keys are not yet checked by ts-rust.",
+                crate::diagnostic_messages::messages::unimplemented_destructuring_key(),
                 property.span(),
             );
             continue;
@@ -89,8 +89,7 @@ fn bind_object_pattern(
         // not cascade into an unrelated "cannot find name" error on top of this
         // warning.
         ctx.warning(
-            "Rest destructuring (`...rest`) does not yet compute a precise type; \
-             the binding is not checked by ts-rust.",
+            crate::diagnostic_messages::messages::unimplemented_rest_destructuring(),
             rest.span(),
         );
         bind_pattern(&rest.argument, ctx.arena.error(), scoping, ctx);
@@ -107,7 +106,10 @@ fn bind_array_pattern(
         Type::Array(element) => *element,
         Type::Any | Type::Error => type_id,
         _ => {
-            ctx.error("Array destructuring requires an array type.", array.span());
+            ctx.error(
+                crate::diagnostic_messages::messages::array_destructuring_requires_array(),
+                array.span(),
+            );
             ctx.arena.error()
         }
     };

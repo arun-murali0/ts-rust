@@ -7,7 +7,7 @@ pub(super) fn push_unsupported(stmt: &Statement, ctx: &mut CheckContext<'_, '_>)
     let kind = stmt_kind_name(stmt);
     tracing::trace!(kind, "unsupported statement kind");
     ctx.warning(
-        format!("This statement kind is not yet checked by ts-rust: {kind}."),
+        crate::diagnostic_messages::messages::unimplemented_statement_kind(kind),
         stmt.span(),
     );
 }

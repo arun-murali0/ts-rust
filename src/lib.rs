@@ -1,5 +1,8 @@
 mod arena;
 mod bridge;
+mod diagnostic_codes;
+mod diagnostic_messages;
+mod diagnostic_view;
 mod diagnostics;
 mod error;
 mod fxhash;
@@ -16,6 +19,8 @@ mod wasm;
 #[cfg(feature = "wasm")]
 pub use wasm::TsRustChecker;
 
+pub use diagnostic_codes::DiagnosticCode;
+pub use diagnostic_view::{DiagnosticView, Position, Range};
 pub use diagnostics::{Diagnostic, Severity};
 pub use error::CheckerError;
 

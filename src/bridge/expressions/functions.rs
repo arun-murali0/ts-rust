@@ -33,7 +33,7 @@ pub(super) fn infer_arrow_function_type(
             Some(declared) => {
                 if !ctx.semantic().is_assignable(inferred, declared) {
                     ctx.error(
-                        "Return type does not match the function's declared return type.",
+                        crate::diagnostic_messages::messages::return_type_mismatch(),
                         body_expr.span(),
                     );
                 }

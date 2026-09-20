@@ -1,3 +1,5 @@
+use crate::diagnostic_codes::DiagnosticCode;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub enum Severity {
@@ -7,6 +9,7 @@ pub enum Severity {
 #[derive(Debug)]
 pub struct Diagnostic {
     pub severity: Severity,
+    pub code: DiagnosticCode,
     pub message: String,
     pub file_name: String,
 
@@ -24,17 +27,18 @@ impl Diagnostic {
         line_index: &crate::line_index::LineIndex,
         source: &str,
     ) -> String {
-        let (line, column) = line_index.line_col_utf8(self.start, source);
+        let view = self.to_view(line_index, source);
         format!(
-            "{}:{}:{}: {}: {}",
+            "{}:{}:{}: {}: {} {}",
             self.file_name,
-            line,
-            column,
+            view.range.start.line,
+            view.range.start.column,
             match self.severity {
                 Severity::Error => "error",
                 Severity::Warning => "warning",
             },
-            self.message
+            self.code,
+            view.message
         )
     }
 }

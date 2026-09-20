@@ -64,7 +64,7 @@ pub(super) fn infer_binary_expression_type(
 
 fn push_binary_op_mismatch(ctx: &mut CheckContext<'_, '_>, span: Span, operator: &str) {
     ctx.error(
-        format!("Operator '{operator}' cannot be applied to these types."),
+        crate::diagnostic_messages::messages::binary_operand_type_mismatch(operator),
         span,
     );
 }

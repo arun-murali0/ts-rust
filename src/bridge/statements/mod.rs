@@ -44,7 +44,7 @@ pub(super) fn check_return_statement(
         && !ctx.semantic().is_assignable(actual, expected)
     {
         ctx.error(
-            "Return type does not match the function's declared return type.",
+            crate::diagnostic_messages::messages::return_type_mismatch(),
             ret.span(),
         );
     }

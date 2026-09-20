@@ -28,11 +28,7 @@ pub(super) fn check_class_declaration(
         Resolution::Resolved(type_id) => type_id,
         Resolution::Circular | Resolution::NotFound => {
             ctx.warning(
-                format!(
-                    "Class '{}' uses a shape not yet checked by ts-rust: an unresolvable \
-                     field or method, or a superclass that isn't a plain class name.",
-                    name.name
-                ),
+                crate::diagnostic_messages::messages::unimplemented_class_shape(&name.name),
                 class.span(),
             );
             return;
@@ -129,7 +125,7 @@ pub(super) fn check_class_declaration(
 
             ClassElement::MethodDefinition(method) if method.r#static => {
                 ctx.warning(
-                    "Static getter/setter is not yet checked by ts-rust.",
+                    crate::diagnostic_messages::messages::unimplemented_static_accessor(),
                     method.span(),
                 );
             }
@@ -145,7 +141,7 @@ pub(super) fn check_class_declaration(
                     {
                         if !ctx.semantic().is_assignable(actual, declared) {
                             ctx.error(
-                                "Static field initializer is not assignable to its declared type.",
+                                crate::diagnostic_messages::messages::static_field_initializer_mismatch(),
                                 initializer.span(),
                             );
                         }

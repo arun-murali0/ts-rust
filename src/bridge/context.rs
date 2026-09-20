@@ -1,6 +1,7 @@
 use oxc_span::Span;
 
 use crate::arena::{TypeArena, TypeId};
+use crate::diagnostic_messages::DiagnosticMessage;
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::namespace::TypeNamespace;
 use crate::semantic::SemanticQueries;
@@ -42,10 +43,11 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
         }
     }
 
-    pub fn error(&mut self, message: impl Into<String>, span: Span) {
+    pub fn error(&mut self, message: DiagnosticMessage, span: Span) {
         self.diagnostics.push(Diagnostic {
             severity: Severity::Error,
-            message: message.into(),
+            code: message.code,
+            message: message.text,
             file_name: self.file_name.to_string(),
             start: span.start,
             end: span.end,
@@ -61,10 +63,11 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
         SemanticQueries::new(&self.arena)
     }
 
-    pub fn warning(&mut self, message: impl Into<String>, span: Span) {
+    pub fn warning(&mut self, message: DiagnosticMessage, span: Span) {
         self.diagnostics.push(Diagnostic {
             severity: Severity::Warning,
-            message: message.into(),
+            code: message.code,
+            message: message.text,
             file_name: self.file_name.to_string(),
             start: span.start,
             end: span.end,

@@ -68,11 +68,7 @@ fn check_identifier_declarator(
     match (annotation_outcome, inferred_type) {
         (AnnotationOutcome::Unresolvable, _) => {
             ctx.warning(
-                format!(
-                    "Type annotation for '{}' could not be resolved (unknown name, \
-                     or its definition isn't fully understood by ts-rust yet).",
-                    id.name
-                ),
+                crate::diagnostic_messages::messages::unresolvable_type_annotation(&id.name),
                 declarator.span(),
             );
         }
@@ -80,10 +76,7 @@ fn check_identifier_declarator(
         (AnnotationOutcome::Resolved(declared), Some(actual)) => {
             if !ctx.semantic().is_assignable(actual, declared) {
                 ctx.error(
-                    format!(
-                        "Type mismatch: value is not assignable to declared type of '{}'.",
-                        id.name
-                    ),
+                    crate::diagnostic_messages::messages::declared_type_mismatch(&id.name),
                     declarator
                         .init
                         .as_ref()
@@ -149,7 +142,7 @@ fn check_destructured_declarator(
     let source_type = match (annotation_outcome, inferred_type) {
         (AnnotationOutcome::Unresolvable, _) => {
             ctx.warning(
-                "Type annotation for this destructuring pattern could not be resolved.",
+                crate::diagnostic_messages::messages::unresolvable_destructuring_type_annotation(),
                 declarator.span(),
             );
             return;
@@ -157,7 +150,7 @@ fn check_destructured_declarator(
         (AnnotationOutcome::Resolved(declared), Some(actual)) => {
             if !ctx.semantic().is_assignable(actual, declared) {
                 ctx.error(
-                    "Type mismatch: value is not assignable to the destructuring pattern's declared type.",
+                    crate::diagnostic_messages::messages::destructuring_pattern_type_mismatch(),
                     declarator.init.as_ref().map_or(declarator.span(), GetSpan::span),
                 );
             }

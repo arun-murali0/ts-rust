@@ -20,13 +20,6 @@
 //! and are expected to diverge from tsc, so mixing them in would produce
 //! constant, meaningless failures.
 //!
-//!
-//!
-//!
-//! =================================MY OWN REFERENCE==========================
-//! ===============after finishing module resolution it will test against   real world repo================
-//!
-//!
 //! IMPORTANT: this binary cannot yet point at a real multi-file project
 //! (e.g. zustand). ts-rust has no cross-file import/export resolution yet,
 //! so every file in a multi-file project would report spurious "cannot see
@@ -56,7 +49,8 @@ struct Style {
 
 impl Style {
     fn detect() -> Self {
-        let enabled = env::var_os(NO_COLOR_ENV).is_none() && std::io::stdout().is_terminal();
+        let enabled =
+            env::var_os(NO_COLOR_ENV).is_none() && std::io::stdout().is_terminal();
         Self { enabled }
     }
 
@@ -452,7 +446,7 @@ fn ts_rust_diagnostics(
         entries.push(Entry {
             line,
             column,
-            code: None,
+            code: Some(diagnostic.code.as_str().to_owned()),
             message: diagnostic.message.clone(),
         });
     }

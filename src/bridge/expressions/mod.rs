@@ -18,8 +18,7 @@ mod objects;
 pub(super) use members::infer_member_access_type;
 
 pub(super) use crate::semantic::{
-    collect_generic_param_constraints, expected_param_type, infer_type_param_bindings,
-    substitute_type_params,
+    expected_param_type, infer_type_param_bindings, substitute_type_params,
 };
 use binary::infer_binary_expression_type;
 use calls::{infer_call_expression_type, infer_new_expression_type};
@@ -135,7 +134,7 @@ pub fn infer_expression_type(
 
         _ => {
             ctx.warning(
-                "This expression kind is not yet checked by ts-rust.",
+                crate::diagnostic_messages::messages::unimplemented_expression_kind(),
                 expr.span(),
             );
             ctx.arena.error()
