@@ -79,7 +79,7 @@ pub(super) fn infer_computed_member_access_type(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
-    infer_expression_type(key_expr, scoping, ctx);
+    let key_type = infer_expression_type(key_expr, scoping, ctx);
 
     if let &Type::Array(element_type) = ctx.arena.get(object_type) {
         return match key_expr {
@@ -96,10 +96,24 @@ pub(super) fn infer_computed_member_access_type(
     }
 
     let Expression::StringLiteral(key) = key_expr else {
-        ctx.warning(
-            crate::diagnostic_messages::messages::unimplemented_computed_member_key(),
-            span,
-        );
+        // A plain `string` or `number` key cannot name any particular property, and
+        // a plain object type has no index signature to fall back on, so tsc
+        // rejects the access under noImplicitAny. Any other key (a union of
+        // literals, `any`, a generic parameter) is a shape this checker cannot
+        // evaluate yet, and is still reported as unsupported rather than guessed.
+        let plain_object = matches!(ctx.arena.get(object_type), Type::Object(_));
+        let plain_key = matches!(ctx.arena.get(key_type), Type::String | Type::Number);
+        if plain_object && plain_key {
+            ctx.error(
+                crate::diagnostic_messages::messages::element_implicitly_any(),
+                span,
+            );
+        } else {
+            ctx.warning(
+                crate::diagnostic_messages::messages::unimplemented_computed_member_key(),
+                span,
+            );
+        }
         return ctx.arena.error();
     };
 
