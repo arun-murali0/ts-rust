@@ -19,8 +19,18 @@ pub(crate) fn infer_member_access_type(
     span: Span,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
-    let Type::Object(object) = ctx.arena.get(object_type) else {
-        if !matches!(ctx.arena.get(object_type), Type::Any | Type::Error) {
+    // A constrained generic parameter (`T extends HasLength`) exposes its
+    // constraint's members inside the function body, the same way tsc treats
+    // `T`'s accessible shape as its constraint's shape. An unconstrained `T`
+    // has no known members and falls through to the Type::Object match below
+    // unchanged, same as before this fix.
+    let effective_type = match ctx.arena.get(object_type) {
+        Type::GenericParameter(_, _, Some(constraint)) => *constraint,
+        _ => object_type,
+    };
+
+    let Type::Object(object) = ctx.arena.get(effective_type) else {
+        if !matches!(ctx.arena.get(effective_type), Type::Any | Type::Error) {
             ctx.error(
                 crate::diagnostic_messages::messages::property_does_not_exist(property_name),
                 span,
