@@ -72,8 +72,18 @@ pub mod messages {
         )
     }
 
+    pub fn type_argument_constraint_violation(name: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::TypeArgumentConstraintViolation,
+            format!("Type does not satisfy the constraint of type parameter '{name}'."),
+        )
+    }
+
     pub fn not_callable(name: &str) -> DiagnosticMessage {
-        DiagnosticMessage::new(DiagnosticCode::NotCallable, format!("'{name}' is not callable."))
+        DiagnosticMessage::new(
+            DiagnosticCode::NotCallable,
+            format!("'{name}' is not callable."),
+        )
     }
 
     pub fn not_a_constructor(name: &str) -> DiagnosticMessage {

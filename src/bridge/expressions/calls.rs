@@ -8,8 +8,8 @@ use crate::types::Type;
 use super::super::context::CheckContext;
 use super::infer_expression_type;
 use super::{
-    expected_param_type, infer_member_access_type, infer_type_param_bindings,
-    resolve_identifier_type, substitute_type_params,
+    collect_generic_param_constraints, expected_param_type, infer_member_access_type,
+    infer_type_param_bindings, resolve_identifier_type, substitute_type_params,
 };
 
 pub(super) fn infer_call_expression_type(
@@ -175,6 +175,31 @@ fn check_callable(
         let Some(arg_type) = arg_type else { continue };
         if let Some(param_type) = expected_param_type(&ctx.arena, &function_type.params, index) {
             infer_type_param_bindings(&ctx.arena, param_type, *arg_type, &mut bindings);
+        }
+    }
+
+    // Checked once per call, after every argument has had its chance to inform a
+    // binding, and before the per-argument assignability loop below: a type
+    // parameter with an `extends` bound (function f<T extends { length: number
+    // }>(...)) must have its final, fully-inferred binding satisfy that bound.
+    // A parameter nothing ever bound (bindings has no entry for it) is skipped
+    // here entirely, matching the same graceful "left unresolved" treatment an
+    // uninferred parameter already gets everywhere else.
+    let mut constraints = Vec::new();
+    for param in &function_type.params {
+        collect_generic_param_constraints(&ctx.arena, param.type_id, &mut constraints);
+    }
+    collect_generic_param_constraints(&ctx.arena, function_type.return_type, &mut constraints);
+
+    for (id, name, constraint) in &constraints {
+        let Some((_, bound)) = bindings.iter().find(|(bound_id, _)| bound_id == id) else {
+            continue;
+        };
+        if !ctx.semantic().is_assignable(*bound, *constraint) {
+            ctx.error(
+                crate::diagnostic_messages::messages::type_argument_constraint_violation(name),
+                span,
+            );
         }
     }
 

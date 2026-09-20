@@ -24,6 +24,7 @@ pub enum DiagnosticCode {
     DeclaredTypeMismatch,
     DestructuringPatternTypeMismatch,
     StaticFieldInitializerMismatch,
+    TypeArgumentConstraintViolation,
 
     // 1100s -- calls
     NotCallable,
@@ -62,6 +63,7 @@ impl DiagnosticCode {
             DeclaredTypeMismatch => "TSR1004",
             DestructuringPatternTypeMismatch => "TSR1005",
             StaticFieldInitializerMismatch => "TSR1006",
+            TypeArgumentConstraintViolation => "TSR1007",
 
             NotCallable => "TSR1101",
             ArgumentArityMismatch => "TSR1102",
