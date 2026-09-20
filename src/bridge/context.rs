@@ -27,6 +27,19 @@ pub struct CheckContext<'ast, 'src> {
     pub current_return_type: Option<TypeId>,
 
     pub current_class_instance: Option<TypeId>,
+
+    // True while checking the body of a function whose `this` has no type at all:
+    // a plain function expression with no `this` parameter and no contextual
+    // type. A `this` used there is an implicit any, which tsc reports under
+    // noImplicitThis. Left false everywhere else, including object literal
+    // methods (whose `this` is the literal) and any function this checker cannot
+    // yet prove has no contextual `this`, so those stay silent.
+    pub implicit_this: bool,
+
+    // A one-shot request from the caller of infer_function_expression_type: the
+    // very next function expression checked is known to have no contextual
+    // `this`, so its body should run with implicit_this set. Consumed on entry.
+    pub next_function_has_no_this: bool,
 }
 
 impl<'ast, 'src> CheckContext<'ast, 'src> {
@@ -40,6 +53,8 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             narrow: NarrowState::new(),
             current_return_type: None,
             current_class_instance: None,
+            implicit_this: false,
+            next_function_has_no_this: false,
         }
     }
 

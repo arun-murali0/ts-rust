@@ -55,13 +55,24 @@ pub fn infer_expression_type(
 
         Expression::Identifier(ident) => resolve_identifier_type(ident, scoping, ctx),
 
-        // Outside any class method body, current_class_instance is None and this
-        // is left as an Error sentinel rather than reported as an error itself;
-        // whatever this expression's result feeds into will already be flagged
-        // there if using this without a class context is genuinely a mistake.
-        Expression::ThisExpression(_) => ctx
-            .current_class_instance
-            .unwrap_or_else(|| ctx.arena.error()),
+        // Outside any class method body, current_class_instance is None. Inside a
+        // function known to have no `this` at all that is an implicit any, and is
+        // reported. Anywhere else it may be legitimate (an object literal method,
+        // a callback whose signature supplies `this`), so it is left as an Error
+        // sentinel and whatever this expression's result feeds into is what gets
+        // flagged, if anything.
+        Expression::ThisExpression(this) => match ctx.current_class_instance {
+            Some(instance) => instance,
+            None => {
+                if ctx.implicit_this {
+                    ctx.error(
+                        crate::diagnostic_messages::messages::this_implicitly_any(),
+                        this.span,
+                    );
+                }
+                ctx.arena.error()
+            }
+        },
 
         Expression::BinaryExpression(bin) => {
             let left = infer_expression_type(&bin.left, scoping, ctx);

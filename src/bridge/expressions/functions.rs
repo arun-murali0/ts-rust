@@ -66,6 +66,12 @@ pub(super) fn infer_function_expression_type(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
+    // Consumed here, before anything else, so the request only ever applies to
+    // this exact function and never to one nested inside its parameters or body.
+    // A function with its own `this` parameter has a typed `this` and is never
+    // implicit.
+    let has_no_this =
+        std::mem::take(&mut ctx.next_function_has_no_this) && func.this_param.is_none();
     let param_types =
         resolve_params_with_any_fallback(&func.params, &mut ctx.namespace, &mut ctx.arena);
     bind_params(&func.params, &param_types, scoping, ctx);
@@ -84,9 +90,11 @@ pub(super) fn infer_function_expression_type(
         // so any class-instance context from an outer method body must not leak
         // into this function's body.
         let outer_class_instance = ctx.current_class_instance.take();
+        let outer_implicit_this = std::mem::replace(&mut ctx.implicit_this, has_no_this);
         for body_stmt in &body.statements {
             check_statement(body_stmt, scoping, ctx);
         }
+        ctx.implicit_this = outer_implicit_this;
         ctx.current_class_instance = outer_class_instance;
         ctx.current_return_type = outer_return_type;
     }

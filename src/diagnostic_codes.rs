@@ -40,6 +40,8 @@ pub enum DiagnosticCode {
 
     // 1400s -- implicit any
     ImplicitAnyParameter,
+    ImplicitAnyElement,
+    ImplicitAnyThis,
 
     // 9000s -- not yet implemented (all currently emitted as warnings)
     UnimplementedCallExpressionKind,
@@ -79,6 +81,8 @@ impl DiagnosticCode {
             ArrayDestructuringRequiresArray => "TSR1301",
 
             ImplicitAnyParameter => "TSR1401",
+            ImplicitAnyElement => "TSR1402",
+            ImplicitAnyThis => "TSR1403",
 
             UnimplementedCallExpressionKind => "TSR9001",
             UnimplementedNewExpressionTarget => "TSR9002",

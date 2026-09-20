@@ -119,10 +119,30 @@ fn function_expression_does_not_inherit_this() {
         "fixtures/expression-program-checking/function_expression_does_not_inherit_this.ts"
     );
     let diagnostics = check(source, "function_expression_does_not_inherit_this.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "`this` inside the nested function expression must not resolve to Counter's instance \
+         type; it is an implicit any, and that is the one error. Got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, ts_rust::Severity::Error);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("'this' implicitly has type 'any'"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn this_in_an_object_literal_function_is_not_reported() {
+    let source = include_str!(
+        "fixtures/expression-program-checking/this_in_object_literal_function_is_not_implicit_any.ts"
+    );
+    let diagnostics = check(source, "this_in_object_literal_function_is_not_implicit_any.ts");
     assert!(
         diagnostics.is_empty(),
-        "expected no diagnostics: `this` inside the nested function expression should resolve to \
-         Error (unknown), not leak in Counter's instance type. Got: {diagnostics:?}"
+        "an object literal method's `this` is the literal, got: {diagnostics:?}"
     );
 }
 
@@ -139,9 +159,7 @@ fn callback_type_annotation_with_untyped_param_still_registers() {
         "expected the body mismatch plus the implicit-any error on the callback type, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.message.contains("not assignable")),
+        diagnostics.iter().any(|d| d.message.contains("not assignable")),
         "expected the `const result: string = fn(value)` mismatch inside apply's body, got: {diagnostics:?}"
     );
     let implicit_any = diagnostics
@@ -359,6 +377,29 @@ fn computed_member_access_with_dynamic_key_is_reported_as_unsupported() {
         1,
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
+    assert_eq!(diagnostics[0].severity, ts_rust::Severity::Error);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("Element implicitly has an 'any' type"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn computed_member_access_with_an_any_key_is_still_reported_as_unsupported() {
+    let source = include_str!(
+        "fixtures/expression-program-checking/computed_member_access_unsupported_key_stays_a_warning.ts"
+    );
+    let diagnostics = check(
+        source,
+        "computed_member_access_unsupported_key_stays_a_warning.ts",
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
     assert_eq!(diagnostics[0].severity, ts_rust::Severity::Warning);
     assert!(
         diagnostics[0].message.contains("not yet checked"),
@@ -455,11 +496,46 @@ fn enum_member_value_type_mismatch_is_caught() {
 }
 
 #[test]
-fn enum_with_computed_initializer_is_honestly_left_unresolved() {
+fn enum_constant_expression_initializer_is_evaluated() {
     let source = include_str!(
         "fixtures/expression-program-checking/enum_computed_initializer_unsupported.ts"
     );
     let diagnostics = check(source, "enum_computed_initializer_unsupported.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "`1 << 0` is a constant, so Weird resolves and returning it as a string is a mismatch, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, ts_rust::Severity::Error);
+    assert!(
+        diagnostics[0].message.contains("declared return type"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn enum_members_can_refer_to_earlier_members_and_auto_increment_after_them() {
+    let source = include_str!(
+        "fixtures/expression-program-checking/enum_constant_expression_initializers.ts"
+    );
+    let diagnostics = check(source, "enum_constant_expression_initializers.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "only `next` returns the enum as a string, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[0].message.contains("declared return type"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn enum_with_a_non_constant_initializer_is_honestly_left_unresolved() {
+    let source = include_str!(
+        "fixtures/expression-program-checking/enum_non_constant_initializer_unsupported.ts"
+    );
+    let diagnostics = check(source, "enum_non_constant_initializer_unsupported.ts");
     assert!(
         diagnostics.is_empty(),
         "expected the unsupported enum to be silently unresolved, got: {diagnostics:?}"

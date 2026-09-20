@@ -72,6 +72,9 @@ fn check_identifier_declarator(
             }
             Some(Expression::FunctionExpression(func)) => {
                 report_implicit_any_params(&func.params, ctx);
+                // Nothing supplies a contextual `this` here either, so `this`
+                // inside this function is an implicit any.
+                ctx.next_function_has_no_this = true;
             }
             _ => {}
         }

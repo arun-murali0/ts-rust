@@ -95,6 +95,20 @@ pub mod messages {
         )
     }
 
+    pub fn element_implicitly_any() -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::ImplicitAnyElement,
+            "Element implicitly has an 'any' type because the index is not a literal and the type has no index signature.",
+        )
+    }
+
+    pub fn this_implicitly_any() -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::ImplicitAnyThis,
+            "'this' implicitly has type 'any' because it does not have a type annotation.",
+        )
+    }
+
     pub fn not_callable(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::NotCallable,
