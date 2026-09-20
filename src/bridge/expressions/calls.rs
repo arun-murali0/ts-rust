@@ -200,7 +200,11 @@ fn check_callable(
     substitute_type_params(&mut ctx.arena, function_type.return_type, &bindings)
 }
 
-fn arity_message(required: usize, max: Option<usize>, got: usize) -> crate::diagnostic_messages::DiagnosticMessage {
+fn arity_message(
+    required: usize,
+    max: Option<usize>,
+    got: usize,
+) -> crate::diagnostic_messages::DiagnosticMessage {
     use crate::diagnostic_messages::messages;
     match max {
         Some(max) if max == required => messages::argument_arity_exact(required, got),
