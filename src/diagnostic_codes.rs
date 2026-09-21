@@ -58,6 +58,7 @@ pub enum DiagnosticCode {
     UnimplementedStatementKind,
     UnresolvableTypeAnnotation,
     UnresolvableDestructuringTypeAnnotation,
+    UnresolvableTypeParameterConstraint,
 }
 
 impl DiagnosticCode {
@@ -99,6 +100,7 @@ impl DiagnosticCode {
             UnimplementedStatementKind => "TSR9011",
             UnresolvableTypeAnnotation => "TSR9012",
             UnresolvableDestructuringTypeAnnotation => "TSR9013",
+            UnresolvableTypeParameterConstraint => "TSR9014",
         }
     }
 }

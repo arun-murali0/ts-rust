@@ -42,6 +42,13 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
         );
     }
 
+    for (name, span) in ctx.namespace.take_unresolved_constraints() {
+        ctx.warning(
+            crate::diagnostic_messages::messages::unresolvable_type_parameter_constraint(&name),
+            span,
+        );
+    }
+
     tracing::info!(diagnostic_count = ctx.diagnostics.len(), "check complete");
     Ok(ctx.diagnostics)
 }

@@ -267,6 +267,17 @@ pub mod messages {
         )
     }
 
+    pub fn unresolvable_type_parameter_constraint(name: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::UnresolvableTypeParameterConstraint,
+            format!(
+                "The constraint of type parameter '{name}' could not be resolved, so it is \
+                 treated as unconstrained: it is not enforced at call sites and its members \
+                 are not usable inside the function."
+            ),
+        )
+    }
+
     pub fn unresolvable_type_annotation(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::UnresolvableTypeAnnotation,

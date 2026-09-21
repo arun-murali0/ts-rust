@@ -53,6 +53,13 @@ pub struct TypeNamespace<'a> {
     // annotation can be resolved more than once), and drained into real
     // diagnostics once checking finishes. See bridge::check_program.
     implicit_any_params: Vec<(String, Span)>,
+
+    // Type parameters whose `extends` bound could not be resolved. The parameter
+    // is then treated as unconstrained, which silently loses both the call-site
+    // check and the use of the bound's members in the body, so it is recorded
+    // here and reported as a warning once checking finishes, the same way
+    // implicit_any_params is.
+    unresolved_constraints: Vec<(String, Span)>,
 }
 
 pub enum Resolution {
@@ -68,6 +75,7 @@ impl<'a> TypeNamespace<'a> {
             entries: FxHashMap::default(),
             type_param_cache: FxHashMap::default(),
             implicit_any_params: Vec::new(),
+            unresolved_constraints: Vec::new(),
         }
     }
 
@@ -97,6 +105,10 @@ impl<'a> TypeNamespace<'a> {
 
     pub fn take_implicit_any_params(&mut self) -> Vec<(String, Span)> {
         std::mem::take(&mut self.implicit_any_params)
+    }
+
+    pub fn take_unresolved_constraints(&mut self) -> Vec<(String, Span)> {
+        std::mem::take(&mut self.unresolved_constraints)
     }
 
     pub fn insert_type_alias(&mut self, name: &str, body: &'a TSType<'a>) {
@@ -177,6 +189,16 @@ impl<'a> TypeNamespace<'a> {
                         .constraint
                         .as_ref()
                         .and_then(|c| crate::type_annotation::resolve_ts_type(c, self, arena));
+                    if param.constraint.is_some()
+                        && constraint.is_none()
+                        && !self
+                            .unresolved_constraints
+                            .iter()
+                            .any(|(_, span)| span.start == param.span().start)
+                    {
+                        self.unresolved_constraints
+                            .push((name.clone(), param.span()));
+                    }
                     let type_id = arena.alloc(Type::GenericParameter(id, name.clone(), constraint));
                     self.type_param_cache.insert(id, type_id);
                     type_id

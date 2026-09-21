@@ -164,3 +164,61 @@ fn constraint_violation_is_caught() {
         "got: {diagnostics:?}"
     );
 }
+
+#[test]
+fn union_parameter_infers_the_type_parameter_from_the_argument() {
+    let source = include_str!("fixtures/generics-tier1/generic_union_parameter_inference.ts");
+    let diagnostics = check(source, "generic_union_parameter_inference.ts");
+    // `unwrap(5)` infers T = number from `T | undefined`, and `unwrap(mixed)`
+    // infers T = number | string from a union argument in one step. Only the last
+    // line, assigning `number | undefined` to a string, is a real error. Without
+    // the union rule T stays unbound (unknown) and the first two lines become
+    // false positives.
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly the deliberate mismatch, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0].message.contains("not assignable"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn unresolvable_constraint_is_reported_instead_of_silently_dropped() {
+    let source =
+        include_str!("fixtures/generics-tier1/generic_unresolvable_constraint_is_reported.ts");
+    let diagnostics = check(source, "generic_unresolvable_constraint_is_reported.ts");
+    // `Wrapper<number>` is a generic interface, which is not supported yet, so the
+    // bound cannot be resolved and `T` is left unconstrained. That must be said out
+    // loud, as a warning, not swallowed. It is not an error: the code is valid.
+    let constraint_warnings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("constraint of type parameter 'T'"))
+        .collect();
+    assert_eq!(
+        constraint_warnings.len(),
+        1,
+        "expected one unresolvable-constraint warning, got: {diagnostics:?}"
+    );
+    assert_eq!(constraint_warnings[0].severity, Severity::Warning);
+    assert!(
+        diagnostics.iter().all(|d| d.severity != Severity::Error),
+        "valid code must not gain errors, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn a_resolvable_constraint_produces_no_warning() {
+    let source =
+        include_str!("fixtures/generics-tier1/constraint_is_satisfied_and_usable_in_body.ts");
+    let diagnostics = check(source, "constraint_is_satisfied_and_usable_in_body.ts");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| !d.message.contains("constraint of type parameter")),
+        "got: {diagnostics:?}"
+    );
+}
