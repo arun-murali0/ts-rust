@@ -341,8 +341,7 @@ impl<'a> TypeNamespace<'a> {
             }
         }
 
-        properties.sort_by(|a, b| a.name.cmp(&b.name));
-        Some(arena.alloc(Type::Object(ObjectType { properties })))
+        Some(arena.alloc(Type::Object(ObjectType::new(properties))))
     }
 }
 

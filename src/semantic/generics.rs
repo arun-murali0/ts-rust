@@ -170,7 +170,7 @@ pub(crate) fn substitute_type_params(
                     optional: p.optional,
                 })
                 .collect();
-            arena.alloc(Type::Object(ObjectType { properties }))
+            arena.alloc(Type::Object(ObjectType::new(properties)))
         }
         Type::Union(members) => {
             let substituted = members

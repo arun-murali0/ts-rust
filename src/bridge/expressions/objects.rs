@@ -36,8 +36,7 @@ pub(super) fn infer_object_expression_type(
         });
     }
 
-    properties.sort_by(|a, b| a.name.cmp(&b.name));
-    ctx.arena.alloc(Type::Object(ObjectType { properties }))
+    ctx.arena.alloc(Type::Object(ObjectType::new(properties)))
 }
 
 // Each element's type is widened (a literal 5 becomes number) before being added

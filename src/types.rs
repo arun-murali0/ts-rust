@@ -2,6 +2,12 @@ use std::rc::Rc;
 
 use crate::arena::{TypeArena, TypeId};
 
+// The derived PartialEq compares every TypeId field by its raw arena slot, so two
+// composites (Object, Function, Array) that have the same shape but were allocated
+// at different times compare as unequal, and only literals and the fixed
+// primitives compare the way their content suggests. Do not use `==` on a Type to
+// ask "are these the same type"; use TypeArena::structurally_equal, which follows
+// TypeIds through the arena.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Type {
     Number,
@@ -85,7 +91,21 @@ impl Param {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectType {
+    // Always sorted by name. subtyping::object_is_subtype walks two of these in
+    // step (a merge-join, not a lookup per property) and TypeArena::structurally_equal
+    // compares them pairwise, and both are only correct on sorted input. Build one
+    // with ObjectType::new, which sorts, and never assemble the struct by hand.
     pub properties: Vec<PropertyEntry>,
+}
+
+impl ObjectType {
+    // The only supported way to construct an ObjectType. Sorting an already sorted
+    // list is a single linear pass, so callers that happen to have sorted input
+    // pay almost nothing for not having to know that.
+    pub fn new(mut properties: Vec<PropertyEntry>) -> Self {
+        properties.sort_by(|a, b| a.name.cmp(&b.name));
+        Self { properties }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

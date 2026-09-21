@@ -50,7 +50,7 @@ impl TypeArena {
                 _ => {
                     let already_present = flat
                         .iter()
-                        .any(|&existing| self.get(existing) == self.get(id));
+                        .any(|&existing| self.structurally_equal(existing, id));
                     if !already_present {
                         flat.push(id);
                     }
@@ -67,6 +67,80 @@ impl TypeArena {
 
     pub fn get(&self, id: TypeId) -> &Type {
         &self.types[id.0 as usize]
+    }
+
+    // Whether two types are the same type by shape, not by arena slot.
+    //
+    // The derived PartialEq on Type cannot answer this: it compares a composite's
+    // TypeId fields by raw slot, so `{ a: { b: number } }` written at two sites,
+    // whose inner objects sit at different slots, compare as unequal even though
+    // nothing distinguishes them. This follows TypeIds through the arena instead.
+    //
+    // Terminates because a Type can only refer to slots allocated before it (the
+    // arena is append-only and a type is built from ids that already exist), so the
+    // graph of types is acyclic and every recursion below strictly descends.
+    //
+    // Identity is the one thing shape must not override. A GenericParameter is
+    // equal only to the same declared parameter (its TypeParameterId), never to
+    // another `T` that merely has the same name or bound.
+    pub fn structurally_equal(&self, a: TypeId, b: TypeId) -> bool {
+        if a == b {
+            return true;
+        }
+
+        match (self.get(a), self.get(b)) {
+            (Type::Number, Type::Number)
+            | (Type::String, Type::String)
+            | (Type::Boolean, Type::Boolean)
+            | (Type::Null, Type::Null)
+            | (Type::Undefined, Type::Undefined)
+            | (Type::Any, Type::Any)
+            | (Type::Unknown, Type::Unknown)
+            | (Type::Error, Type::Error)
+            | (Type::Never, Type::Never) => true,
+
+            (Type::StringLiteral(x), Type::StringLiteral(y)) => x == y,
+            (Type::NumberLiteral(x), Type::NumberLiteral(y)) => x == y,
+            (Type::BooleanLiteral(x), Type::BooleanLiteral(y)) => x == y,
+
+            (Type::Array(x), Type::Array(y)) => self.structurally_equal(*x, *y),
+
+            (Type::Function(f), Type::Function(g)) => {
+                f.is_untyped == g.is_untyped
+                    && f.params.len() == g.params.len()
+                    && f.params.iter().zip(&g.params).all(|(p, q)| {
+                        p.optional == q.optional
+                            && p.rest == q.rest
+                            && self.structurally_equal(p.type_id, q.type_id)
+                    })
+                    && self.structurally_equal(f.return_type, g.return_type)
+            }
+
+            // Pairwise, which is only right because ObjectType keeps its
+            // properties sorted by name.
+            (Type::Object(x), Type::Object(y)) => {
+                x.properties.len() == y.properties.len()
+                    && x.properties.iter().zip(&y.properties).all(|(p, q)| {
+                        p.name == q.name
+                            && p.optional == q.optional
+                            && self.structurally_equal(p.type_id, q.type_id)
+                    })
+            }
+
+            // A union is a set: member order carries no meaning. Union members are
+            // already deduplicated by alloc_union, so equal length plus every
+            // member of one having a match in the other is set equality.
+            (Type::Union(xs), Type::Union(ys)) => {
+                xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .all(|&x| ys.iter().any(|&y| self.structurally_equal(x, y)))
+            }
+
+            (Type::GenericParameter(x, _, _), Type::GenericParameter(y, _, _)) => x == y,
+
+            _ => false,
+        }
     }
 
     // Fixed slots assigned in new(). These never change for the lifetime of an arena.
@@ -104,5 +178,181 @@ impl TypeArena {
 impl Default for TypeArena {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{FunctionType, ObjectType, Param, PropertyEntry, TypeParameterId};
+
+    fn property(name: &str, type_id: TypeId, optional: bool) -> PropertyEntry {
+        PropertyEntry {
+            name: name.into(),
+            type_id,
+            optional,
+        }
+    }
+
+    fn object(arena: &mut TypeArena, properties: Vec<PropertyEntry>) -> TypeId {
+        arena.alloc(Type::Object(ObjectType::new(properties)))
+    }
+
+    // `{ a: { b: number } }`, built from scratch each call so every call lands in
+    // fresh arena slots.
+    fn nested(arena: &mut TypeArena) -> TypeId {
+        let number = arena.number();
+        let inner = object(arena, vec![property("b", number, false)]);
+        object(arena, vec![property("a", inner, false)])
+    }
+
+    #[test]
+    fn derived_equality_cannot_see_through_a_slot_but_structural_equality_can() {
+        let mut arena = TypeArena::new();
+        let first = nested(&mut arena);
+        let second = nested(&mut arena);
+
+        assert_ne!(first, second, "separately allocated, so different slots");
+        assert_ne!(
+            arena.get(first),
+            arena.get(second),
+            "this is the gap: the derived == compares the inner object's slot"
+        );
+        assert!(arena.structurally_equal(first, second));
+    }
+
+    #[test]
+    fn union_collapses_structurally_identical_composites() {
+        let mut arena = TypeArena::new();
+        let first = nested(&mut arena);
+        let second = nested(&mut arena);
+
+        let union = arena.alloc_union(vec![first, second]);
+
+        assert!(
+            matches!(arena.get(union), Type::Object(_)),
+            "two identical shapes must collapse to one member, not stay a two-member union"
+        );
+    }
+
+    #[test]
+    fn union_keeps_composites_that_differ() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let a = object(&mut arena, vec![property("a", number, false)]);
+        let b = object(&mut arena, vec![property("a", string, false)]);
+
+        let union = arena.alloc_union(vec![a, b]);
+
+        assert!(matches!(arena.get(union), Type::Union(members) if members.len() == 2));
+    }
+
+    #[test]
+    fn objects_that_differ_only_in_optionality_or_name_are_not_equal() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let required = object(&mut arena, vec![property("a", number, false)]);
+        let optional = object(&mut arena, vec![property("a", number, true)]);
+        let renamed = object(&mut arena, vec![property("b", number, false)]);
+
+        assert!(!arena.structurally_equal(required, optional));
+        assert!(!arena.structurally_equal(required, renamed));
+    }
+
+    #[test]
+    fn object_property_order_at_construction_does_not_matter() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let one = object(
+            &mut arena,
+            vec![property("z", string, false), property("a", number, false)],
+        );
+        let two = object(
+            &mut arena,
+            vec![property("a", number, false), property("z", string, false)],
+        );
+
+        assert!(arena.structurally_equal(one, two));
+    }
+
+    #[test]
+    fn arrays_compare_by_element_shape() {
+        let mut arena = TypeArena::new();
+        let first_element = nested(&mut arena);
+        let second_element = nested(&mut arena);
+        let first = arena.alloc(Type::Array(first_element));
+        let second = arena.alloc(Type::Array(second_element));
+        let numbers = arena.alloc(Type::Array(arena.number()));
+
+        assert!(arena.structurally_equal(first, second));
+        assert!(!arena.structurally_equal(first, numbers));
+    }
+
+    #[test]
+    fn functions_compare_by_parameters_and_return_type() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let make = |arena: &mut TypeArena, param: TypeId, ret: TypeId, optional: bool| {
+            arena.alloc(Type::Function(FunctionType {
+                params: vec![Param {
+                    type_id: param,
+                    optional,
+                    rest: false,
+                }],
+                return_type: ret,
+                is_untyped: false,
+            }))
+        };
+        let base = make(&mut arena, number, string, false);
+        let same = make(&mut arena, number, string, false);
+        let other_param = make(&mut arena, string, string, false);
+        let other_return = make(&mut arena, number, number, false);
+        let optional_param = make(&mut arena, number, string, true);
+
+        assert!(arena.structurally_equal(base, same));
+        assert!(!arena.structurally_equal(base, other_param));
+        assert!(!arena.structurally_equal(base, other_return));
+        assert!(!arena.structurally_equal(base, optional_param));
+    }
+
+    #[test]
+    fn union_equality_ignores_member_order() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let one = arena.alloc_union(vec![number, string]);
+        let two = arena.alloc_union(vec![string, number]);
+
+        assert!(arena.structurally_equal(one, two));
+    }
+
+    #[test]
+    fn generic_parameters_are_equal_only_by_declaration_identity() {
+        let mut arena = TypeArena::new();
+        let same_declaration = TypeParameterId::new(10, 0);
+        let other_declaration = TypeParameterId::new(50, 0);
+
+        let first = arena.alloc(Type::GenericParameter(same_declaration, "T".into(), None));
+        let again = arena.alloc(Type::GenericParameter(same_declaration, "T".into(), None));
+        let lookalike = arena.alloc(Type::GenericParameter(other_declaration, "T".into(), None));
+
+        assert!(arena.structurally_equal(first, again));
+        assert!(
+            !arena.structurally_equal(first, lookalike),
+            "another `T` with the same name is a different type parameter"
+        );
+    }
+
+    #[test]
+    fn object_type_new_sorts_its_properties() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let built = ObjectType::new(vec![
+            property("c", number, false),
+            property("a", number, false),
+            property("b", number, false),
+        ]);
+
+        let names: Vec<&str> = built.properties.iter().map(|p| &*p.name).collect();
+        assert_eq!(names, ["a", "b", "c"]);
     }
 }

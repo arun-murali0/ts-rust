@@ -114,6 +114,14 @@ fn param_type_at(arena: &TypeArena, params: &[Param], position: usize) -> Option
 // than sup) falls out for free, and any sup property sub never reaches is only
 // acceptable if sup itself marks that property optional.
 fn object_is_subtype(arena: &TypeArena, sub: &ObjectType, sup: &ObjectType) -> bool {
+    // The merge-join below silently gives wrong answers on unsorted input, so an
+    // unsorted ObjectType reaching here is a construction bug elsewhere, not
+    // something to tolerate. Checked in debug builds (which is what the tests run).
+    debug_assert!(
+        is_sorted_by_name(&sub.properties) && is_sorted_by_name(&sup.properties),
+        "ObjectType properties must be sorted by name; build them with ObjectType::new"
+    );
+
     let mut sub_properties = sub.properties.iter().peekable();
 
     'sup_properties: for sup_property in &sup.properties {
@@ -145,6 +153,10 @@ fn object_is_subtype(arena: &TypeArena, sub: &ObjectType, sup: &ObjectType) -> b
     true
 }
 
+fn is_sorted_by_name(properties: &[crate::types::PropertyEntry]) -> bool {
+    properties.is_sorted_by(|a, b| a.name <= b.name)
+}
+
 // Any and Error both act as escape hatches, compatible with everything in both
 // directions, but for different reasons. Any is TypeScript's own opt-out from
 // checking. Error is this checker's internal sentinel for an expression that
@@ -157,6 +169,18 @@ fn is_universally_compatible(arena: &TypeArena, id: TypeId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_built_in_reverse_name_order_is_still_a_subtype() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        // Declared z-before-a, the way enum members are in source order.
+        let sub = arena.alloc(object_type(&[("z", string, false), ("a", number, false)]));
+        let sup = arena.alloc(object_type(&[("a", number, false), ("z", string, false)]));
+
+        assert!(is_subtype(&arena, sub, sup));
+        assert!(is_subtype(&arena, sup, sub));
+    }
 
     #[test]
     fn primitive_is_subtype_of_itself() {
@@ -304,7 +328,7 @@ mod tests {
     fn object_type(props: &[(&str, TypeId, bool)]) -> Type {
         use crate::types::{ObjectType, PropertyEntry};
 
-        let mut properties: Vec<PropertyEntry> = props
+        let properties: Vec<PropertyEntry> = props
             .iter()
             .map(|&(name, type_id, optional)| PropertyEntry {
                 name: name.into(),
@@ -312,8 +336,7 @@ mod tests {
                 optional,
             })
             .collect();
-        properties.sort_by(|a, b| a.name.cmp(&b.name));
-        Type::Object(ObjectType { properties })
+        Type::Object(ObjectType::new(properties))
     }
 
     #[test]

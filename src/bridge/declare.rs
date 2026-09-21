@@ -171,7 +171,11 @@ fn declare_enum(decl: &oxc_ast::ast::TSEnumDeclaration, ctx: &mut CheckContext<'
             optional: false,
         })
         .collect();
-    let value_type = ctx.arena.alloc(Type::Object(ObjectType { properties }));
+    // ObjectType::new sorts by name. Members are collected here in declaration
+    // order (`enum E { B, A }` gives [B, A]), and the merge-join in
+    // subtyping::object_is_subtype misaligns on unsorted input, which made an enum
+    // object wrongly fail to be assignable to a structural type it satisfies.
+    let value_type = ctx.arena.alloc(Type::Object(ObjectType::new(properties)));
     ctx.symbols.declare(symbol_id, value_type);
 }
 
