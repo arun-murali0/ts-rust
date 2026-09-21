@@ -87,7 +87,6 @@ When a condition cannot be understood safely, the implementation prefers to reta
 The same state mechanism can later handle:
 
 - `!`
-- richer `&&` / `||`
 - assignments
 - early returns
 - loops
@@ -96,6 +95,13 @@ The same state mechanism can later handle:
 - property and alias narrowing
 
 No new global type environment is required for each operator.
+
+(Richer `&&`/`||` narrowing, listed here as future work when this document was
+written, shipped in the Expression and Program Checking milestone — see
+`docs/expression-program-checking.md` §8. It's a good example of this
+mechanism scaling the way this section predicted: no new state layer was
+needed, just a new operator-specific handler built on the same `NarrowState`
+overlay.)
 
 ## 9. What Control-Flow Narrowing completed
 

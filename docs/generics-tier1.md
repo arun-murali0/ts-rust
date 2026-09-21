@@ -11,12 +11,12 @@ declare `<T>` in their AST, but `resolve()` does not push their type parameters 
 scope, and `TSTypeReference` resolution does not inspect `type_arguments` at all.
 `Box<number>` and bare `Box` resolve identically today.
 
-There are 7 regression fixtures in `tests/fixtures/generics-tier1/`.
+There are 13 regression fixtures in `tests/fixtures/generics-tier1/`.
 
 ## 2. One new type variant, not a parallel type system
 
 ```rust
-GenericParameter(TypeParameterId, String),
+GenericParameter(TypeParameterId, String, Option<TypeId>),
 ```
 
 A type parameter is represented as an ordinary `Type` variant, the same enum that
@@ -27,6 +27,15 @@ pattern-matches on it during inference or substitution.
 
 The `String` is the parameter's source name (`"T"`), kept for pattern-matching
 readability and diagnostics. It is not used as an equality key anywhere.
+
+The `Option<TypeId>` is the parameter's own `extends` bound, resolved once when
+the `GenericParameter` is first created and reused from the same
+`type_param_cache` as everything else about this parameter — `None` means
+fully unconstrained. It's what makes the constraint checking in §8 possible:
+without it, a `GenericParameter` would carry no information about what it's
+allowed to be, and enforcing `T extends { length: number }` would need some
+separate side-table keyed on `TypeParameterId` instead of living on the type
+itself.
 
 ## 3. Identity: `TypeParameterId`
 
