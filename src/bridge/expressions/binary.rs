@@ -27,10 +27,17 @@ pub(super) fn infer_binary_expression_type(
         // The string check is tried first since that matches runtime semantics,
         // where "1" + 1 is string concatenation, not addition.
         BinaryOperator::Addition => {
-            let is_string = ctx.semantic().is_assignable(left, ctx.arena.string())
-                || ctx.semantic().is_assignable(right, ctx.arena.string());
-            let is_number = ctx.semantic().is_assignable(left, ctx.arena.number())
-                && ctx.semantic().is_assignable(right, ctx.arena.number());
+            // Read before calling ctx.semantic(): SemanticQueries now borrows
+            // ctx.arena and ctx.subtype_cache together for as long as it lives,
+            // so ctx.arena can't be reached again (even just to read a fixed
+            // primitive id) while a SemanticQueries value from an earlier call
+            // in this same expression is still alive.
+            let string_ty = ctx.arena.string();
+            let number_ty = ctx.arena.number();
+            let is_string = ctx.semantic().is_assignable(left, string_ty)
+                || ctx.semantic().is_assignable(right, string_ty);
+            let is_number = ctx.semantic().is_assignable(left, number_ty)
+                && ctx.semantic().is_assignable(right, number_ty);
             if is_string {
                 ctx.arena.string()
             } else if is_number {
@@ -48,8 +55,9 @@ pub(super) fn infer_binary_expression_type(
         | BinaryOperator::Division
         | BinaryOperator::Remainder
         | BinaryOperator::Exponential => {
-            if ctx.semantic().is_assignable(left, ctx.arena.number())
-                && ctx.semantic().is_assignable(right, ctx.arena.number())
+            let number_ty = ctx.arena.number();
+            if ctx.semantic().is_assignable(left, number_ty)
+                && ctx.semantic().is_assignable(right, number_ty)
             {
                 ctx.arena.number()
             } else {
@@ -62,6 +70,10 @@ pub(super) fn infer_binary_expression_type(
     }
 }
 
+// Both mismatch sites above (`+` and the arithmetic group) need the same
+// diagnostic shape and differ only in which operator string to name, so it's
+// pulled out here rather than duplicated -- if the message format changes,
+// there is one call to update instead of two that have to be kept in sync.
 fn push_binary_op_mismatch(ctx: &mut CheckContext<'_, '_>, span: Span, operator: &str) {
     ctx.error(
         crate::diagnostic_messages::messages::binary_operand_type_mismatch(operator),

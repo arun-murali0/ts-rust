@@ -3,6 +3,7 @@ use oxc_span::Span;
 use crate::arena::{TypeArena, TypeId};
 use crate::diagnostic_messages::DiagnosticMessage;
 use crate::diagnostics::{Diagnostic, Severity};
+use crate::fxhash::FxHashMap;
 use crate::namespace::TypeNamespace;
 use crate::semantic::SemanticQueries;
 use crate::symbol_map::SymbolTypeMap;
@@ -23,6 +24,29 @@ pub struct CheckContext<'ast, 'src> {
     pub file_name: &'src str,
 
     pub narrow: NarrowState,
+
+    // Memoizes is_subtype/is_assignable results by the exact (source, target)
+    // TypeId pair asked about, for the lifetime of this one file's check. Keyed
+    // on the pair in order, never symmetrized: subtyping is not symmetric (see
+    // subtyping.rs), so (a, b) and (b, a) are cached as independent entries.
+    //
+    // This only catches repeats of the *same* TypeId pair -- it is not type
+    // canonicalization. Two structurally identical but separately allocated
+    // types (e.g. the same-shaped object literal checked at two different call
+    // sites) still get different TypeIds and therefore different, uncached
+    // entries here. Concrete case this does catch: repeated re-checks of the
+    // same subterm pair reached from different branches of one recursive
+    // object/union comparison, which all go through ctx.semantic().
+    //
+    // NOT caught: generics::infer_type_param_bindings widens a type parameter's
+    // binding by calling subtyping::is_subtype directly on a bare &mut TypeArena,
+    // since inference runs before a CheckContext's other state (namespace,
+    // symbols) is relevant to it. So `allSame(1, 2, 3, ..., 8)` re-checking each
+    // new candidate against the same bound T does repeat (candidate, existing)
+    // pairs, but none of those repeats are memoized here. If that path is ever
+    // made cache-aware, route it through ctx.semantic() like everything else
+    // rather than calling subtyping::is_subtype directly.
+    pub subtype_cache: FxHashMap<(TypeId, TypeId), bool>,
 
     pub current_return_type: Option<TypeId>,
 
@@ -51,6 +75,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             diagnostics: Vec::new(),
             file_name,
             narrow: NarrowState::new(),
+            subtype_cache: FxHashMap::default(),
             current_return_type: None,
             current_class_instance: None,
             implicit_this: false,
@@ -74,8 +99,18 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
     // directly, so TypeScript-specific assignability rules that are not plain
     // structural subtyping, such as excess property checks on object literals or
     // const assertions, have one place to live later without changing call sites.
-    pub fn semantic(&self) -> SemanticQueries<'_> {
-        SemanticQueries::new(&self.arena)
+    //
+    // Takes &mut self (not &self) because SemanticQueries now carries a mutable
+    // handle to subtype_cache alongside the arena. Field-level destructuring
+    // here borrows the two fields disjointly, but that disjointness is only
+    // visible inside this function body -- past this call boundary the returned
+    // SemanticQueries opaquely holds part of `self`, so callers cannot access
+    // ctx.arena or ctx.subtype_cache directly while a SemanticQueries from this
+    // call is still alive. In practice this means any TypeId needed as an
+    // argument (e.g. ctx.arena.number()) must be read into a local *before*
+    // calling ctx.semantic(), not inline as part of the same expression.
+    pub fn semantic(&mut self) -> SemanticQueries<'_> {
+        SemanticQueries::new(&self.arena, &mut self.subtype_cache)
     }
 
     pub fn warning(&mut self, message: DiagnosticMessage, span: Span) {
