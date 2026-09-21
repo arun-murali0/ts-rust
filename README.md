@@ -107,6 +107,10 @@ src/
 ├── symbol_map.rs
 ├── type_annotation.rs
 ├── diagnostics.rs
+├── diagnostic_codes.rs
+├── diagnostic_messages.rs
+├── diagnostic_view.rs
+├── fxhash.rs
 ├── line_index.rs
 ├── error.rs
 ├── wasm.rs
@@ -124,8 +128,8 @@ src/
     │   ├── core.rs
     │   ├── binary.rs
     │   ├── calls.rs
+    │   ├── excess.rs
     │   ├── functions.rs
-    │   ├── generics.rs
     │   ├── logical.rs
     │   ├── members.rs
     │   └── objects.rs
