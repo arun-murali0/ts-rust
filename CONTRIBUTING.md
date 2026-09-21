@@ -51,4 +51,18 @@ Do not use `unwrap()` as normal error handling. Prefer explicit propagation or a
 
 ## Comments and documentation
 
-Keep source comments rare and limited to non-obvious invariants or decisions. Put architectural reasoning, development history, and stage boundaries in `docs/`.
+A comment stating what the next line of code obviously does is noise; a comment explaining why this approach was
+chosen over an apparent alternative, what invariant it depends on, or what
+would break if it were removed, is worth the space it takes. Most functions in
+this codebase carry that kind of comment — that's intentional, not
+accidental verbosity, and new code should match it rather than default to
+sparser comments than its neighbors.
+
+A useful test: if you deleted the comment, could a future contributor
+re-derive the reasoning from the code alone? If not, it stays.
+
+Put broader architectural reasoning, development history, and stage
+boundaries in `docs/` rather than in a source comment that would otherwise
+grow to several paragraphs — a source comment should explain the local
+decision; a `docs/` page explains why the whole capability exists and how it
+fits the rest of the checker.
