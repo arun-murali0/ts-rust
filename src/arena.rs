@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn object_type_new_sorts_its_properties() {
-        let mut arena = TypeArena::new();
+        let arena = TypeArena::new();
         let number = arena.number();
         let built = ObjectType::new(vec![
             property("c", number, false),
