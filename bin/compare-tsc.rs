@@ -67,8 +67,7 @@ struct Style {
 
 impl Style {
     fn detect() -> Self {
-        let enabled =
-            env::var_os(NO_COLOR_ENV).is_none() && std::io::stdout().is_terminal();
+        let enabled = env::var_os(NO_COLOR_ENV).is_none() && std::io::stdout().is_terminal();
         Self { enabled }
     }
 
