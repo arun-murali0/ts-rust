@@ -5,10 +5,21 @@
 //! directly, the same entry point bin/ts-rust.rs uses, and only shells out to
 //! `tsc` itself (there is no Rust API for that side of the comparison).
 //!
-//! Pass/fail is decided by line number alone, errors only -- severity is a
-//! filter applied before comparison (only Severity::Error diagnostics ever
+//! Matching is by line number alone, errors only, and by *presence*: a line
+//! agrees when both sides report at least one error on it, or neither does.
+//! How many errors a side reports on a line is not compared, since ts-rust
+//! deliberately reports one error where tsc reports several in places. This is
+//! the same rule scripts/compare-local.sh uses, so the two tools agree. Severity
+//! is a filter applied before comparison (only Severity::Error diagnostics ever
 //! become an Entry on either side), not a field the comparison itself
-//! checks. ts-rust's own code (TSR####, see diagnostic_codes.rs) is its own
+//! checks.
+//!
+//! A file that does not fully agree is one of three kinds, and they are not
+//! equally bad. A GAP has a line where only tsc reports an error: a check
+//! ts-rust does not have yet. A FALSE POSITIVE has a line where only ts-rust
+//! reports one: ts-rust rejecting code tsc accepts. MIXED has both. Only false
+//! positives (and MIXED, which contains one) make the exit code nonzero; gaps are
+//! reported but expected while the checker is still being built. ts-rust's own code (TSR####, see diagnostic_codes.rs) is its own
 //! namespace, not tsc's TS#### numbering, and message wording is
 //! independently written -- so comparing message text or code text
 //! verbatim against tsc's own would report near-constant false mismatches
@@ -34,7 +45,7 @@
 //! Single-file conformance fixtures are the only meaningful input today.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::IsTerminal,
     path::{Path, PathBuf},
@@ -91,11 +102,6 @@ impl Style {
 
 // --- diagnostic model -------------------------------------------------------
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct ComparablePosition {
-    line: u32,
-}
-
 #[derive(Clone)]
 struct Entry {
     line: u32,
@@ -105,8 +111,44 @@ struct Entry {
 }
 
 struct SideDiagnostics {
-    positions: Vec<ComparablePosition>,
     entries: Vec<Entry>,
+}
+
+impl SideDiagnostics {
+    fn lines(&self) -> BTreeSet<u32> {
+        self.entries.iter().map(|entry| entry.line).collect()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Match,
+    Gap,
+    FalsePositive,
+    Mixed,
+}
+
+impl Verdict {
+    fn of(ts_rust_side: &SideDiagnostics, tsc_side: &SideDiagnostics) -> Self {
+        let ts_rust_lines = ts_rust_side.lines();
+        let tsc_lines = tsc_side.lines();
+        let false_positive = ts_rust_lines.difference(&tsc_lines).next().is_some();
+        let gap = tsc_lines.difference(&ts_rust_lines).next().is_some();
+        match (false_positive, gap) {
+            (false, false) => Self::Match,
+            (false, true) => Self::Gap,
+            (true, false) => Self::FalsePositive,
+            (true, true) => Self::Mixed,
+        }
+    }
+
+    fn has_false_positive(self) -> bool {
+        matches!(self, Self::FalsePositive | Self::Mixed)
+    }
+
+    fn has_gap(self) -> bool {
+        matches!(self, Self::Gap | Self::Mixed)
+    }
 }
 
 fn main() -> ExitCode {
@@ -147,8 +189,7 @@ fn run() -> Result<bool, String> {
     }
 
     let checker = TypeChecker::new();
-    let mut passed = 0usize;
-    let mut failed = 0usize;
+    let mut counts = Counts::default();
 
     println!(
         "{}",
@@ -168,21 +209,43 @@ fn run() -> Result<bool, String> {
         let ts_rust_side = ts_rust_diagnostics(&checker, &source, &file_name)?;
         let tsc_side = tsc_diagnostics(&tsc_bin, case)?;
         let relative = case.strip_prefix(root).unwrap_or(case);
-        let ok = ts_rust_side.positions == tsc_side.positions;
+        let verdict = Verdict::of(&ts_rust_side, &tsc_side);
+        counts.record(verdict);
 
-        if ok {
-            passed += 1;
-        } else {
-            failed += 1;
-        }
-
-        print_case(&style, relative, ok, &ts_rust_side, &tsc_side);
+        print_case(&style, relative, verdict, &ts_rust_side, &tsc_side);
         println!();
     }
 
-    print_summary(&style, passed, failed, &expected_version);
+    print_summary(&style, &counts, &expected_version);
 
-    Ok(failed == 0)
+    // Gaps are expected while the checker is incomplete; a false positive is
+    // ts-rust rejecting code tsc accepts, and is the only thing that fails a run.
+    Ok(counts.false_positive_files == 0)
+}
+
+#[derive(Default)]
+struct Counts {
+    total: usize,
+    matched: usize,
+    gap_files: usize,
+    false_positive_files: usize,
+}
+
+impl Counts {
+    // A MIXED file counts toward both gap_files and false_positive_files, so
+    // those two can sum to more than the number of files that did not match.
+    fn record(&mut self, verdict: Verdict) {
+        self.total += 1;
+        if verdict == Verdict::Match {
+            self.matched += 1;
+        }
+        if verdict.has_gap() {
+            self.gap_files += 1;
+        }
+        if verdict.has_false_positive() {
+            self.false_positive_files += 1;
+        }
+    }
 }
 
 // --- rendering ---------------------------------------------------------
@@ -203,18 +266,19 @@ fn box_line(left: char, mid: char, right: char) -> String {
 fn print_case(
     style: &Style,
     relative: &Path,
-    ok: bool,
+    verdict: Verdict,
     ts_rust_side: &SideDiagnostics,
     tsc_side: &SideDiagnostics,
 ) {
     let title = relative.display().to_string();
-    let verdict = if ok {
-        style.green("MATCH")
-    } else {
-        style.red("DIFFER")
+    let label = match verdict {
+        Verdict::Match => style.green("MATCH"),
+        Verdict::Gap => style.yellow("GAP"),
+        Verdict::FalsePositive => style.red("FALSE POSITIVE"),
+        Verdict::Mixed => style.red("MIXED"),
     };
 
-    println!("  {}  {}", style.bold(&title), verdict);
+    println!("  {}  {}", style.bold(&title), label);
     println!("  {}", style.dim(&box_line('┌', '┬', '┐')));
     println!(
         "  │ {:<lw$} │ {:<mw$} │ {:<mw$} │",
@@ -313,19 +377,34 @@ fn print_case(
     println!("  {}", style.dim(&box_line('└', '┴', '┘')));
 }
 
-fn print_summary(style: &Style, passed: usize, failed: usize, expected_version: &str) {
-    let total = passed + failed;
-    if failed == 0 {
+fn print_summary(style: &Style, counts: &Counts, expected_version: &str) {
+    let Counts {
+        total,
+        matched,
+        gap_files,
+        false_positive_files,
+    } = *counts;
+
+    if matched == total {
         println!(
-            "{} all {total} fixture(s) agree with tsc {expected_version} on error position/severity",
+            "{} all {total} fixture(s) agree with tsc {expected_version} on error lines",
             style.green("✓")
         );
-    } else {
-        println!(
-            "{} {failed} of {total} fixture(s) disagree with tsc {expected_version} ({passed} agree)",
-            style.red("✗")
-        );
+        return;
     }
+
+    let headline = format!("{matched} of {total} fixture(s) agree with tsc {expected_version}");
+    if false_positive_files == 0 {
+        println!("{} {headline}", style.yellow("~"));
+    } else {
+        println!("{} {headline}", style.red("✗"));
+    }
+    println!(
+        "  {gap_files} with a gap (tsc reports an error ts-rust does not -- a check not built yet)"
+    );
+    println!(
+        "  {false_positive_files} with a false positive (ts-rust reports an error tsc does not)"
+    );
 }
 
 fn truncate(text: &str, width: usize) -> String {
@@ -389,8 +468,10 @@ fn print_usage() {
         "Usage: cargo run --bin compare-tsc -- [--case <fixture>] [--tsc <command>]\n\
          \n\
          Compares ts-rust's diagnostics against tsc for every fixture under\n\
-         {CONFORMANCE_DIR}/, by (line, severity) only, errors only -- see the\n\
-         module doc comment in bin/compare-tsc.rs for why.\n\
+         {CONFORMANCE_DIR}/, by line only, errors only -- see the module doc\n\
+         comment in bin/compare-tsc.rs for why. A gap (tsc-only error) is\n\
+         reported but does not fail the run; a false positive (ts-rust-only\n\
+         error) does.\n\
          \n\
          The installed tsc must report the exact version pinned in\n\
          {REFERENCE_FILE}; a mismatch is a hard error, not a warning.\n\
@@ -461,7 +542,6 @@ fn ts_rust_diagnostics(
         .map_err(|error| format!("{file_name}: ts-rust failed to parse: {error}"))?;
     let line_index = LineIndex::new(source);
 
-    let mut positions = Vec::new();
     let mut entries = Vec::new();
     for diagnostic in &result.diagnostics {
         if !matches!(diagnostic.severity, Severity::Error) {
@@ -470,7 +550,6 @@ fn ts_rust_diagnostics(
             continue;
         }
         let (line, column) = line_index.line_col_utf8(diagnostic.start, source);
-        positions.push(ComparablePosition { line });
         entries.push(Entry {
             line,
             column,
@@ -478,9 +557,8 @@ fn ts_rust_diagnostics(
             message: diagnostic.message.clone(),
         });
     }
-    positions.sort();
     entries.sort_by_key(|entry| entry.line);
-    Ok(SideDiagnostics { positions, entries })
+    Ok(SideDiagnostics { entries })
 }
 
 fn tsc_diagnostics(tsc_bin: &str, case: &Path) -> Result<SideDiagnostics, String> {
@@ -503,7 +581,6 @@ fn tsc_diagnostics(tsc_bin: &str, case: &Path) -> Result<SideDiagnostics, String
     let stderr = String::from_utf8_lossy(&output.stderr);
     let text = format!("{stdout}{stderr}");
 
-    let mut positions = Vec::new();
     let mut entries = Vec::new();
     for line in text.lines() {
         let Some((row, col, is_error, code, message)) = parse_tsc_line(line) else {
@@ -512,7 +589,6 @@ fn tsc_diagnostics(tsc_bin: &str, case: &Path) -> Result<SideDiagnostics, String
         if !is_error {
             continue;
         }
-        positions.push(ComparablePosition { line: row });
         entries.push(Entry {
             line: row,
             column: col,
@@ -520,9 +596,8 @@ fn tsc_diagnostics(tsc_bin: &str, case: &Path) -> Result<SideDiagnostics, String
             message,
         });
     }
-    positions.sort();
     entries.sort_by_key(|entry| entry.line);
-    Ok(SideDiagnostics { positions, entries })
+    Ok(SideDiagnostics { entries })
 }
 
 // Parses one line of `tsc --pretty false` output, shaped like:

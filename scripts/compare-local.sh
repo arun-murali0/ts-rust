@@ -249,6 +249,8 @@ END {
   total_files = n_all
   total_agree = 0
   total_differ = 0
+  total_gap = 0
+  total_fp = 0
   current_tier = ""
 
   for (i = 1; i <= n_all; i++) {
@@ -280,14 +282,27 @@ END {
       for (b = a + 1; b <= nlines; b++)
         if (ordered[b] < ordered[a]) { tmp = ordered[a]; ordered[a] = ordered[b]; ordered[b] = tmp }
 
-    file_ok = 1
+    # A line only ts-rust reports is a false positive; a line only tsc reports
+    # is a gap (a check not built yet). Lines are compared by presence, not by
+    # how many errors each side reports on them.
+    has_fp = 0; has_gap = 0
     for (a = 1; a <= nlines; a++) {
       key = path SUBSEP ordered[a]
-      if ((key in tsrust_lines) != (key in tsc_lines)) file_ok = 0
+      if ((key in tsrust_lines) && !(key in tsc_lines)) has_fp = 1
+      if ((key in tsc_lines) && !(key in tsrust_lines)) has_gap = 1
     }
-    if (file_ok) total_agree++; else total_differ++
+    file_ok = (!has_fp && !has_gap)
+    if (file_ok) total_agree++
+    else {
+      total_differ++
+      if (has_fp) total_fp++
+      if (has_gap) total_gap++
+    }
 
-    verdict = file_ok ? C_GREEN "MATCH" C_RESET : C_RED "DIFFER" C_RESET
+    if (file_ok) verdict = C_GREEN "MATCH" C_RESET
+    else if (has_fp && has_gap) verdict = C_RED "MIXED" C_RESET
+    else if (has_fp) verdict = C_RED "FALSE POSITIVE" C_RESET
+    else verdict = C_YELLOW "GAP" C_RESET
     printf "\n  %s%s%s  %s\n", C_BOLD, path, C_RESET, verdict
     printf "  %-" LW "s  %-" MW "s  %-" MW "s\n", "line", "ts-rust", "tsc"
     printf "  %s  %s  %s\n", repeat("-", LW), repeat("-", MW), repeat("-", MW)
@@ -322,7 +337,9 @@ END {
   print ""
   clean_or_skipped = total_files - total_agree - total_differ
   printf "%s%d%s of %d file(s) agree with tsc (errors-only, %d differ)\n", \
-    (total_differ == 0 ? C_GREEN : C_YELLOW), total_agree, C_RESET, total_files, total_differ
+    (total_differ == 0 ? C_GREEN : (total_fp == 0 ? C_YELLOW : C_RED)), total_agree, C_RESET, total_files, total_differ
+  printf "  %d with a gap (tsc reports an error ts-rust does not -- a check not built yet)\n", total_gap
+  printf "  %d with a false positive (ts-rust reports an error tsc does not)\n", total_fp
   print C_DIM "Note: divergence here is often intentional -- see the module doc comment" C_RESET
   print C_DIM "in bin/compare-tsc.rs for which fixtures are meant to diverge from tsc." C_RESET
 }
