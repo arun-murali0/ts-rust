@@ -14,7 +14,9 @@ fn check(source: &str, file_name: &str) -> Vec<Diagnostic> {
     let checker = TypeChecker::new();
     let result = checker.check_source(source, file_name);
     assert!(result.is_ok(), "source should at least parse: {result:?}");
-    result.map(|checked| checked.diagnostics).unwrap_or_default()
+    result
+        .map(|checked| checked.diagnostics)
+        .unwrap_or_default()
 }
 
 // A stable fingerprint of a diagnostic set: (code, start) pairs, sorted. Two
@@ -65,11 +67,8 @@ fn generic_function_with_many_same_typed_arguments_stays_correct() {
         // Every argument is a number: T should infer to number, no diagnostics.
         allSame(1, 2, 3, 4, 5, 6, 7, 8);
     "#;
-    let diagnostics = assert_identical_across_runs(
-        source,
-        "generic_many_same_typed_arguments_ok.ts",
-        20,
-    );
+    let diagnostics =
+        assert_identical_across_runs(source, "generic_many_same_typed_arguments_ok.ts", 20);
     assert!(
         diagnostics.is_empty(),
         "expected all-number arguments to infer T = number cleanly, got: {diagnostics:?}"
@@ -90,11 +89,8 @@ fn generic_function_with_one_mismatched_argument_among_many_is_still_caught() {
 
         allSame(1, 2, "not a number", 4, 5);
     "#;
-    let diagnostics = assert_identical_across_runs(
-        source,
-        "generic_many_arguments_one_mismatch.ts",
-        20,
-    );
+    let diagnostics =
+        assert_identical_across_runs(source, "generic_many_arguments_one_mismatch.ts", 20);
     assert!(
         !diagnostics.is_empty(),
         "expected the string argument among numbers to be flagged, got no diagnostics"
@@ -125,11 +121,8 @@ fn repeated_independent_generic_calls_do_not_cross_contaminate() {
 
         const wrongNumber: number = identity("still a string");
     "#;
-    let diagnostics = assert_identical_across_runs(
-        source,
-        "repeated_independent_generic_calls.ts",
-        20,
-    );
+    let diagnostics =
+        assert_identical_across_runs(source, "repeated_independent_generic_calls.ts", 20);
     assert_eq!(
         diagnostics.len(),
         1,
@@ -166,8 +159,7 @@ fn wide_union_assignments_in_both_directions_stay_correct() {
     source.push_str("const w2: Wide = \"variant0\";\n");
     source.push_str("const n2: Narrow = w2;\n"); // Wide -> Narrow: not fine.
 
-    let diagnostics =
-        assert_identical_across_runs(&source, "wide_union_both_directions.ts", 10);
+    let diagnostics = assert_identical_across_runs(&source, "wide_union_both_directions.ts", 10);
     assert_eq!(
         diagnostics.len(),
         1,
@@ -242,8 +234,7 @@ fn mixed_generic_union_and_class_checks_in_one_file_stay_correct() {
         const badStatus: Status = "not-a-status";
         const badBase: Derived = new Base();
     "#;
-    let diagnostics =
-        assert_identical_across_runs(source, "mixed_generic_union_class.ts", 15);
+    let diagnostics = assert_identical_across_runs(source, "mixed_generic_union_class.ts", 15);
     assert_eq!(
         diagnostics.len(),
         3,
