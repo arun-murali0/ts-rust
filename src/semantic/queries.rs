@@ -23,7 +23,10 @@ pub struct SemanticQueries<'a> {
 }
 
 impl<'a> SemanticQueries<'a> {
-    pub(crate) fn new(arena: &'a TypeArena, cache: &'a mut FxHashMap<(TypeId, TypeId), bool>) -> Self {
+    pub(crate) fn new(
+        arena: &'a TypeArena,
+        cache: &'a mut FxHashMap<(TypeId, TypeId), bool>,
+    ) -> Self {
         Self { arena, cache }
     }
 

@@ -267,7 +267,10 @@ fn ternary_of_identical_nested_object_literals_collapses_to_one_type() {
     let source = include_str!(
         "fixtures/structural-types/union_of_identical_nested_object_shapes_collapses.ts"
     );
-    let diagnostics = check(source, "union_of_identical_nested_object_shapes_collapses.ts");
+    let diagnostics = check(
+        source,
+        "union_of_identical_nested_object_shapes_collapses.ts",
+    );
     // The two branches are `{ inner: { count: number } }` built at different
     // sites, so their inner objects sit in different arena slots. Compared by slot
     // they stay a two-member union, and reading `.inner` off a union is an error.
@@ -283,7 +286,10 @@ fn structurally_equal_aliases_in_a_union_narrow_to_one_usable_type() {
     let source = include_str!(
         "fixtures/structural-types/union_of_structurally_equal_aliases_narrows_cleanly.ts"
     );
-    let diagnostics = check(source, "union_of_structurally_equal_aliases_narrows_cleanly.ts");
+    let diagnostics = check(
+        source,
+        "union_of_structurally_equal_aliases_narrows_cleanly.ts",
+    );
     // `First | Second | null` collapses First and Second into one member, so
     // narrowing away null leaves a single object and `x.value.count` resolves.
     assert!(

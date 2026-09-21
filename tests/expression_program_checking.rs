@@ -771,7 +771,10 @@ fn string_enum_object_is_assignable_to_a_structural_type_whatever_its_declaratio
     let source = include_str!(
         "fixtures/expression-program-checking/string_enum_object_assignable_to_structural_type.ts"
     );
-    let diagnostics = check(source, "string_enum_object_assignable_to_structural_type.ts");
+    let diagnostics = check(
+        source,
+        "string_enum_object_assignable_to_structural_type.ts",
+    );
     // Pending, Active, Done is not alphabetical, and string members exercise the
     // literal-to-union path as well as the property ordering.
     assert!(
