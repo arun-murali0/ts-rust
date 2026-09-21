@@ -88,6 +88,15 @@ pub mod messages {
         )
     }
 
+    pub fn property_not_initialized(name: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::PropertyNotInitialized,
+            format!(
+                "Property '{name}' has no initializer and is not definitely assigned in the constructor."
+            ),
+        )
+    }
+
     pub fn parameter_implicitly_any(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::ImplicitAnyParameter,

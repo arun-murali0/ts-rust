@@ -32,9 +32,19 @@ fn method_call_through_member_expression_is_checked() {
 fn extends_flattens_inherited_fields() {
     let source = include_str!("fixtures/classes-inheritance/extends_inherits_fields.ts");
     let diagnostics = check(source, "extends_inherits_fields.ts");
+    // Both fields have no initializer, which is TS2564. That is the only thing
+    // reported: the literal assigned to Dog is not flagged, which is what shows
+    // Animal's `name` is flattened into Dog.
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "expected exactly the two uninitialized-property errors, got: {diagnostics:?}"
+    );
     assert!(
-        diagnostics.is_empty(),
-        "expected no false positives, got: {diagnostics:?}"
+        diagnostics
+            .iter()
+            .all(|d| d.severity == Severity::Error && d.message.contains("has no initializer")),
+        "got: {diagnostics:?}"
     );
 }
 
@@ -44,9 +54,14 @@ fn missing_an_inherited_field_is_caught() {
     let diagnostics = check(source, "extends_missing_inherited_field.ts");
     assert_eq!(
         diagnostics.len(),
-        1,
-        "expected exactly one diagnostic, got: {diagnostics:?}"
+        3,
+        "expected two uninitialized-property errors plus the missing-field mismatch, got: {diagnostics:?}"
     );
+    let uninitialized = diagnostics
+        .iter()
+        .filter(|d| d.message.contains("has no initializer"))
+        .count();
+    assert_eq!(uninitialized, 2, "got: {diagnostics:?}");
 }
 
 #[test]
@@ -65,9 +80,16 @@ fn new_expression_checks_constructor_arity() {
 fn this_expression_resolves_to_the_class_instance_type() {
     let source = include_str!("fixtures/classes-inheritance/this_expression_known_gap.ts");
     let diagnostics = check(source, "this_expression_known_gap.ts");
-    assert!(
-        diagnostics.is_empty(),
+    // The only diagnostic is the uninitialized `count`; `this.count` itself
+    // resolves correctly, so nothing is reported at the return.
+    assert_eq!(
+        diagnostics.len(),
+        1,
         "expected `this.count` to resolve correctly, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[0].message.contains("has no initializer"),
+        "got: {diagnostics:?}"
     );
 }
 
@@ -77,8 +99,20 @@ fn this_expression_type_mismatch_is_caught() {
     let diagnostics = check(source, "this_expression_type_mismatch.ts");
     assert_eq!(
         diagnostics.len(),
-        1,
-        "expected exactly one diagnostic, got: {diagnostics:?}"
+        2,
+        "expected the uninitialized `count` and the return mismatch, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("has no initializer")),
+        "got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("declared return type")),
+        "got: {diagnostics:?}"
     );
 }
 
@@ -121,8 +155,14 @@ fn one_unresolvable_member_makes_the_whole_class_unsupported() {
     );
     assert_eq!(
         diagnostics.len(),
-        2,
-        "expected the implicit-any error and the unsupported-class warning, got: {diagnostics:?}"
+        3,
+        "expected the implicit-any error, the uninitialized `x`, and the unsupported-class warning, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.message.contains("has no initializer")),
+        "an unsupported class still reports its uninitialized fields, got: {diagnostics:?}"
     );
 
     let implicit_any = diagnostics
@@ -153,8 +193,14 @@ fn untyped_method_param_skips_arity_not_whole_class() {
 
     assert_eq!(
         diagnostics.len(),
-        4,
-        "expected exactly four diagnostics, got: {diagnostics:?}"
+        5,
+        "expected exactly five diagnostics, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error && d.message.contains("has no initializer")),
+        "expected an uninitialized-property error for `count`, got: {diagnostics:?}"
     );
 
     let implicit_any = diagnostics
@@ -198,5 +244,85 @@ fn untyped_method_param_skips_arity_not_whole_class() {
     assert_eq!(
         binary_op_mismatch.map(|diagnostic| diagnostic.severity),
         Some(Severity::Error)
+    );
+}
+
+#[test]
+fn property_initialization_is_satisfied_by_every_recognized_form() {
+    let source =
+        include_str!("fixtures/classes-inheritance/property_initialization_is_satisfied.ts");
+    let diagnostics = check(source, "property_initialization_is_satisfied.ts");
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "an initializer, a constructor assignment, `!`, `?`, an undefined-including or `any` type, \
+         and a static property must all be accepted, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn property_never_assigned_in_the_constructor_is_flagged() {
+    let source = include_str!(
+        "fixtures/classes-inheritance/property_missing_from_constructor_is_flagged.ts"
+    );
+    let diagnostics = check(source, "property_missing_from_constructor_is_flagged.ts");
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "only `forgotten` is unassigned, got: {diagnostics:?}"
+    );
+    assert!(
+        errors[0].message.contains("'forgotten'"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn property_assigned_only_inside_a_callback_is_flagged() {
+    let source = include_str!(
+        "fixtures/classes-inheritance/property_assigned_only_inside_a_callback_is_flagged.ts"
+    );
+    let diagnostics = check(
+        source,
+        "property_assigned_only_inside_a_callback_is_flagged.ts",
+    );
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(
+        errors.len(),
+        1,
+        "an assignment inside a nested arrow does not count, got: {diagnostics:?}"
+    );
+    assert!(
+        errors[0].message.contains("'value'"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn conditional_constructor_assignment_is_a_known_gap() {
+    let source = include_str!(
+        "fixtures/classes-inheritance/constructor_conditional_assignment_known_gap.ts"
+    );
+    let diagnostics = check(source, "constructor_conditional_assignment_known_gap.ts");
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    // tsc reports `value` here, because it is only assigned when `flag` is true.
+    // Any assignment in the constructor counts as assigning it, so this checker
+    // reports nothing: a gap, chosen over risking a false positive.
+    assert!(
+        errors.is_empty(),
+        "known-gap fixture behavior changed, got: {diagnostics:?}"
     );
 }

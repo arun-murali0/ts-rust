@@ -26,6 +26,7 @@ pub enum DiagnosticCode {
     StaticFieldInitializerMismatch,
     TypeArgumentConstraintViolation,
     ExcessProperty,
+    PropertyNotInitialized,
 
     // 1100s -- calls
     NotCallable,
@@ -71,6 +72,7 @@ impl DiagnosticCode {
             StaticFieldInitializerMismatch => "TSR1006",
             TypeArgumentConstraintViolation => "TSR1007",
             ExcessProperty => "TSR1008",
+            PropertyNotInitialized => "TSR1009",
 
             NotCallable => "TSR1101",
             ArgumentArityMismatch => "TSR1102",

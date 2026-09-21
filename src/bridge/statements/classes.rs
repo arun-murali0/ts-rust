@@ -1,5 +1,9 @@
-use oxc_ast::ast::{ClassElement, MethodDefinitionKind, PropertyKey};
-use oxc_semantic::Scoping;
+use oxc_ast::ast::{
+    ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, AssignmentTarget,
+    ClassElement, Expression, Function, MethodDefinitionKind, PropertyDefinitionType, PropertyKey,
+};
+use oxc_ast_visit::{Visit, walk};
+use oxc_semantic::{ScopeFlags, Scoping};
 use oxc_span::GetSpan;
 
 use crate::namespace::Resolution;
@@ -24,6 +28,10 @@ pub(super) fn check_class_declaration(
             report_implicit_any_params(&method.value.params, ctx);
         }
     }
+
+    // Same reasoning: a field with no initializer is a problem whether or not the
+    // rest of the class could be resolved.
+    report_uninitialized_properties(class, ctx);
 
     let Some(name) = class.id.as_ref() else {
         return;
@@ -164,4 +172,101 @@ pub(super) fn check_class_declaration(
     }
 
     ctx.current_class_instance = outer_class_instance;
+}
+
+// TS2564, under strictPropertyInitialization: an instance property declared with
+// a type but given no initializer must be assigned in the constructor, unless
+// its type already allows `undefined`.
+//
+// Deliberately narrow, and deliberately wrong in one direction only. Any
+// `this.name = ...` anywhere in the constructor body counts as assigning `name`,
+// even inside an `if`, where tsc's flow analysis would want it assigned on every
+// path. That leaves some real errors unreported, which is a gap. It never
+// reports a property that is in fact assigned, which would be a false positive
+// on correct code. Assignments inside a nested function or arrow do not count,
+// matching tsc, since they may run after the constructor has finished.
+//
+// A property is skipped, without an error, when any of these hold: it is static
+// or `declare`d or abstract, it has an initializer, it is optional (`x?: T`), it
+// carries the definite assignment assertion (`x!: T`), it has no type annotation
+// (that is a different error, TS7008), or its annotation cannot be resolved (so
+// whether `undefined` is allowed is unknown).
+fn report_uninitialized_properties(
+    class: &oxc_ast::ast::Class<'_>,
+    ctx: &mut CheckContext<'_, '_>,
+) {
+    if class.declare {
+        return;
+    }
+
+    let mut assigned = ThisAssignments::default();
+    if let Some(body) =
+        super::super::declare::find_constructor(class).and_then(|ctor| ctor.body.as_ref())
+    {
+        assigned.visit_function_body(body);
+    }
+
+    for element in &class.body.body {
+        let ClassElement::PropertyDefinition(prop) = element else {
+            continue;
+        };
+        if prop.r#static
+            || prop.declare
+            || prop.optional
+            || prop.definite
+            || prop.value.is_some()
+            || matches!(
+                prop.r#type,
+                PropertyDefinitionType::TSAbstractPropertyDefinition
+            )
+        {
+            continue;
+        }
+        let PropertyKey::StaticIdentifier(key) = &prop.key else {
+            continue;
+        };
+        let Some(annotation) = &prop.type_annotation else {
+            continue;
+        };
+        if assigned.names.iter().any(|name| name == key.name.as_str()) {
+            continue;
+        }
+        let Some(declared) =
+            resolve_type_annotation(annotation, &mut ctx.namespace, &mut ctx.arena)
+        else {
+            continue;
+        };
+
+        let undefined = ctx.arena.undefined();
+        if ctx.semantic().is_assignable(undefined, declared) {
+            continue;
+        }
+        ctx.error(
+            crate::diagnostic_messages::messages::property_not_initialized(&key.name),
+            key.span,
+        );
+    }
+}
+
+// Collects the name of every `this.name = ...` in a constructor body, without
+// descending into nested functions or arrows.
+#[derive(Default)]
+struct ThisAssignments {
+    names: Vec<String>,
+}
+
+impl<'a> Visit<'a> for ThisAssignments {
+    fn visit_assignment_expression(&mut self, expr: &AssignmentExpression<'a>) {
+        if expr.operator == AssignmentOperator::Assign
+            && let AssignmentTarget::StaticMemberExpression(member) = &expr.left
+            && matches!(member.object, Expression::ThisExpression(_))
+        {
+            self.names.push(member.property.name.to_string());
+        }
+        walk::walk_assignment_expression(self, expr);
+    }
+
+    fn visit_function(&mut self, _func: &Function<'a>, _flags: ScopeFlags) {}
+
+    fn visit_arrow_function_expression(&mut self, _arrow: &ArrowFunctionExpression<'a>) {}
 }
