@@ -1,7 +1,7 @@
 interface Box {
-    value: number;
+  value: number;
 }
 
-function readAny(box: Box, key: any): number {
-    return box[key];
+function readLiteral(box: Box, key: "value"): number {
+  return box[key];
 }

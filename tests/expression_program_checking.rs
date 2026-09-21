@@ -139,7 +139,10 @@ fn this_in_an_object_literal_function_is_not_reported() {
     let source = include_str!(
         "fixtures/expression-program-checking/this_in_object_literal_function_is_not_implicit_any.ts"
     );
-    let diagnostics = check(source, "this_in_object_literal_function_is_not_implicit_any.ts");
+    let diagnostics = check(
+        source,
+        "this_in_object_literal_function_is_not_implicit_any.ts",
+    );
     assert!(
         diagnostics.is_empty(),
         "an object literal method's `this` is the literal, got: {diagnostics:?}"
@@ -159,7 +162,9 @@ fn callback_type_annotation_with_untyped_param_still_registers() {
         "expected the body mismatch plus the implicit-any error on the callback type, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics.iter().any(|d| d.message.contains("not assignable")),
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not assignable")),
         "expected the `const result: string = fn(value)` mismatch inside apply's body, got: {diagnostics:?}"
     );
     let implicit_any = diagnostics
@@ -387,7 +392,27 @@ fn computed_member_access_with_dynamic_key_is_reported_as_unsupported() {
 }
 
 #[test]
-fn computed_member_access_with_an_any_key_is_still_reported_as_unsupported() {
+fn computed_member_access_with_an_any_key_is_implicit_any() {
+    let source = include_str!(
+        "fixtures/expression-program-checking/computed_member_access_any_key_is_implicit_any.ts"
+    );
+    let diagnostics = check(source, "computed_member_access_any_key_is_implicit_any.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, ts_rust::Severity::Error);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("Element implicitly has an 'any' type"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn computed_member_access_with_a_literal_typed_key_is_still_reported_as_unsupported() {
     let source = include_str!(
         "fixtures/expression-program-checking/computed_member_access_unsupported_key_stays_a_warning.ts"
     );
