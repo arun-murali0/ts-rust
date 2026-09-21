@@ -4,7 +4,7 @@
 
 ## 1. Why Expression and Program Checking is the major integration stage
 
-Expression and Program Checking contains 44 fixtures covering functions, arrows, callbacks, calls, member access, computed properties, array indexing, logical operators, conditional expressions, optional chaining, non-null assertions, `as` assertions, loops, switch statements, early returns, enums, and static class members.
+Expression and Program Checking contains 49 fixtures covering functions, arrows, callbacks, calls, member access, computed properties, array indexing, logical operators, conditional expressions, optional chaining, non-null assertions, `as` assertions, loops, switch statements, early returns, enums, and static class members.
 
 The important milestone is not the number of syntax features. It is that the architecture now composes across expressions, statements, declarations, symbols, narrowing, and subtyping.
 

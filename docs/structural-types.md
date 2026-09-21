@@ -14,10 +14,19 @@ TypeScript's ordinary object compatibility is structural. `src/types.rs` therefo
 
 ```rust
 pub struct ObjectType { pub properties: Vec<PropertyEntry> }
-pub struct PropertyEntry { pub name: String, pub type_id: TypeId, pub optional: bool }
+pub struct PropertyEntry { pub name: Rc<str>, pub type_id: TypeId, pub optional: bool }
 ```
 
 A property carries its name, type, and optionality because all three affect assignability.
+
+`name` is `Rc<str>` rather than `String` because class-inheritance resolution
+clones the whole accumulated property list once per level of an inheritance
+chain (see `resolve_class` in `namespace.rs`), which puts `PropertyEntry`
+cloning on the hot path for any class hierarchy of meaningful depth. An
+`Rc<str>` clone is a refcount bump; a `String` clone is a heap allocation and
+byte copy every time. It's the kind of detail that looks like premature
+optimization in isolation, and only makes sense once you know which caller is
+actually paying for it repeatedly.
 
 ## 3. Width subtyping
 
@@ -31,13 +40,51 @@ The `optional` bit is semantic, not decorative. A source optional property canno
 
 This is a good example of why a real semantic object model was needed instead of a plain name/type map.
 
-## 5. Arrays and unions
+## 5. Excess-property checking on fresh object literals
+
+TypeScript's width subtyping (§3) is deliberately permissive: an object with
+extra properties is still assignable wherever the required shape is present.
+But TypeScript also rejects this:
+
+```ts
+interface Point { x: number; y: number }
+const p: Point = { x: 1, y: 2, z: 3 }; // error: 'z' does not exist on Point
+```
+
+which looks like a contradiction of §3 until you notice the difference isn't
+the *shape*, it's *where the object literal came from*. Width subtyping is
+about values in general; excess-property checking is a narrower rule that
+applies only to an object literal written directly at the point it's checked
+against a target type — what TypeScript calls a "fresh" literal.
+
+```ts
+const raw = { x: 1, y: 2, z: 3 };
+const p: Point = raw; // fine -- raw is a variable, not a fresh literal
+```
+
+The same value, once it's passed through a variable, stops being fresh and the
+extra property is allowed again, exactly as real `tsc` behaves. `src/bridge/
+expressions/excess.rs` implements this as its own check, run only where a
+literal is genuinely fresh — directly in a variable initializer, a return
+statement, or an argument position — rather than folding it into
+`object_is_subtype` in `subtyping.rs`, since ordinary structural subtyping and
+excess-property checking are answering two different questions (`is one type
+usable where another is expected?` vs. `did the author of this literal
+probably make a typo?`) and conflating them would make width subtyping wrong
+for every non-literal case.
+
+This is covered by `excess_property_literal.ts`, `nested_excess_property_
+literal.ts`, `excess_property_in_return_and_argument.ts`, and `extra_property_
+on_a_non_fresh_object_is_allowed.ts`, which exists specifically to protect the
+"stops being fresh once assigned to a variable" rule from regressing.
+
+## 6. Arrays and unions
 
 Arrays use `Type::Array(TypeId)`, so element types are ordinary arena types. Unions use `Type::Union(Vec<TypeId>)` and are normalized by `TypeArena::alloc_union`, which flattens nested unions, removes `Never`, collapses one-member unions, and removes duplicates.
 
 The Structural Types covariance fixtures intentionally record the current compatibility/soundness boundary.
 
-## 6. Declaration namespace
+## 7. Declaration namespace
 
 `TypeNamespace` maps declaration names to aliases, interfaces, classes, or resolved types. Declaration lookup is separated from expression checking.
 
@@ -47,7 +94,7 @@ name -> TypeEntry -> alias/interface/class/resolved TypeId
 
 This keeps name resolution out of every type operation.
 
-## 7. Lazy resolution and recursion protection
+## 8. Lazy resolution and recursion protection
 
 A declaration entry has `resolved` and `resolving` state. Resolution therefore behaves like a small state machine:
 
@@ -59,15 +106,15 @@ unresolved -> resolving -> resolved
 
 Lazy resolution permits forward references and recursive declarations without requiring declaration order to match dependency order.
 
-## 8. Annotation resolution boundary
+## 9. Annotation resolution boundary
 
 `src/type_annotation.rs` translates Oxc `TSType` nodes into ts-rust `TypeId` values. AST details stop at this boundary; the semantic core consumes `TypeId`.
 
-## 9. Function compatibility
+## 10. Function compatibility
 
 `FunctionType` and `Param` were introduced as semantic callable representations. Parameter metadata already records type, optionality, and rest-ness, giving later stages a stable place to implement richer call behavior.
 
-## 10. Why these patterns were chosen
+## 11. Why these patterns were chosen
 
 The stage deliberately uses composition:
 
@@ -79,11 +126,12 @@ The stage deliberately uses composition:
 
 The goal is to add language features by extending reusable semantic primitives, not by adding syntax-specific special cases.
 
-## 11. What Structural Types established
+## 12. What Structural Types established
 
 - structural object types
 - width subtyping
 - optional-property semantics
+- excess-property checking on fresh object literals
 - arrays
 - unions and normalization
 - aliases/interfaces/classes as declarations
