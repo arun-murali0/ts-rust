@@ -104,7 +104,11 @@ This separation makes semantic algorithms reusable by future tooling and typed-I
 | `bridge/narrow.rs` | Maintain TypeScript-aware flow narrowing |
 | `semantic/queries.rs` | Stable read-only semantic relation boundary |
 | `semantic/generics.rs` | Generic inference, substitution, and related semantic helpers |
-| `diagnostics.rs` | Represent checker diagnostics |
+| `diagnostics.rs` | The public `Diagnostic`/`Severity` representation consumers see |
+| `diagnostic_codes.rs` | Stable `TSR####` identifiers, ts-rust's own namespace |
+| `diagnostic_messages.rs` | Pairs a code with its message text, one constructor per diagnostic kind |
+| `diagnostic_view.rs` | Converts raw byte offsets into line/column for display |
+| `fxhash.rs` | In-tree FxHash reimplementation, used where a non-DoS-resistant hasher is acceptable |
 | `line_index.rs` | Source-position conversion |
 | `wasm.rs` | WASM-facing adaptation |
 
@@ -119,6 +123,7 @@ expressions/
 ├── binary.rs
 ├── calls.rs
 ├── core.rs
+├── excess.rs
 ├── functions.rs
 ├── logical.rs
 ├── members.rs
@@ -140,6 +145,47 @@ statements/
 ```
 
 The `mod.rs` files provide dispatch and narrow facades. Sibling implementation modules should not depend on each other's private implementation details unless there is a real semantic reason.
+
+## Why diagnostics are four files, not one
+
+Diagnostics started as a single `Diagnostic` struct in `diagnostics.rs`: a severity,
+a code, a message, a span. As the checker grew past a handful of diagnostic kinds,
+three separate concerns that had been living inside that one struct/module were
+pulled apart, each for a different reason:
+
+```text
+diagnostic_codes.rs      -> what stable identity does this diagnostic have?
+diagnostic_messages.rs   -> what code + text belongs to this diagnostic kind?
+diagnostic_view.rs       -> where in the source does this diagnostic point?
+diagnostics.rs           -> the public Diagnostic/Severity shape itself
+```
+
+**Codes are their own namespace.** `diagnostic_codes.rs` assigns every diagnostic a
+stable `TSR####` identifier. This is deliberately *not* TypeScript's own `TS####`
+numbering — even where a ts-rust diagnostic describes a condition `tsc` also
+reports (an argument arity mismatch, say), the number is not meant to imply
+parity with a specific `TS####` code. Keeping the identifier space separate means
+ts-rust's diagnostic catalog can grow, split, or renumber without silently
+claiming compatibility it hasn't earned. The compatibility harnesses
+(`bin/compare-tsc.rs`, `scripts/compare-local.sh`) compare by line presence, not
+by code equality, precisely because of this.
+
+**Message construction is centralized so one diagnostic kind has one source of
+truth for its text.** `diagnostic_messages.rs` pairs a code with its message
+through exactly one constructor per kind (see the `messages` module there), so
+the wording for "argument type mismatch" is written once and reused everywhere
+that diagnostic can fire, rather than each call site composing its own string
+and drifting from its siblings over time.
+
+**Presentation is separate from storage.** `Diagnostic` itself stores raw byte
+offsets, not line/column — those are cheap to produce during checking and don't
+need a `LineIndex` lookup unless something is actually about to display the
+diagnostic. `diagnostic_view.rs` does that conversion on demand, so the hot
+checking path never pays for a presentation concern it doesn't need yet.
+
+The result is the same principle the rest of this document applies everywhere
+else: each file answers one question, and nothing downstream needs to know how
+the others are implemented to consume a `Diagnostic`.
 
 ## Semantic query boundary
 
