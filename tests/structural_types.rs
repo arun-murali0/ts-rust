@@ -261,3 +261,46 @@ fn unresolvable_type_annotation_is_reported_not_silently_swallowed() {
         "got: {diagnostics:?}"
     );
 }
+
+#[test]
+fn ternary_of_identical_nested_object_literals_collapses_to_one_type() {
+    let source = include_str!(
+        "fixtures/structural-types/union_of_identical_nested_object_shapes_collapses.ts"
+    );
+    let diagnostics = check(source, "union_of_identical_nested_object_shapes_collapses.ts");
+    // The two branches are `{ inner: { count: number } }` built at different
+    // sites, so their inner objects sit in different arena slots. Compared by slot
+    // they stay a two-member union, and reading `.inner` off a union is an error.
+    // Compared by shape they collapse into one object and the read is fine.
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn structurally_equal_aliases_in_a_union_narrow_to_one_usable_type() {
+    let source = include_str!(
+        "fixtures/structural-types/union_of_structurally_equal_aliases_narrows_cleanly.ts"
+    );
+    let diagnostics = check(source, "union_of_structurally_equal_aliases_narrows_cleanly.ts");
+    // `First | Second | null` collapses First and Second into one member, so
+    // narrowing away null leaves a single object and `x.value.count` resolves.
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn property_declaration_order_never_changes_assignability() {
+    let source =
+        include_str!("fixtures/structural-types/property_declaration_order_never_matters.ts");
+    let diagnostics = check(source, "property_declaration_order_never_matters.ts");
+    // An interface, a class and an object literal, each declaring the same three
+    // properties in a different order, are all assignable to one another.
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}

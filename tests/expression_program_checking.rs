@@ -750,3 +750,52 @@ fn call_arity_mismatch_still_checks_argument_expressions() {
         "got: {diagnostics:?}"
     );
 }
+
+#[test]
+fn enum_object_is_assignable_to_a_structural_type_whatever_its_declaration_order() {
+    let source = include_str!(
+        "fixtures/expression-program-checking/enum_object_assignable_to_structural_type.ts"
+    );
+    let diagnostics = check(source, "enum_object_assignable_to_structural_type.ts");
+    // Up, Down, Left, Right is not alphabetical. Before enum objects were built
+    // with sorted properties, the merge-join misaligned on them and this reported
+    // a false mismatch.
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn string_enum_object_is_assignable_to_a_structural_type_whatever_its_declaration_order() {
+    let source = include_str!(
+        "fixtures/expression-program-checking/string_enum_object_assignable_to_structural_type.ts"
+    );
+    let diagnostics = check(source, "string_enum_object_assignable_to_structural_type.ts");
+    // Pending, Active, Done is not alphabetical, and string members exercise the
+    // literal-to-union path as well as the property ordering.
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn enum_object_missing_a_required_member_is_still_caught() {
+    let source = include_str!(
+        "fixtures/expression-program-checking/enum_object_missing_required_member_is_caught.ts"
+    );
+    let diagnostics = check(source, "enum_object_missing_required_member_is_caught.ts");
+    // Sorting the enum object must not turn a real mismatch into a pass: `Medium`
+    // is required by the target and the enum has no such member.
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0].message.contains("not assignable"),
+        "got: {diagnostics:?}"
+    );
+}

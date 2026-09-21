@@ -222,3 +222,17 @@ fn a_resolvable_constraint_produces_no_warning() {
         "got: {diagnostics:?}"
     );
 }
+
+#[test]
+fn substituting_into_an_object_return_type_keeps_it_comparable() {
+    let source =
+        include_str!("fixtures/generics-tier1/generic_return_object_substitution_stays_sorted.ts");
+    let diagnostics = check(source, "generic_return_object_substitution_stays_sorted.ts");
+    // `{ second: T; first: string }` is rebuilt with T replaced by number, and the
+    // rebuilt object must still line up property for property with a target that
+    // lists them in the other order.
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
+    );
+}
