@@ -104,6 +104,7 @@ impl Style {
 #[derive(Clone)]
 struct Entry {
     line: u32,
+    #[allow(dead_code)]
     column: u32,
     code: Option<String>,
     message: String,
