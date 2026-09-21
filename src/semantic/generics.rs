@@ -17,20 +17,20 @@ use crate::types::{FunctionType, ObjectType, PropertyEntry, Type};
 // binding; the real mismatch is still caught afterward by the normal
 // per-argument assignability check in calls.rs, the same way it always was.
 pub(crate) fn infer_type_param_bindings(
-    arena: &TypeArena,
+    arena: &mut TypeArena,
     param_type: TypeId,
     arg_type: TypeId,
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
 ) {
-    match arena.get(param_type) {
+    match arena.get(param_type).clone() {
         Type::GenericParameter(id, _, _) => {
             // Widened so identity(5) infers number, matching what a
             // TypeScript author expects from a bare generic call, rather than
             // the checker binding T to the narrower literal type 5.
             let candidate = crate::types::widen(arena, arg_type);
 
-            match bindings.iter_mut().find(|(bound, _)| bound == id) {
-                None => bindings.push((*id, candidate)),
+            match bindings.iter_mut().find(|(bound, _)| *bound == id) {
+                None => bindings.push((id, candidate)),
                 Some((_, existing)) => {
                     if is_subtype(arena, candidate, *existing) {
                         // The existing binding already covers this candidate.
@@ -41,39 +41,77 @@ pub(crate) fn infer_type_param_bindings(
             }
         }
         Type::Array(param_element) => {
-            if let Type::Array(arg_element) = arena.get(arg_type) {
-                infer_type_param_bindings(arena, *param_element, *arg_element, bindings);
-            }
+            let arg_element = match arena.get(arg_type) {
+                Type::Array(element) => *element,
+                _ => return,
+            };
+            infer_type_param_bindings(arena, param_element, arg_element, bindings);
         }
         Type::Object(param_object) => {
-            if let Type::Object(arg_object) = arena.get(arg_type) {
-                for param_prop in &param_object.properties {
-                    if let Some(arg_prop) = arg_object
-                        .properties
-                        .iter()
-                        .find(|p| p.name == param_prop.name)
-                    {
-                        infer_type_param_bindings(
-                            arena,
-                            param_prop.type_id,
-                            arg_prop.type_id,
-                            bindings,
-                        );
-                    }
+            let Type::Object(arg_object) = arena.get(arg_type).clone() else {
+                return;
+            };
+            for param_prop in &param_object.properties {
+                if let Some(arg_prop) = arg_object
+                    .properties
+                    .iter()
+                    .find(|p| p.name == param_prop.name)
+                {
+                    infer_type_param_bindings(
+                        arena,
+                        param_prop.type_id,
+                        arg_prop.type_id,
+                        bindings,
+                    );
                 }
             }
         }
         Type::Function(param_fn) => {
-            if let Type::Function(arg_fn) = arena.get(arg_type) {
-                for (p, a) in param_fn.params.iter().zip(&arg_fn.params) {
-                    infer_type_param_bindings(arena, p.type_id, a.type_id, bindings);
+            let Type::Function(arg_fn) = arena.get(arg_type).clone() else {
+                return;
+            };
+            for (p, a) in param_fn.params.iter().zip(&arg_fn.params) {
+                infer_type_param_bindings(arena, p.type_id, a.type_id, bindings);
+            }
+            infer_type_param_bindings(arena, param_fn.return_type, arg_fn.return_type, bindings);
+        }
+        // A parameter typed `T | undefined`, `T | null` or the like. TypeScript
+        // first sets aside whatever part of the argument a concrete member of the
+        // union already accounts for (an `undefined` argument against `T |
+        // undefined`), then infers the type parameter from what is left. The
+        // leftover members are combined into one candidate, so passing a
+        // `number | string` binds T to `number | string` in one step rather than
+        // to `number` and then failing on `string`. An `any` or error argument is
+        // never set aside, since it is compatible with every concrete member and
+        // would otherwise leave T with nothing to infer from.
+        Type::Union(param_members) => {
+            let arg_members = match arena.get(arg_type) {
+                Type::Union(members) => members.clone(),
+                _ => vec![arg_type],
+            };
+            let remaining: Vec<TypeId> = arg_members
+                .into_iter()
+                .filter(|&member| {
+                    if matches!(arena.get(member), Type::Any | Type::Error) {
+                        return true;
+                    }
+                    !param_members.iter().any(|&concrete| {
+                        !contains_type_param(arena, concrete) && is_subtype(arena, member, concrete)
+                    })
+                })
+                .collect();
+            if remaining.is_empty() {
+                return;
+            }
+            let remainder = if remaining.len() == 1 {
+                remaining[0]
+            } else {
+                arena.alloc_union(remaining)
+            };
+            for &member in &param_members {
+                if contains_type_param(arena, member) {
+                    infer_type_param_bindings(arena, member, remainder, bindings);
                 }
-                infer_type_param_bindings(
-                    arena,
-                    param_fn.return_type,
-                    arg_fn.return_type,
-                    bindings,
-                );
             }
         }
         _ => {}

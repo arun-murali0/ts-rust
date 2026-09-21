@@ -175,7 +175,7 @@ fn check_callable(
     for (index, arg_type) in arg_types.iter().enumerate() {
         let Some(arg_type) = arg_type else { continue };
         if let Some(param_type) = expected_param_type(&ctx.arena, &function_type.params, index) {
-            infer_type_param_bindings(&ctx.arena, param_type, *arg_type, &mut bindings);
+            infer_type_param_bindings(&mut ctx.arena, param_type, *arg_type, &mut bindings);
         }
     }
 
