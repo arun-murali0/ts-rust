@@ -100,7 +100,10 @@ fn generics_diagnostic_codes_are_stable() {
         DiagnosticCode::UnresolvableTypeParameterConstraint.as_str(),
         "TSR9014"
     );
-    assert_eq!(DiagnosticCode::TypeArgumentCountMismatch.as_str(), "TSR1501");
+    assert_eq!(
+        DiagnosticCode::TypeArgumentCountMismatch.as_str(),
+        "TSR1501"
+    );
     assert_eq!(DiagnosticCode::TypeIsNotGeneric.as_str(), "TSR1502");
     assert_eq!(
         DiagnosticCode::GenericTypeMissingTypeArguments.as_str(),
@@ -168,7 +171,11 @@ fn generic_interface_and_alias_mismatches_report_their_codes() {
         "generics-tier2/generic_type_alias_substitution_mismatch_is_caught.ts",
         "generics-tier2/two_instantiations_of_the_same_interface_stay_distinct.ts",
     ] {
-        assert_reports(fixture, DiagnosticCode::DeclaredTypeMismatch, Severity::Error);
+        assert_reports(
+            fixture,
+            DiagnosticCode::DeclaredTypeMismatch,
+            Severity::Error,
+        );
     }
 }
 

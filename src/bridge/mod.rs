@@ -16,7 +16,7 @@ pub use parse::parse;
 pub fn parse_and_bind_only(source: &str, file_name: &str) -> Result<(), CheckerError> {
     let allocator = Allocator::default();
     let program = parse(&allocator, source, file_name)?;
-    let _scoping = parse::analyze(&program);
+    let _semantic = parse::analyze(&program);
     Ok(())
 }
 
@@ -28,12 +28,16 @@ pub fn parse_and_bind_only(source: &str, file_name: &str) -> Result<(), CheckerE
 pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, CheckerError> {
     let allocator = Allocator::default();
     let program = parse(&allocator, source, file_name)?;
-    let scoping = parse::analyze(&program);
+    // semantic is kept for the whole check on purpose: it owns the Scoping borrowed
+    // here, and it is where the control flow graph lives once flow analysis reads
+    // it. Keeping only the Scoping would drop the graph along with the rest.
+    let semantic = parse::analyze(&program);
+    let scoping = semantic.scoping();
 
     let mut ctx = CheckContext::new(file_name);
 
     declare::declare_top_level(&program, &mut ctx);
-    statements::check_top_level(&program, &scoping, &mut ctx);
+    statements::check_top_level(&program, scoping, &mut ctx);
 
     for (name, span) in ctx.namespace.take_implicit_any_params() {
         ctx.error(

@@ -1,0 +1,530 @@
+== blocks ==
+block 0
+block 1
+block 2
+block 3
+    Statement IfStatement `if (x === null) {…`
+block 4
+    Condition BinaryExpression(===) `x === null`
+block 5
+    Statement BlockStatement `{…`
+    Return(NotImplicitUndefined) ReturnStatement `return 0;`
+block 6  (unreachable)
+    Unreachable 
+block 7
+    Return(NotImplicitUndefined) ReturnStatement `return x;`
+block 8  (unreachable)
+    Unreachable 
+block 9
+block 10
+block 11
+    Statement IfStatement `if (x === null) {…`
+block 12
+    Condition BinaryExpression(===) `x === null`
+block 13
+    Statement BlockStatement `{…`
+    Return(NotImplicitUndefined) ReturnStatement `return 0;`
+block 14  (unreachable)
+    Unreachable 
+block 15
+    Statement BlockStatement `{…`
+    Return(NotImplicitUndefined) ReturnStatement `return x;`
+block 16  (unreachable)
+    Unreachable 
+block 17  (unreachable)
+    ImplicitReturn 
+block 18
+block 19
+block 20
+    Statement VariableDeclaration `let result = 1;`
+    Statement IfStatement `if (x === null) {…`
+block 21
+    Condition BinaryExpression(===) `x === null`
+block 22
+    Statement BlockStatement `{…`
+    Statement ExpressionStatement `result = 0;`
+block 23
+    Statement BlockStatement `{…`
+    Statement ExpressionStatement `result = x;`
+block 24
+    Return(NotImplicitUndefined) ReturnStatement `return result;`
+block 25  (unreachable)
+    Unreachable 
+block 26
+block 27
+block 28
+block 29
+    Condition BinaryExpression(===) `x === null`
+block 30
+block 31
+block 32
+    Return(NotImplicitUndefined) ReturnStatement `return x === null ? 0 : x;`
+block 33  (unreachable)
+    Unreachable 
+block 34
+block 35
+block 36
+block 37
+    Condition IdentifierReference(x) `x`
+block 38
+block 39
+    Return(NotImplicitUndefined) ReturnStatement `return x && x.value;`
+block 40  (unreachable)
+    Unreachable 
+block 41
+block 42
+block 43
+block 44
+    Condition IdentifierReference(x) `x`
+block 45
+block 46
+    Return(NotImplicitUndefined) ReturnStatement `return x || 0;`
+block 47  (unreachable)
+    Unreachable 
+block 48
+block 49
+block 50
+block 51
+    Condition IdentifierReference(x) `x`
+block 52
+block 53
+    Return(NotImplicitUndefined) ReturnStatement `return x ?? 0;`
+block 54  (unreachable)
+    Unreachable 
+block 55
+block 56
+block 57
+    Statement WhileStatement `while (x !== null) {…`
+block 58
+    Condition BinaryExpression(!==) `x !== null`
+block 59
+    Statement BlockStatement `{…`
+    Statement ExpressionStatement `x = null;`
+block 60
+    Return(NotImplicitUndefined) ReturnStatement `return 0;`
+block 61  (unreachable)
+    Unreachable 
+block 62
+block 63
+block 64
+    Statement ForStatement `for (let i = 0; i < items.length; i++) {…`
+    Statement VariableDeclaration `let i = 0`
+block 65
+    Condition BinaryExpression(<) `i < items.length`
+block 66
+block 67
+    Statement BlockStatement `{…`
+    Statement IfStatement `if (x === null) {…`
+block 68
+    Condition BinaryExpression(===) `x === null`
+block 69
+    Statement BlockStatement `{…`
+    Continue(Unlabeled) ContinueStatement `continue;`
+block 70  (unreachable)
+    Unreachable 
+block 71
+    Statement IfStatement `if (items[i] > 10) {…`
+block 72
+    Condition BinaryExpression(>) `items[i] > 10`
+block 73
+    Statement BlockStatement `{…`
+    Break(Unlabeled) BreakStatement `break;`
+block 74  (unreachable)
+    Unreachable 
+block 75
+block 76
+    Return(NotImplicitUndefined) ReturnStatement `return 0;`
+block 77  (unreachable)
+    Unreachable 
+block 78
+block 79
+block 80
+    Statement SwitchStatement `switch (kind) {…`
+block 81
+    Condition StringLiteral(a) `"a"`
+block 82
+    Return(NotImplicitUndefined) ReturnStatement `return 1;`
+block 83  (unreachable)
+    Unreachable 
+block 84
+    Condition StringLiteral(b) `"b"`
+block 85
+    Break(Unlabeled) BreakStatement `break;`
+block 86  (unreachable)
+    Unreachable 
+block 87
+block 88
+    Return(NotImplicitUndefined) ReturnStatement `return 3;`
+block 89  (unreachable)
+    Unreachable 
+block 90
+    Return(NotImplicitUndefined) ReturnStatement `return 2;`
+block 91  (unreachable)
+    Unreachable 
+block 92
+block 93
+block 94
+    Statement TryStatement `try {…`
+block 95
+block 96
+block 97
+    Statement BlockStatement `{…`
+    Statement IfStatement `if (x === null) {…`
+block 98
+    Condition BinaryExpression(===) `x === null`
+block 99
+    Statement BlockStatement `{…`
+    Throw ThrowStatement `throw new Error("null");`
+block 100  (unreachable)
+    Unreachable 
+block 101
+    Return(NotImplicitUndefined) ReturnStatement `return x;`
+block 102  (unreachable)
+    Unreachable 
+block 103
+    Statement BlockStatement `{…`
+    Return(NotImplicitUndefined) ReturnStatement `return 0;`
+block 104  (unreachable)
+    Unreachable 
+block 105
+    Statement BlockStatement `{…`
+    Statement ExpressionStatement `x = null;`
+block 106
+    ImplicitReturn 
+block 107
+block 108
+block 109
+    Statement VariableDeclaration `let total = 0;`
+    Statement ForOfStatement `for (const item of items) {…`
+    Statement VariableDeclaration `const item`
+block 110
+block 111
+    Iteration(Of) IdentifierReference(items) `items`
+block 112
+    Statement BlockStatement `{…`
+    Statement ExpressionStatement `total = item;`
+block 113
+    Return(NotImplicitUndefined) ReturnStatement `return total;`
+block 114  (unreachable)
+    Unreachable 
+block 115
+block 116
+block 117
+    Return(NotImplicitUndefined) ReturnStatement `return x?.value;`
+block 118  (unreachable)
+    Unreachable 
+block 119
+
+== edges (in the order the builder added them) ==
+block 1 -> block 0  Error(Implicit)
+block 3 -> block 2  Error(Implicit)
+block 1 -> block 3  NewFunction
+block 4 -> block 2  Error(Implicit)
+block 5 -> block 2  Error(Implicit)
+block 6 -> block 2  Error(Implicit)
+block 5 -> block 6  Unreachable
+block 7 -> block 2  Error(Implicit)
+block 3 -> block 4  Normal
+block 4 -> block 5  Jump
+block 6 -> block 7  Normal
+block 4 -> block 7  Jump
+block 8 -> block 2  Error(Implicit)
+block 7 -> block 8  Unreachable
+block 9 -> block 0  Error(Implicit)
+block 1 -> block 9  Normal
+block 11 -> block 10  Error(Implicit)
+block 9 -> block 11  NewFunction
+block 12 -> block 10  Error(Implicit)
+block 13 -> block 10  Error(Implicit)
+block 14 -> block 10  Error(Implicit)
+block 13 -> block 14  Unreachable
+block 15 -> block 10  Error(Implicit)
+block 16 -> block 10  Error(Implicit)
+block 15 -> block 16  Unreachable
+block 17 -> block 10  Error(Implicit)
+block 11 -> block 12  Normal
+block 12 -> block 13  Jump
+block 14 -> block 17  Normal
+block 12 -> block 15  Jump
+block 16 -> block 17  Normal
+block 18 -> block 0  Error(Implicit)
+block 9 -> block 18  Normal
+block 20 -> block 19  Error(Implicit)
+block 18 -> block 20  NewFunction
+block 21 -> block 19  Error(Implicit)
+block 22 -> block 19  Error(Implicit)
+block 23 -> block 19  Error(Implicit)
+block 24 -> block 19  Error(Implicit)
+block 20 -> block 21  Normal
+block 21 -> block 22  Jump
+block 22 -> block 24  Normal
+block 21 -> block 23  Jump
+block 23 -> block 24  Normal
+block 25 -> block 19  Error(Implicit)
+block 24 -> block 25  Unreachable
+block 26 -> block 0  Error(Implicit)
+block 18 -> block 26  Normal
+block 28 -> block 27  Error(Implicit)
+block 26 -> block 28  NewFunction
+block 29 -> block 27  Error(Implicit)
+block 30 -> block 27  Error(Implicit)
+block 31 -> block 27  Error(Implicit)
+block 32 -> block 27  Error(Implicit)
+block 28 -> block 29  Normal
+block 30 -> block 32  Normal
+block 29 -> block 30  Jump
+block 29 -> block 31  Normal
+block 31 -> block 32  Normal
+block 33 -> block 27  Error(Implicit)
+block 32 -> block 33  Unreachable
+block 34 -> block 0  Error(Implicit)
+block 26 -> block 34  Normal
+block 36 -> block 35  Error(Implicit)
+block 34 -> block 36  NewFunction
+block 37 -> block 35  Error(Implicit)
+block 38 -> block 35  Error(Implicit)
+block 39 -> block 35  Error(Implicit)
+block 36 -> block 37  Normal
+block 37 -> block 38  Normal
+block 37 -> block 39  Normal
+block 38 -> block 39  Normal
+block 40 -> block 35  Error(Implicit)
+block 39 -> block 40  Unreachable
+block 41 -> block 0  Error(Implicit)
+block 34 -> block 41  Normal
+block 43 -> block 42  Error(Implicit)
+block 41 -> block 43  NewFunction
+block 44 -> block 42  Error(Implicit)
+block 45 -> block 42  Error(Implicit)
+block 46 -> block 42  Error(Implicit)
+block 43 -> block 44  Normal
+block 44 -> block 45  Normal
+block 44 -> block 46  Normal
+block 45 -> block 46  Normal
+block 47 -> block 42  Error(Implicit)
+block 46 -> block 47  Unreachable
+block 48 -> block 0  Error(Implicit)
+block 41 -> block 48  Normal
+block 50 -> block 49  Error(Implicit)
+block 48 -> block 50  NewFunction
+block 51 -> block 49  Error(Implicit)
+block 52 -> block 49  Error(Implicit)
+block 53 -> block 49  Error(Implicit)
+block 50 -> block 51  Normal
+block 51 -> block 52  Normal
+block 51 -> block 53  Normal
+block 52 -> block 53  Normal
+block 54 -> block 49  Error(Implicit)
+block 53 -> block 54  Unreachable
+block 55 -> block 0  Error(Implicit)
+block 48 -> block 55  Normal
+block 57 -> block 56  Error(Implicit)
+block 55 -> block 57  NewFunction
+block 58 -> block 56  Error(Implicit)
+block 59 -> block 56  Error(Implicit)
+block 60 -> block 56  Error(Implicit)
+block 57 -> block 58  Normal
+block 58 -> block 59  Jump
+block 59 -> block 58  Backedge
+block 58 -> block 60  Normal
+block 61 -> block 56  Error(Implicit)
+block 60 -> block 61  Unreachable
+block 62 -> block 0  Error(Implicit)
+block 55 -> block 62  Normal
+block 64 -> block 63  Error(Implicit)
+block 62 -> block 64  NewFunction
+block 65 -> block 63  Error(Implicit)
+block 66 -> block 63  Error(Implicit)
+block 67 -> block 63  Error(Implicit)
+block 68 -> block 63  Error(Implicit)
+block 69 -> block 63  Error(Implicit)
+block 70 -> block 63  Error(Implicit)
+block 69 -> block 70  Unreachable
+block 71 -> block 63  Error(Implicit)
+block 67 -> block 68  Normal
+block 68 -> block 69  Jump
+block 70 -> block 71  Normal
+block 68 -> block 71  Jump
+block 72 -> block 63  Error(Implicit)
+block 73 -> block 63  Error(Implicit)
+block 74 -> block 63  Error(Implicit)
+block 73 -> block 74  Unreachable
+block 75 -> block 63  Error(Implicit)
+block 71 -> block 72  Normal
+block 72 -> block 73  Jump
+block 74 -> block 75  Normal
+block 72 -> block 75  Jump
+block 76 -> block 63  Error(Implicit)
+block 64 -> block 65  Normal
+block 65 -> block 67  Jump
+block 75 -> block 66  Backedge
+block 66 -> block 65  Backedge
+block 65 -> block 76  Normal
+block 69 -> block 66  Jump
+block 73 -> block 76  Jump
+block 77 -> block 63  Error(Implicit)
+block 76 -> block 77  Unreachable
+block 78 -> block 0  Error(Implicit)
+block 62 -> block 78  Normal
+block 80 -> block 79  Error(Implicit)
+block 78 -> block 80  NewFunction
+block 81 -> block 79  Error(Implicit)
+block 82 -> block 79  Error(Implicit)
+block 81 -> block 82  Jump
+block 83 -> block 79  Error(Implicit)
+block 82 -> block 83  Unreachable
+block 84 -> block 79  Error(Implicit)
+block 85 -> block 79  Error(Implicit)
+block 84 -> block 85  Jump
+block 86 -> block 79  Error(Implicit)
+block 85 -> block 86  Unreachable
+block 87 -> block 79  Error(Implicit)
+block 88 -> block 79  Error(Implicit)
+block 87 -> block 88  Jump
+block 89 -> block 79  Error(Implicit)
+block 88 -> block 89  Unreachable
+block 81 -> block 84  Normal
+block 81 -> block 87  Normal
+block 83 -> block 84  Normal
+block 80 -> block 81  Normal
+block 84 -> block 87  Normal
+block 86 -> block 87  Normal
+block 80 -> block 84  Normal
+block 80 -> block 87  Normal
+block 90 -> block 79  Error(Implicit)
+block 89 -> block 90  Normal
+block 85 -> block 90  Jump
+block 91 -> block 79  Error(Implicit)
+block 90 -> block 91  Unreachable
+block 92 -> block 0  Error(Implicit)
+block 78 -> block 92  Normal
+block 94 -> block 93  Error(Implicit)
+block 92 -> block 94  NewFunction
+block 97 -> block 95  Error(Explicit)
+block 97 -> block 96  Finalize
+block 98 -> block 95  Error(Explicit)
+block 98 -> block 96  Finalize
+block 99 -> block 95  Error(Explicit)
+block 99 -> block 96  Finalize
+block 100 -> block 95  Error(Explicit)
+block 100 -> block 96  Finalize
+block 99 -> block 100  Unreachable
+block 101 -> block 95  Error(Explicit)
+block 101 -> block 96  Finalize
+block 97 -> block 98  Normal
+block 98 -> block 99  Jump
+block 100 -> block 101  Normal
+block 98 -> block 101  Jump
+block 102 -> block 95  Error(Explicit)
+block 102 -> block 96  Finalize
+block 101 -> block 102  Unreachable
+block 103 -> block 93  Error(Implicit)
+block 103 -> block 96  Finalize
+block 95 -> block 103  Normal
+block 104 -> block 93  Error(Implicit)
+block 104 -> block 96  Finalize
+block 103 -> block 104  Unreachable
+block 105 -> block 93  Error(Implicit)
+block 96 -> block 105  Normal
+block 94 -> block 97  Normal
+block 106 -> block 93  Error(Implicit)
+block 105 -> block 106  Normal
+block 107 -> block 0  Error(Implicit)
+block 92 -> block 107  Normal
+block 109 -> block 108  Error(Implicit)
+block 107 -> block 109  NewFunction
+block 110 -> block 108  Error(Implicit)
+block 111 -> block 108  Error(Implicit)
+block 112 -> block 108  Error(Implicit)
+block 113 -> block 108  Error(Implicit)
+block 109 -> block 110  Normal
+block 110 -> block 111  Normal
+block 111 -> block 112  Jump
+block 112 -> block 111  Backedge
+block 111 -> block 113  Normal
+block 114 -> block 108  Error(Implicit)
+block 113 -> block 114  Unreachable
+block 115 -> block 0  Error(Implicit)
+block 107 -> block 115  Normal
+block 117 -> block 116  Error(Implicit)
+block 115 -> block 117  NewFunction
+block 118 -> block 116  Error(Implicit)
+block 117 -> block 118  Unreachable
+block 119 -> block 0  Error(Implicit)
+block 115 -> block 119  Normal
+
+== control-flow nodes and the block each was entered in ==
+block 3   Function(ifOnly)  `function ifOnly(x: number | null): numbe…`
+block 3   IfStatement  `if (x === null) {…`
+block 5   BlockStatement  `{…`
+block 5   ReturnStatement  `return 0;`
+block 7   ReturnStatement  `return x;`
+block 11  Function(ifElse)  `function ifElse(x: number | null): numbe…`
+block 11  IfStatement  `if (x === null) {…`
+block 13  BlockStatement  `{…`
+block 13  ReturnStatement  `return 0;`
+block 15  BlockStatement  `{…`
+block 15  ReturnStatement  `return x;`
+block 20  Function(guardWithElseFallthrough)  `function guardWithElseFallthrough(x: num…`
+block 20  IfStatement  `if (x === null) {…`
+block 22  BlockStatement  `{…`
+block 22  AssignmentExpression  `result = 0`
+block 23  BlockStatement  `{…`
+block 23  AssignmentExpression  `result = x`
+block 24  ReturnStatement  `return result;`
+block 28  Function(ternary)  `function ternary(x: number | null): numb…`
+block 28  ReturnStatement  `return x === null ? 0 : x;`
+block 28  ConditionalExpression  `x === null ? 0 : x`
+block 36  Function(logicalAnd)  `function logicalAnd(x: { value: number }…`
+block 36  ReturnStatement  `return x && x.value;`
+block 36  LogicalExpression  `x && x.value`
+block 43  Function(logicalOr)  `function logicalOr(x: number | null): nu…`
+block 43  ReturnStatement  `return x || 0;`
+block 43  LogicalExpression  `x || 0`
+block 50  Function(nullish)  `function nullish(x: number | null): numb…`
+block 50  ReturnStatement  `return x ?? 0;`
+block 50  LogicalExpression  `x ?? 0`
+block 57  Function(whileLoop)  `function whileLoop(x: number | null): nu…`
+block 57  WhileStatement  `while (x !== null) {…`
+block 59  BlockStatement  `{…`
+block 59  AssignmentExpression  `x = null`
+block 60  ReturnStatement  `return 0;`
+block 64  Function(loopWithGuard)  `function loopWithGuard(items: number[], …`
+block 64  ForStatement  `for (let i = 0; i < items.length; i++) {…`
+block 67  BlockStatement  `{…`
+block 67  IfStatement  `if (x === null) {…`
+block 69  BlockStatement  `{…`
+block 69  ContinueStatement  `continue;`
+block 71  IfStatement  `if (items[i] > 10) {…`
+block 73  BlockStatement  `{…`
+block 73  BreakStatement  `break;`
+block 76  ReturnStatement  `return 0;`
+block 80  Function(switchStatement)  `function switchStatement(kind: string): …`
+block 80  SwitchStatement  `switch (kind) {…`
+block 81  SwitchCase  `case "a":…`
+block 82  ReturnStatement  `return 1;`
+block 84  SwitchCase  `case "b":…`
+block 85  BreakStatement  `break;`
+block 87  SwitchCase  `default:…`
+block 88  ReturnStatement  `return 3;`
+block 90  ReturnStatement  `return 2;`
+block 94  Function(tryCatch)  `function tryCatch(x: number | null): num…`
+block 94  TryStatement  `try {…`
+block 97  BlockStatement  `{…`
+block 97  IfStatement  `if (x === null) {…`
+block 99  BlockStatement  `{…`
+block 99  ThrowStatement  `throw new Error("null");`
+block 101 ReturnStatement  `return x;`
+block 103 CatchClause  `catch (error) {…`
+block 103 BlockStatement  `{…`
+block 103 ReturnStatement  `return 0;`
+block 105 BlockStatement  `{…`
+block 105 AssignmentExpression  `x = null`
+block 109 Function(forOf)  `function forOf(items: number[]): number …`
+block 109 ForOfStatement  `for (const item of items) {…`
+block 112 BlockStatement  `{…`
+block 112 AssignmentExpression  `total = item`
+block 113 ReturnStatement  `return total;`
+block 117 Function(optionalChain)  `function optionalChain(x: { value: numbe…`
+block 117 ReturnStatement  `return x?.value;`
+block 117 ChainExpression  `x?.value`
