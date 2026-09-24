@@ -1,12 +1,12 @@
 use oxc_ast::ast::{
-    BindingPattern, FormalParameters, PropertyKey, TSSignature, TSType, TSTypeAnnotation,
-    TSTypeName,
+    BindingPattern, FormalParameters, PropertyKey, TSMethodSignature, TSMethodSignatureKind,
+    TSSignature, TSType, TSTypeAnnotation, TSTypeName,
 };
 use oxc_span::GetSpan;
 
 use crate::arena::{TypeArena, TypeId};
 use crate::namespace::{Resolution, TypeNamespace};
-use crate::types::{ObjectType, Param, PropertyEntry, Type, TypeParameterId};
+use crate::types::{FunctionType, ObjectType, Param, PropertyEntry, Type, TypeParameterId};
 
 pub fn resolve_type_annotation(
     annotation: &TSTypeAnnotation,
@@ -148,7 +148,10 @@ pub fn resolve_ts_type(
                 bindings.push((parameter_id, bound));
             }
 
-            Some(crate::semantic::substitute_type_params(
+            // Only the declaration's own parameters are bound here, so a parameter
+            // a member declares for itself (`map<U>(...)`) is kept for inference
+            // at the call site instead of becoming unknown.
+            Some(crate::semantic::substitute_bound_type_params(
                 arena, base, &bindings,
             ))
         }
@@ -325,27 +328,92 @@ pub fn resolve_object_members(
     namespace: &mut TypeNamespace,
     arena: &mut TypeArena,
 ) -> Option<TypeId> {
-    let mut properties = Vec::with_capacity(members.len());
+    let mut properties: Vec<PropertyEntry> = Vec::with_capacity(members.len());
 
     for member in members {
         // As with class members in namespace.rs, one member this checker cannot
-        // represent, such as a method signature or index signature inside an
+        // represent, such as a call signature or an index signature inside an
         // interface, makes the whole interface unresolvable rather than silently
         // dropping just that member.
-        let TSSignature::TSPropertySignature(property) = member else {
-            return None;
+        let entry = match member {
+            TSSignature::TSPropertySignature(property) => {
+                let PropertyKey::StaticIdentifier(key) = &property.key else {
+                    return None;
+                };
+                let annotation = property.type_annotation.as_ref()?;
+                let type_id = resolve_type_annotation(annotation, namespace, arena)?;
+                PropertyEntry {
+                    name: key.name.to_string().into(),
+                    type_id,
+                    optional: property.optional,
+                    is_method: false,
+                }
+            }
+            TSSignature::TSMethodSignature(method) => {
+                resolve_method_signature(method, namespace, arena)?
+            }
+            _ => return None,
         };
-        let PropertyKey::StaticIdentifier(key) = &property.key else {
+
+        // ObjectType's merge-join over sorted property lists gives wrong answers
+        // when a name appears twice, and two method signatures with one name are an
+        // overload set, which has no representation here. Either way the
+        // declaration is not modelled, so it stays unresolvable.
+        if properties
+            .iter()
+            .any(|existing| existing.name == entry.name)
+        {
             return None;
-        };
-        let annotation = property.type_annotation.as_ref()?;
-        let type_id = resolve_type_annotation(annotation, namespace, arena)?;
-        properties.push(PropertyEntry {
-            name: key.name.to_string().into(),
-            type_id,
-            optional: property.optional,
-        });
+        }
+        properties.push(entry);
     }
 
     Some(arena.alloc(Type::Object(ObjectType::new(properties))))
+}
+
+// A method signature (`get(name: string): T`, `map<U>(f: (x: T) => U): U[]`) is
+// a property whose type is a function, flagged as declared with method syntax so
+// its parameters are compared bivariantly (see subtyping::property_is_subtype).
+//
+// Left unresolvable, exactly like a class method, when any part cannot be
+// modelled: an accessor (`get x(): T`), a computed or non-identifier key, an
+// explicit `this` parameter, or no return type annotation. Parameters without an
+// annotation are not one of those: they become `any` and are reported as implicit
+// any, the way a function type's parameters are.
+//
+// The method's own type parameters are in scope only while its signature is
+// resolved, so `U` never leaks into the enclosing interface.
+fn resolve_method_signature(
+    method: &TSMethodSignature,
+    namespace: &mut TypeNamespace,
+    arena: &mut TypeArena,
+) -> Option<PropertyEntry> {
+    if !matches!(method.kind, TSMethodSignatureKind::Method)
+        || method.computed
+        || method.this_param.is_some()
+    {
+        return None;
+    }
+    let PropertyKey::StaticIdentifier(key) = &method.key else {
+        return None;
+    };
+    let return_annotation = method.return_type.as_ref()?;
+
+    let scope = namespace.push_decl_type_params(arena, method.type_parameters.as_deref());
+    namespace.note_implicit_any_params(&method.params);
+    let params = resolve_params_with_any_fallback(&method.params, namespace, arena);
+    let return_type = resolve_type_annotation(return_annotation, namespace, arena);
+    namespace.pop_type_params(scope);
+
+    let function = arena.alloc(Type::Function(FunctionType {
+        params,
+        return_type: return_type?,
+        is_untyped: false,
+    }));
+    Some(PropertyEntry {
+        name: key.name.to_string().into(),
+        type_id: function,
+        optional: method.optional,
+        is_method: true,
+    })
 }

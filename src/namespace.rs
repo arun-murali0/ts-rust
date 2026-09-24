@@ -501,6 +501,7 @@ impl<'a> TypeNamespace<'a> {
                         key.name.to_string(),
                         type_id,
                         prop.optional,
+                        false,
                     );
                 }
                 ClassElement::MethodDefinition(method)
@@ -525,7 +526,13 @@ impl<'a> TypeNamespace<'a> {
                         return_type,
                         is_untyped,
                     }));
-                    upsert_property(&mut properties, key.name.to_string(), method_type, false);
+                    upsert_property(
+                        &mut properties,
+                        key.name.to_string(),
+                        method_type,
+                        false,
+                        true,
+                    );
                 }
 
                 _ => {}
@@ -541,16 +548,19 @@ fn upsert_property(
     name: String,
     type_id: TypeId,
     optional: bool,
+    is_method: bool,
 ) {
     match properties.iter_mut().find(|p| *p.name == *name) {
         Some(existing) => {
             existing.type_id = type_id;
             existing.optional = optional;
+            existing.is_method = is_method;
         }
         None => properties.push(PropertyEntry {
             name: name.into(),
             type_id,
             optional,
+            is_method,
         }),
     }
 }
