@@ -132,24 +132,61 @@ pub mod messages {
         )
     }
 
-    pub fn argument_arity_exact(required: usize, got: usize) -> DiagnosticMessage {
+    // Appended after the tsc-matching sentence, not in place of it, since
+    // that first sentence is what compare-tsc/compare-local match on and
+    // tsc's own TS2554 never names a parameter.
+    fn with_missing_names(mut text: String, missing: Option<&[&str]>) -> String {
+        if let Some(names) = missing
+            && !names.is_empty()
+        {
+            let quoted: Vec<String> = names.iter().map(|name| format!("'{name}'")).collect();
+            let (word, list) = if quoted.len() == 1 {
+                ("parameter", quoted.join(", "))
+            } else {
+                ("parameters", quoted.join(", "))
+            };
+            text.push_str(&format!(" Missing argument for {word} {list}."));
+        }
+        text
+    }
+
+    pub fn argument_arity_exact(
+        required: usize,
+        got: usize,
+        missing: Option<&[&str]>,
+    ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::ArgumentArityMismatch,
-            format!("Expected {required} argument(s), but got {got}."),
+            with_missing_names(format!("Expected {required} argument(s), but got {got}."), missing),
         )
     }
 
-    pub fn argument_arity_at_least(required: usize, got: usize) -> DiagnosticMessage {
+    pub fn argument_arity_at_least(
+        required: usize,
+        got: usize,
+        missing: Option<&[&str]>,
+    ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::ArgumentArityMismatch,
-            format!("Expected at least {required} argument(s), but got {got}."),
+            with_missing_names(
+                format!("Expected at least {required} argument(s), but got {got}."),
+                missing,
+            ),
         )
     }
 
-    pub fn argument_arity_range(required: usize, max: usize, got: usize) -> DiagnosticMessage {
+    pub fn argument_arity_range(
+        required: usize,
+        max: usize,
+        got: usize,
+        missing: Option<&[&str]>,
+    ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::ArgumentArityMismatch,
-            format!("Expected {required}-{max} argument(s), but got {got}."),
+            with_missing_names(
+                format!("Expected {required}-{max} argument(s), but got {got}."),
+                missing,
+            ),
         )
     }
 

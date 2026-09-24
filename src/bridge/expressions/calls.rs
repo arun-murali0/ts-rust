@@ -197,7 +197,20 @@ fn check_callable(
             None => true,
         };
     if !arity_ok {
-        ctx.error(arity_message(required, max, arguments.len()), span);
+        // Only "too few" can name a parameter; "too many" has no single one
+        // to blame. A destructured param among the missing ones drops the
+        // whole list rather than naming some and not others.
+        let missing_names: Option<Vec<&str>> = (arguments.len() < required).then(|| {
+            function_type.params[arguments.len()..required]
+                .iter()
+                .map(|p| p.name.as_deref())
+                .collect::<Option<Vec<&str>>>()
+        }).flatten();
+
+        ctx.error(
+            arity_message(required, max, arguments.len(), missing_names.as_deref()),
+            span,
+        );
 
         for arg in arguments {
             if let Some(arg_expr) = arg.as_expression() {
@@ -315,11 +328,14 @@ fn arity_message(
     required: usize,
     max: Option<usize>,
     got: usize,
+    missing_names: Option<&[&str]>,
 ) -> crate::diagnostic_messages::DiagnosticMessage {
     use crate::diagnostic_messages::messages;
     match max {
-        Some(max) if max == required => messages::argument_arity_exact(required, got),
-        Some(max) => messages::argument_arity_range(required, max, got),
-        None => messages::argument_arity_at_least(required, got),
+        Some(max) if max == required => {
+            messages::argument_arity_exact(required, got, missing_names)
+        }
+        Some(max) => messages::argument_arity_range(required, max, got, missing_names),
+        None => messages::argument_arity_at_least(required, got, missing_names),
     }
 }
