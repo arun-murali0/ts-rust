@@ -210,16 +210,12 @@ pub fn resolve_function_params(
     arena: &mut TypeArena,
 ) -> Option<Vec<Param>> {
     let mut resolved = Vec::with_capacity(params.items.len() + 1);
-    for param in &params.items {
+    for (param, optional) in params.items.iter().zip(optional_flags(params)) {
         let annotation = param.type_annotation.as_ref()?;
         let type_id = resolve_type_annotation(annotation, namespace, arena)?;
         resolved.push(Param {
             type_id,
-            // A parameter with a default value (`x = 1`) is omittable at call
-            // sites the same way an explicitly optional `x?: T` parameter is,
-            // even without its own `?`, matching real TypeScript's arity rules.
-            optional: param.optional
-                || matches!(param.pattern, BindingPattern::AssignmentPattern(_)),
+            optional,
             rest: false,
             name: binding_name(&param.pattern),
         });
@@ -237,6 +233,37 @@ pub fn resolve_function_params(
     }
 
     Some(resolved)
+}
+
+// Whether each parameter can be left out of a call. `x?: T` always can. A default
+// value (`x: T = v`) can too, but only when no required parameter follows it: in
+// `(a = 1, b: number)` a caller has to supply `a` to reach `b`, so tsc counts both
+// as required. Walking from the end is what turns "a required parameter follows"
+// into one running flag.
+//
+// A default lives in FormalParameter::initializer. oxc only wraps a pattern in
+// BindingPattern::AssignmentPattern for a default nested inside a destructuring
+// pattern, so looking at the pattern alone missed every ordinary default and left
+// `(name: string, greeting: string = "hi")` demanding both arguments. Both forms
+// are honored here.
+fn optional_flags(params: &FormalParameters) -> Vec<bool> {
+    let mut required_follows = false;
+    let mut flags: Vec<bool> = params
+        .items
+        .iter()
+        .rev()
+        .map(|param| {
+            let has_default = param.initializer.is_some()
+                || matches!(param.pattern, BindingPattern::AssignmentPattern(_));
+            let optional = param.optional || (has_default && !required_follows);
+            if !optional {
+                required_follows = true;
+            }
+            optional
+        })
+        .collect();
+    flags.reverse();
+    flags
 }
 
 // None for a destructured pattern, which has no single name -- treated as
@@ -257,7 +284,8 @@ pub fn resolve_params_with_any_fallback(
     let mut resolved: Vec<Param> = params
         .items
         .iter()
-        .map(|param| {
+        .zip(optional_flags(params))
+        .map(|(param, optional)| {
             let type_id = param
                 .type_annotation
                 .as_ref()
@@ -265,8 +293,7 @@ pub fn resolve_params_with_any_fallback(
                 .unwrap_or_else(|| arena.any());
             Param {
                 type_id,
-                optional: param.optional
-                    || matches!(param.pattern, BindingPattern::AssignmentPattern(_)),
+                optional,
                 rest: false,
                 name: binding_name(&param.pattern),
             }
