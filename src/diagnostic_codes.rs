@@ -63,7 +63,6 @@ pub enum DiagnosticCode {
     UnresolvableTypeAnnotation,
     UnresolvableDestructuringTypeAnnotation,
     UnresolvableTypeParameterConstraint,
-    GenericTypeMissingTypeArguments,
 }
 
 impl DiagnosticCode {
@@ -109,7 +108,6 @@ impl DiagnosticCode {
             UnresolvableTypeAnnotation => "TSR9012",
             UnresolvableDestructuringTypeAnnotation => "TSR9013",
             UnresolvableTypeParameterConstraint => "TSR9014",
-            GenericTypeMissingTypeArguments => "TSR9015",
         }
     }
 }

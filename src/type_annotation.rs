@@ -97,10 +97,12 @@ pub fn resolve_ts_type(
                 return Some(base);
             };
 
-            // A bare `Box` for `interface Box<T>` was reported above; it keeps
-            // resolving to the generic shape with T left as a placeholder.
+            // A bare `Box` for `interface Box<T>` was reported above. As in tsc
+            // the reference is then the error type, which is compatible with
+            // everything, so the missing arguments cannot cascade into a second,
+            // unrelated diagnostic and no bare placeholder leaks out.
             if given == 0 && arity.is_some_and(|(required, _)| required > 0) {
-                return Some(base);
+                return Some(arena.error());
             }
 
             // base is the declaration's own cached generic shape, still holding
@@ -124,7 +126,17 @@ pub fn resolve_ts_type(
                     .and_then(|arguments| arguments.params.get(index))
                 {
                     Some(argument) => {
-                        resolve_ts_type(argument, namespace, arena).unwrap_or_else(|| arena.error())
+                        let resolved = resolve_ts_type(argument, namespace, arena)
+                            .unwrap_or_else(|| arena.error());
+                        check_type_argument_constraint(
+                            namespace,
+                            arena,
+                            (parameter_id, param.name.name.as_str()),
+                            resolved,
+                            &bindings,
+                            argument.span(),
+                        );
+                        resolved
                     }
                     None => namespace
                         .resolve_type_param_default(arena, decl, index)
@@ -142,6 +154,39 @@ pub fn resolve_ts_type(
         }
 
         _ => None,
+    }
+}
+
+// Checks one explicit type argument against the `extends` bound of the parameter
+// it was given to, the way tsc does (TS2344), and records a violation for
+// bridge::check_program to report. The bound may mention earlier parameters
+// (`<T, U extends T>`), so it is substituted with the arguments bound so far.
+//
+// Skipped when either side still contains a type parameter: this checker's
+// subtyping does not look through a parameter's own bound, so comparing them here
+// could report an error tsc would not. Such an argument is checked where the
+// enclosing generic is instantiated instead. An argument that failed to resolve
+// is the error type, which is compatible with everything.
+fn check_type_argument_constraint(
+    namespace: &mut TypeNamespace,
+    arena: &mut TypeArena,
+    parameter: (TypeParameterId, &str),
+    argument: TypeId,
+    bindings: &[(TypeParameterId, TypeId)],
+    span: oxc_span::Span,
+) {
+    let (parameter_id, parameter_name) = parameter;
+    let Some(constraint) = namespace.type_param_constraint(arena, parameter_id) else {
+        return;
+    };
+    let constraint = crate::semantic::substitute_type_params(arena, constraint, bindings);
+    if crate::semantic::contains_type_param(arena, argument)
+        || crate::semantic::contains_type_param(arena, constraint)
+    {
+        return;
+    }
+    if !crate::subtyping::is_subtype(arena, argument, constraint) {
+        namespace.note_constraint_violation(parameter_name, span);
     }
 }
 

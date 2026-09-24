@@ -304,16 +304,6 @@ pub mod messages {
         )
     }
 
-    pub fn generic_type_missing_type_arguments(name: &str, expected: usize) -> DiagnosticMessage {
-        DiagnosticMessage::new(
-            DiagnosticCode::GenericTypeMissingTypeArguments,
-            format!(
-                "Generic type '{name}' expects {expected} type argument(s) but none were given, \
-                 so its type parameters are left unresolved."
-            ),
-        )
-    }
-
     pub fn unresolvable_type_annotation(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::UnresolvableTypeAnnotation,

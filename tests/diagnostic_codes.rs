@@ -105,10 +105,6 @@ fn generics_diagnostic_codes_are_stable() {
         "TSR1501"
     );
     assert_eq!(DiagnosticCode::TypeIsNotGeneric.as_str(), "TSR1502");
-    assert_eq!(
-        DiagnosticCode::GenericTypeMissingTypeArguments.as_str(),
-        "TSR9015"
-    );
 }
 
 #[test]
@@ -196,9 +192,20 @@ fn type_argument_arity_problems_report_their_codes() {
         DiagnosticCode::TypeIsNotGeneric,
         Severity::Error,
     );
+    // A bare `Box` for `Box<T>` is a missing type argument, an error in tsc too.
     assert_reports(
         "generics-tier2/bare_generic_reference_without_type_arguments_still_resolves.ts",
-        DiagnosticCode::GenericTypeMissingTypeArguments,
-        Severity::Warning,
+        DiagnosticCode::TypeArgumentCountMismatch,
+        Severity::Error,
+    );
+    assert_reports(
+        "generics-tier2/type_argument_violates_constraint.ts",
+        DiagnosticCode::TypeArgumentConstraintViolation,
+        Severity::Error,
+    );
+    assert_reports(
+        "generics-tier2/type_argument_violates_alias_constraint.ts",
+        DiagnosticCode::TypeArgumentConstraintViolation,
+        Severity::Error,
     );
 }

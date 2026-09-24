@@ -81,6 +81,12 @@ pub struct TypeNamespace<'a> {
     // See TypeArgumentIssue. Deduplicated by source position, since the same
     // annotation can be resolved more than once.
     type_argument_issues: Vec<TypeArgumentIssue>,
+
+    // Type arguments that do not satisfy the `extends` bound of the parameter
+    // they were given to (`Box<number>` for `Box<T extends string>`): the
+    // parameter's name and the argument's span. Collected here for the same
+    // reason as the issues above and deduplicated the same way.
+    constraint_violations: Vec<(String, Span)>,
 }
 
 pub enum Resolution {
@@ -98,6 +104,7 @@ impl<'a> TypeNamespace<'a> {
             implicit_any_params: Vec::new(),
             unresolved_constraints: Vec::new(),
             type_argument_issues: Vec::new(),
+            constraint_violations: Vec::new(),
         }
     }
 
@@ -215,6 +222,34 @@ impl<'a> TypeNamespace<'a> {
             given,
             span,
         });
+    }
+
+    // The resolved `extends` bound of a declared type parameter, read back from
+    // the GenericParameter node push_decl_type_params cached for it. None when the
+    // parameter is unconstrained, or its bound could not be resolved (already
+    // reported as a warning), so nothing is ever enforced against it.
+    pub fn type_param_constraint(&self, arena: &TypeArena, id: TypeParameterId) -> Option<TypeId> {
+        let node = *self.type_param_cache.get(&id)?;
+        match arena.get(node) {
+            Type::GenericParameter(_, _, constraint) => *constraint,
+            _ => None,
+        }
+    }
+
+    pub fn note_constraint_violation(&mut self, parameter_name: &str, span: Span) {
+        if self
+            .constraint_violations
+            .iter()
+            .any(|(_, existing)| existing.start == span.start)
+        {
+            return;
+        }
+        self.constraint_violations
+            .push((parameter_name.to_string(), span));
+    }
+
+    pub fn take_constraint_violations(&mut self) -> Vec<(String, Span)> {
+        std::mem::take(&mut self.constraint_violations)
     }
 
     pub fn take_type_argument_issues(&mut self) -> Vec<TypeArgumentIssue> {

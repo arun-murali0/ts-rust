@@ -99,8 +99,11 @@ fn two_instantiations_of_the_same_interface_stay_distinct() {
     );
 }
 
+// tsc rejects a bare generic reference (TS2314), so ts-rust reports it as an error
+// too. The reference is typed as the error type, so `box.value` in the body adds
+// no second diagnostic.
 #[test]
-fn bare_generic_reference_without_type_arguments_still_resolves() {
+fn bare_generic_reference_without_type_arguments_is_reported_as_an_error() {
     let source = include_str!(
         "fixtures/generics-tier2/bare_generic_reference_without_type_arguments_still_resolves.ts"
     );
@@ -108,9 +111,17 @@ fn bare_generic_reference_without_type_arguments_still_resolves() {
         source,
         "bare_generic_reference_without_type_arguments_still_resolves.ts",
     );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
     assert!(
-        diagnostics.iter().all(|d| d.severity != Severity::Error),
-        "a bare, un-instantiated generic reference should not be a hard error, got: {diagnostics:?}"
+        diagnostics[0]
+            .message
+            .contains("requires 1 type argument(s), but 0 were given"),
+        "got: {diagnostics:?}"
     );
 }
 
@@ -172,28 +183,55 @@ fn type_arguments_on_a_non_generic_type_are_reported_as_an_error() {
     );
 }
 
+// `Box<number>` for `interface Box<T extends string>` (TS2344): the type argument
+// does not satisfy the parameter's bound.
 #[test]
-fn bare_generic_reference_is_reported_as_a_warning_not_an_error() {
-    let source = include_str!(
-        "fixtures/generics-tier2/bare_generic_reference_without_type_arguments_still_resolves.ts"
-    );
-    let diagnostics = check(
-        source,
-        "bare_generic_reference_without_type_arguments_still_resolves.ts",
-    );
-    let warnings: Vec<_> = diagnostics
-        .iter()
-        .filter(|d| {
-            d.message
-                .contains("expects 1 type argument(s) but none were given")
-        })
-        .collect();
+fn type_argument_violating_an_interface_constraint_is_reported() {
+    let source = include_str!("fixtures/generics-tier2/type_argument_violates_constraint.ts");
+    let diagnostics = check(source, "type_argument_violates_constraint.ts");
     assert_eq!(
-        warnings.len(),
+        diagnostics.len(),
         1,
-        "expected one missing-type-arguments warning, got: {diagnostics:?}"
+        "expected exactly one diagnostic, got: {diagnostics:?}"
     );
-    assert_eq!(warnings[0].severity, Severity::Warning);
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("does not satisfy the constraint of type parameter 'T'"),
+        "got: {diagnostics:?}"
+    );
+}
+
+// The same rule for a generic type alias, with an object-shaped bound.
+#[test]
+fn type_argument_violating_an_alias_constraint_is_reported() {
+    let source = include_str!("fixtures/generics-tier2/type_argument_violates_alias_constraint.ts");
+    let diagnostics = check(source, "type_argument_violates_alias_constraint.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("does not satisfy the constraint of type parameter 'T'"),
+        "got: {diagnostics:?}"
+    );
+}
+
+// Arguments that satisfy their bounds report nothing, including a type parameter
+// passed on as an argument, which is left for the point of instantiation.
+#[test]
+fn type_arguments_that_satisfy_their_constraints_are_accepted() {
+    let source = include_str!("fixtures/generics-tier2/type_argument_satisfies_constraint.ts");
+    let diagnostics = check(source, "type_argument_satisfies_constraint.ts");
+    assert!(
+        diagnostics.iter().all(|d| d.severity != Severity::Error),
+        "expected no errors, got: {diagnostics:?}"
+    );
 }
 
 // `interface Second<A, B> { value: B }` never mentions A in its body, so the
