@@ -57,7 +57,7 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
             ctx.warning(
                 crate::diagnostic_messages::messages::generic_type_missing_type_arguments(
                     name,
-                    issue.expected,
+                    issue.required,
                 ),
                 issue.span,
             );
@@ -70,6 +70,7 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
             ctx.error(
                 crate::diagnostic_messages::messages::type_argument_count_mismatch(
                     name,
+                    issue.required,
                     issue.expected,
                     issue.given,
                 ),

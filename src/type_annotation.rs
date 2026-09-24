@@ -2,10 +2,11 @@ use oxc_ast::ast::{
     BindingPattern, FormalParameters, PropertyKey, TSSignature, TSType, TSTypeAnnotation,
     TSTypeName,
 };
+use oxc_span::GetSpan;
 
 use crate::arena::{TypeArena, TypeId};
 use crate::namespace::{Resolution, TypeNamespace};
-use crate::types::{ObjectType, Param, PropertyEntry, Type};
+use crate::types::{ObjectType, Param, PropertyEntry, Type, TypeParameterId};
 
 pub fn resolve_type_annotation(
     annotation: &TSTypeAnnotation,
@@ -70,61 +71,71 @@ pub fn resolve_ts_type(
 
             // A reference whose type argument count disagrees with its
             // declaration is recorded, not rejected here: resolution carries on
-            // with the same lenient treatment below, and the mismatch is reported
-            // afterward as a diagnostic (see bridge::check_program). A bare `Box`
-            // for `interface Box<T>` is the given == 0 case, reported as a
-            // warning rather than an error.
+            // leniently below, and the mismatch is reported afterward (see
+            // bridge::check_program). Parameters with a default may be omitted,
+            // so the valid range is required..=total, as in tsc.
             let given = reference
                 .type_arguments
                 .as_ref()
                 .map_or(0, |arguments| arguments.params.len());
-            if let Some(expected) = namespace.declared_type_param_count(&id.name) {
-                if expected != given {
-                    namespace.note_type_argument_issue(&id.name, expected, given, reference.span);
+            let arity = namespace.declared_type_param_arity(&id.name);
+            if let Some((required, total)) = arity {
+                if given < required || given > total {
+                    namespace.note_type_argument_issue(
+                        &id.name,
+                        required,
+                        total,
+                        given,
+                        reference.span,
+                    );
                 }
             }
 
-            // No explicit type arguments (a bare `Box`, or a reference to a
-            // non-generic type) -- nothing to substitute.
-            let Some(type_arguments) = &reference.type_arguments else {
+            // Not generic, or a declaration this checker does not model (a
+            // class): nothing to substitute.
+            let Some(decl) = namespace.declared_type_param_decl(&id.name) else {
                 return Some(base);
             };
 
-            // Each explicit argument (the `number` in `Box<number>`) is resolved
-            // in the *caller's* namespace, not the callee's, exactly like a
-            // generic function call's explicit type arguments in calls.rs.
-            let explicit: Vec<TypeId> = type_arguments
-                .params
-                .iter()
-                .filter_map(|ty| resolve_ts_type(ty, namespace, arena))
-                .collect();
-            if explicit.is_empty() {
+            // A bare `Box` for `interface Box<T>` was reported above; it keeps
+            // resolving to the generic shape with T left as a placeholder.
+            if given == 0 && arity.is_some_and(|(required, _)| required > 0) {
                 return Some(base);
             }
 
-            // base is Box's own cached generic shape -- an Object/Function/etc
-            // still containing bare GenericParameter placeholders for T, in the
-            // order `interface Box<T, ...>` declared them (see
-            // TypeNamespace::resolve). Recovering that order the same way a
-            // generic call's explicit type arguments do lets `Box<number>` and
-            // `identity<string>(x)` share one substitution mechanism rather than
-            // needing two.
-            let mut ordered_ids = Vec::new();
-            crate::semantic::ordered_generic_param_ids(arena, base, &mut ordered_ids);
-            if ordered_ids.is_empty() {
-                // Box itself isn't generic (or has no type parameters this
-                // checker resolved) -- type arguments given to it are ignored
-                // rather than substituted into nothing, the same lenient
-                // "erase what can't be honored" stance taken everywhere else in
-                // this function.
-                return Some(base);
+            // base is the declaration's own cached generic shape, still holding
+            // bare GenericParameter placeholders. One binding per *declared*
+            // parameter, in declaration order, keyed by the same TypeParameterId
+            // push_decl_type_params uses, so positions cannot drift: a parameter
+            // the body never mentions still owns its slot, and an argument that
+            // cannot be resolved becomes the error type in place instead of
+            // being dropped and shifting every later argument left. Each
+            // explicit argument is resolved in the *caller's* namespace, exactly
+            // like a generic call's explicit type arguments in calls.rs.
+            // Arguments beyond the declared count are ignored; an omitted one
+            // takes its declared default, or the error type if it has none.
+            let mut bindings: Vec<(TypeParameterId, TypeId)> =
+                Vec::with_capacity(decl.params.len());
+            for (index, param) in decl.params.iter().enumerate() {
+                let parameter_id = TypeParameterId::new(param.span().start, index as u32);
+                let bound = match reference
+                    .type_arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.params.get(index))
+                {
+                    Some(argument) => {
+                        resolve_ts_type(argument, namespace, arena).unwrap_or_else(|| arena.error())
+                    }
+                    None => namespace
+                        .resolve_type_param_default(arena, decl, index)
+                        .map(|default| {
+                            crate::semantic::substitute_type_params(arena, default, &bindings)
+                        })
+                        .unwrap_or_else(|| arena.error()),
+                };
+                bindings.push((parameter_id, bound));
             }
 
-            let bindings: Vec<_> = ordered_ids
-                .iter()
-                .zip(explicit.iter())
-                .map(|(&id, &resolved)| (id, resolved))
-                .collect();
             Some(crate::semantic::substitute_type_params(
                 arena, base, &bindings,
             ))

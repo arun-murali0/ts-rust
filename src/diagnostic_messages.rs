@@ -278,17 +278,22 @@ pub mod messages {
         )
     }
 
+    // `required == total` reads like tsc's TS2314; a range (some trailing
+    // parameters have defaults) reads like its TS2707.
     pub fn type_argument_count_mismatch(
         name: &str,
-        expected: usize,
+        required: usize,
+        total: usize,
         given: usize,
     ) -> DiagnosticMessage {
+        let expectation = if required == total {
+            format!("requires {total} type argument(s)")
+        } else {
+            format!("requires between {required} and {total} type arguments")
+        };
         DiagnosticMessage::new(
             DiagnosticCode::TypeArgumentCountMismatch,
-            format!(
-                "Generic type '{name}' requires {expected} type argument(s), \
-                 but {given} were given."
-            ),
+            format!("Generic type '{name}' {expectation}, but {given} were given."),
         )
     }
 

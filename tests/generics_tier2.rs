@@ -195,3 +195,58 @@ fn bare_generic_reference_is_reported_as_a_warning_not_an_error() {
     );
     assert_eq!(warnings[0].severity, Severity::Warning);
 }
+
+// `interface Second<A, B> { value: B }` never mentions A in its body, so the
+// only way `Second<number, string>` binds B = string is by giving A its own
+// slot. Only the `bad` line (value: 1) may error.
+#[test]
+fn unused_type_parameter_keeps_its_position() {
+    let source =
+        include_str!("fixtures/generics-tier2/unused_type_parameter_keeps_its_position.ts");
+    let diagnostics = check(source, "unused_type_parameter_keeps_its_position.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "only the `bad` line should error, got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[0].message.contains("not assignable"),
+        "got: {diagnostics:?}"
+    );
+}
+
+// `Pair<number>` is valid for `interface Pair<A, B = string>` in tsc: no
+// argument-count error, and B falls back to string so the `bad` line errors.
+#[test]
+fn omitted_type_argument_uses_its_default() {
+    let source = include_str!("fixtures/generics-tier2/type_argument_default_is_applied.ts");
+    let diagnostics = check(source, "type_argument_default_is_applied.ts");
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "got: {diagnostics:?}");
+    assert!(
+        errors[0].message.contains("not assignable"),
+        "got: {diagnostics:?}"
+    );
+}
+
+// A range (some trailing parameters have defaults) is reported as a range, the
+// way tsc's TS2707 is, rather than as an exact count.
+#[test]
+fn count_range_message_names_the_range_when_defaults_exist() {
+    let source = "interface Pair<A, B = string> { first: A; second: B; }\n\
+                  const p: Pair<number, string, boolean> = { first: 1, second: \"x\" };\n";
+    let diagnostics = check(source, "range.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0].message.contains("between 1 and 2"),
+        "got: {diagnostics:?}"
+    );
+}

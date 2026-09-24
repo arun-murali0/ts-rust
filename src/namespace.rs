@@ -46,6 +46,9 @@ struct TypeEntry<'a> {
 // bridge::check_program), the same way implicit_any_params is.
 pub struct TypeArgumentIssue {
     pub name: String,
+    // Fewest type arguments a reference must give: parameters without a default.
+    pub required: usize,
+    // Most it may give: every declared parameter.
     pub expected: usize,
     pub given: usize,
     pub span: Span,
@@ -130,23 +133,70 @@ impl<'a> TypeNamespace<'a> {
         std::mem::take(&mut self.unresolved_constraints)
     }
 
-    // How many type parameters the interface or type alias called `name` declares
-    // (0 for a non-generic one). None for anything else: a class, whose generics
-    // are not supported yet, a type parameter, an enum, or an unknown name. Those
-    // are never reported, so an unsupported feature cannot produce a false error.
-    pub fn declared_type_param_count(&self, name: &str) -> Option<usize> {
+    // The `<...>` list declared by the interface or type alias called `name`.
+    // Outer None: not something whose type parameters are modelled (a class,
+    // whose generics are not supported yet, a type parameter, an enum, or an
+    // unknown name), so nothing is ever reported against it and an unsupported
+    // feature cannot produce a false error. Inner None: a non-generic one.
+    fn declared_type_param_list(
+        &self,
+        name: &str,
+    ) -> Option<Option<&'a oxc_ast::ast::TSTypeParameterDeclaration<'a>>> {
         match self.entries.get(name)?.kind {
-            DeclKind::TypeAlias(_, type_params) => Some(type_params.map_or(0, |d| d.params.len())),
-            DeclKind::Interface(decl) => {
-                Some(decl.type_parameters.as_ref().map_or(0, |d| d.params.len()))
-            }
+            DeclKind::TypeAlias(_, type_params) => Some(type_params),
+            DeclKind::Interface(decl) => Some(decl.type_parameters.as_deref()),
             DeclKind::Class(_) | DeclKind::Resolved => None,
         }
+    }
+
+    // (required, total) type argument counts. A parameter with a default may be
+    // omitted, which is why these differ; tsc accepts `Pair<number>` for
+    // `interface Pair<A, B = string>`.
+    pub fn declared_type_param_arity(&self, name: &str) -> Option<(usize, usize)> {
+        Some(match self.declared_type_param_list(name)? {
+            None => (0, 0),
+            Some(decl) => (
+                decl.params
+                    .iter()
+                    .filter(|param| param.default.is_none())
+                    .count(),
+                decl.params.len(),
+            ),
+        })
+    }
+
+    // The declaration itself when it is generic, so a reference can bind one
+    // argument per *declared* parameter, in declaration order, instead of
+    // guessing the order from whichever parameters the resolved body mentions.
+    pub fn declared_type_param_decl(
+        &self,
+        name: &str,
+    ) -> Option<&'a oxc_ast::ast::TSTypeParameterDeclaration<'a>> {
+        self.declared_type_param_list(name)?
+            .filter(|decl| !decl.params.is_empty())
+    }
+
+    // Resolves the `= Default` of the type parameter at `index`, with the
+    // declaration's own parameters in scope so a default may mention an earlier
+    // one (`<T, U = T>`). The result can still contain those GenericParameter
+    // placeholders; the caller substitutes the arguments it already has.
+    pub fn resolve_type_param_default(
+        &mut self,
+        arena: &mut TypeArena,
+        decl: &'a oxc_ast::ast::TSTypeParameterDeclaration<'a>,
+        index: usize,
+    ) -> Option<TypeId> {
+        let default = decl.params.get(index)?.default.as_ref()?;
+        let scope = self.push_decl_type_params(arena, Some(decl));
+        let resolved = resolve_ts_type(default, self, arena);
+        self.pop_type_params(scope);
+        resolved
     }
 
     pub fn note_type_argument_issue(
         &mut self,
         name: &str,
+        required: usize,
         expected: usize,
         given: usize,
         span: Span,
@@ -160,6 +210,7 @@ impl<'a> TypeNamespace<'a> {
         }
         self.type_argument_issues.push(TypeArgumentIssue {
             name: name.to_string(),
+            required,
             expected,
             given,
             span,
