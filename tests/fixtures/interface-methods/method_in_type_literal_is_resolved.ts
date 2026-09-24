@@ -1,0 +1,7 @@
+type Greeter = {
+    greet(name: string): string;
+};
+
+function run(g: Greeter): string {
+    return g.greet(42);
+}
