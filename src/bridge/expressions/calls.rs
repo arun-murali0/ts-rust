@@ -9,9 +9,34 @@ use super::super::context::CheckContext;
 use super::infer_expression_type;
 use super::{
     check_excess_properties, collect_generic_param_constraints, expected_param_type,
-    infer_member_access_type, infer_type_param_bindings, resolve_identifier_type,
-    substitute_type_params,
+    infer_member_access_type, infer_type_param_bindings, ordered_generic_param_ids,
+    resolve_identifier_type, substitute_type_params,
 };
+
+// Resolves an explicit call-site type argument list, e.g. the <string> in
+// identity<string>(x), into concrete TypeIds. Returns an empty vec for a call
+// with no such list (`call.type_arguments`/`new_expr.type_arguments` being the
+// ordinary, common case: a bare `identity(x)`), so callers don't need to
+// special-case "none given" separately from "given but unresolvable".
+// An individual type argument this checker cannot resolve (e.g. it names
+// something not in scope) is dropped rather than aborting the whole list, the
+// same graceful-degradation stance taken everywhere else in this checker for a
+// single unresolved piece of an otherwise-checkable construct.
+fn resolve_explicit_type_arguments(
+    type_arguments: Option<&oxc_ast::ast::TSTypeParameterInstantiation>,
+    ctx: &mut CheckContext<'_, '_>,
+) -> Vec<TypeId> {
+    let Some(type_arguments) = type_arguments else {
+        return Vec::new();
+    };
+    type_arguments
+        .params
+        .iter()
+        .filter_map(|ty| {
+            crate::type_annotation::resolve_ts_type(ty, &mut ctx.namespace, &mut ctx.arena)
+        })
+        .collect()
+}
 
 pub(super) fn infer_call_expression_type(
     call: &oxc_ast::ast::CallExpression,
@@ -38,12 +63,16 @@ pub(super) fn infer_call_expression_type(
         }
     };
 
+    let explicit_type_args =
+        resolve_explicit_type_arguments(call.type_arguments.as_deref(), ctx);
+
     check_callable(
         callee_type,
         &call.arguments,
         call.span(),
         &callee_name,
         false,
+        &explicit_type_args,
         scoping,
         ctx,
     )
@@ -63,6 +92,8 @@ pub(super) fn infer_new_expression_type(
     };
 
     let callee_type = resolve_identifier_type(callee_ident, scoping, ctx);
+    let explicit_type_args =
+        resolve_explicit_type_arguments(new_expr.type_arguments.as_deref(), ctx);
 
     check_callable(
         callee_type,
@@ -70,6 +101,7 @@ pub(super) fn infer_new_expression_type(
         new_expr.span(),
         &callee_ident.name,
         true,
+        &explicit_type_args,
         scoping,
         ctx,
     )
@@ -81,6 +113,7 @@ fn check_callable(
     span: Span,
     callee_name: &str,
     is_new: bool,
+    explicit_type_args: &[TypeId],
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
@@ -171,11 +204,39 @@ fn check_callable(
     // any argument is checked against its expected type, so a generic function's
     // return type can be substituted correctly even when the argument that fixes
     // a type parameter comes after other checked arguments.
-    let mut bindings: Vec<(crate::types::TypeParameterId, TypeId)> = Vec::new();
+    // An explicit call-site type argument list (identity<string>(x)) is
+    // positional, with no declaration span of its own, so it is zipped against
+    // the function's own type parameters in the order they were declared --
+    // see ordered_generic_param_ids for how that order is recovered. Extra
+    // type arguments beyond the function's own parameter count are ignored,
+    // and a partial list (some but not all of the function's type parameters
+    // given explicitly) leaves the rest to ordinary argument-driven inference,
+    // matching this checker's general "leave the rest to be inferred/left
+    // unresolved" stance rather than treating it as an arity error.
+    let mut declared_param_ids = Vec::new();
+    for param in &function_type.params {
+        ordered_generic_param_ids(&ctx.arena, param.type_id, &mut declared_param_ids);
+    }
+    ordered_generic_param_ids(&ctx.arena, function_type.return_type, &mut declared_param_ids);
+
+    let mut bindings: Vec<(crate::types::TypeParameterId, TypeId)> = declared_param_ids
+        .iter()
+        .zip(explicit_type_args.iter())
+        .map(|(&id, &explicit)| (id, explicit))
+        .collect();
+    let locked: Vec<crate::types::TypeParameterId> =
+        bindings.iter().map(|(id, _)| *id).collect();
+
     for (index, arg_type) in arg_types.iter().enumerate() {
         let Some(arg_type) = arg_type else { continue };
         if let Some(param_type) = expected_param_type(&ctx.arena, &function_type.params, index) {
-            infer_type_param_bindings(&mut ctx.arena, param_type, *arg_type, &mut bindings);
+            infer_type_param_bindings(
+                &mut ctx.arena,
+                param_type,
+                *arg_type,
+                &mut bindings,
+                &locked,
+            );
         }
     }
 

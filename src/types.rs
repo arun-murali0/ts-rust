@@ -60,6 +60,16 @@ impl TypeParameterId {
             parameter_index,
         }
     }
+
+    // The position of this parameter within its own declaration's type parameter
+    // list (0 for the first `<T, ...>`, 1 for the second, and so on). Exposed so
+    // an explicit call-site type argument list, which has no declaration_span of
+    // its own to key off of, can still be zipped positionally against the
+    // parameters found in a function's structural type -- see
+    // generics::ordered_generic_param_ids.
+    pub fn parameter_index(&self) -> u32 {
+        self.parameter_index
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

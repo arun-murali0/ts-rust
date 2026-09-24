@@ -21,9 +21,19 @@ pub(crate) fn infer_type_param_bindings(
     param_type: TypeId,
     arg_type: TypeId,
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
+    locked: &[crate::types::TypeParameterId],
 ) {
     match arena.get(param_type).clone() {
         Type::GenericParameter(id, _, _) => {
+            // A parameter bound by an explicit call-site type argument
+            // (identity<string>(x)) is not up for renegotiation by whatever
+            // argument happens to line up with it structurally -- explicit
+            // wins outright, the same way TypeScript itself treats an
+            // explicit type argument as authoritative rather than a hint.
+            if locked.contains(&id) {
+                return;
+            }
+
             // Widened so identity(5) infers number, matching what a
             // TypeScript author expects from a bare generic call, rather than
             // the checker binding T to the narrower literal type 5.
@@ -45,7 +55,7 @@ pub(crate) fn infer_type_param_bindings(
                 Type::Array(element) => *element,
                 _ => return,
             };
-            infer_type_param_bindings(arena, param_element, arg_element, bindings);
+            infer_type_param_bindings(arena, param_element, arg_element, bindings, locked);
         }
         Type::Object(param_object) => {
             let Type::Object(arg_object) = arena.get(arg_type).clone() else {
@@ -62,6 +72,7 @@ pub(crate) fn infer_type_param_bindings(
                         param_prop.type_id,
                         arg_prop.type_id,
                         bindings,
+                        locked,
                     );
                 }
             }
@@ -71,9 +82,15 @@ pub(crate) fn infer_type_param_bindings(
                 return;
             };
             for (p, a) in param_fn.params.iter().zip(&arg_fn.params) {
-                infer_type_param_bindings(arena, p.type_id, a.type_id, bindings);
+                infer_type_param_bindings(arena, p.type_id, a.type_id, bindings, locked);
             }
-            infer_type_param_bindings(arena, param_fn.return_type, arg_fn.return_type, bindings);
+            infer_type_param_bindings(
+                arena,
+                param_fn.return_type,
+                arg_fn.return_type,
+                bindings,
+                locked,
+            );
         }
         // A parameter typed `T | undefined`, `T | null` or the like. TypeScript
         // first sets aside whatever part of the argument a concrete member of the
@@ -110,7 +127,7 @@ pub(crate) fn infer_type_param_bindings(
             };
             for &member in &param_members {
                 if contains_type_param(arena, member) {
-                    infer_type_param_bindings(arena, member, remainder, bindings);
+                    infer_type_param_bindings(arena, member, remainder, bindings, locked);
                 }
             }
         }
@@ -181,6 +198,49 @@ pub(crate) fn substitute_type_params(
         }
         _ => type_id,
     }
+}
+
+// Collects every distinct type parameter appearing in type_id, then hands them
+// back in declaration order rather than tree-walk-encounter order. An explicit
+// call-site type argument list (identity<string, number>(x, y)) has no
+// declaration span of its own to key a TypeParameterId lookup off of -- it is
+// just a positional list -- so the only way to zip it correctly against a
+// function's own T, U, ... is to recover the order they were declared in. That
+// order survives structurally: push_type_params numbers each parameter by its
+// position in the source `<...>` list (see TypeParameterId::parameter_index),
+// so sorting by that index reconstructs it even though nothing about a
+// FunctionType itself remembers "T came before U".
+pub(crate) fn ordered_generic_param_ids(
+    arena: &TypeArena,
+    type_id: TypeId,
+    out: &mut Vec<crate::types::TypeParameterId>,
+) {
+    match arena.get(type_id) {
+        Type::GenericParameter(id, _, _) => {
+            if !out.contains(id) {
+                out.push(*id);
+            }
+        }
+        Type::Array(element) => ordered_generic_param_ids(arena, *element, out),
+        Type::Function(f) => {
+            for param in &f.params {
+                ordered_generic_param_ids(arena, param.type_id, out);
+            }
+            ordered_generic_param_ids(arena, f.return_type, out);
+        }
+        Type::Object(o) => {
+            for property in &o.properties {
+                ordered_generic_param_ids(arena, property.type_id, out);
+            }
+        }
+        Type::Union(members) => {
+            for &member in members {
+                ordered_generic_param_ids(arena, member, out);
+            }
+        }
+        _ => {}
+    }
+    out.sort_by_key(|id| id.parameter_index());
 }
 
 pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
