@@ -191,6 +191,7 @@ mod tests {
             name: name.into(),
             type_id,
             optional,
+            is_method: false,
         }
     }
 

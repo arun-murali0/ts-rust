@@ -33,6 +33,7 @@ pub(super) fn infer_object_expression_type(
             name: key.name.to_string().into(),
             type_id,
             optional: false,
+            is_method: false,
         });
     }
 

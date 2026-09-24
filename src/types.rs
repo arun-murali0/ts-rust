@@ -134,6 +134,13 @@ pub struct PropertyEntry {
     pub name: Rc<str>,
     pub type_id: TypeId,
     pub optional: bool,
+
+    // Declared with method syntax (`get(): T` in an interface, or a class method)
+    // rather than as a function-typed property (`get: () => T`). tsc compares the
+    // parameters of a method bivariantly even under strictFunctionTypes, and the
+    // ones of a function-typed property contravariantly, and which rule applies
+    // follows the *target* property's declaration (see subtyping::object_is_subtype).
+    pub is_method: bool,
 }
 
 pub fn widen(arena: &TypeArena, type_id: TypeId) -> TypeId {

@@ -172,6 +172,7 @@ fn declare_enum(decl: &oxc_ast::ast::TSEnumDeclaration, ctx: &mut CheckContext<'
             name: name.into(),
             type_id,
             optional: false,
+            is_method: false,
         })
         .collect();
     // ObjectType::new sorts by name. Members are collected here in declaration
