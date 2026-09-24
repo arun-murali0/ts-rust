@@ -146,18 +146,45 @@ pub(crate) fn substitute_type_params(
     type_id: TypeId,
     bindings: &[(crate::types::TypeParameterId, TypeId)],
 ) -> TypeId {
+    substitute_impl(arena, type_id, bindings, false)
+}
+
+// Like substitute_type_params, but a parameter with no binding is left as it is
+// instead of becoming unknown. A type reference such as `Box<number>` binds only
+// the declaration's own parameters, so a method with a parameter of its own
+// (`map<U>(f: (x: T) => U): U`) must keep its U to be inferred at the call site.
+pub(crate) fn substitute_bound_type_params(
+    arena: &mut TypeArena,
+    type_id: TypeId,
+    bindings: &[(crate::types::TypeParameterId, TypeId)],
+) -> TypeId {
+    substitute_impl(arena, type_id, bindings, true)
+}
+
+fn substitute_impl(
+    arena: &mut TypeArena,
+    type_id: TypeId,
+    bindings: &[(crate::types::TypeParameterId, TypeId)],
+    keep_unbound: bool,
+) -> TypeId {
     if bindings.is_empty() || !contains_type_param(arena, type_id) {
         return type_id;
     }
 
     match arena.get(type_id).clone() {
-        Type::GenericParameter(id, _, _) => bindings
-            .iter()
-            .find(|(bound, _)| *bound == id)
-            .map(|(_, resolved)| *resolved)
-            .unwrap_or_else(|| arena.unknown()),
+        Type::GenericParameter(id, _, _) => {
+            let bound = bindings
+                .iter()
+                .find(|(bound, _)| *bound == id)
+                .map(|(_, resolved)| *resolved);
+            match bound {
+                Some(resolved) => resolved,
+                None if keep_unbound => type_id,
+                None => arena.unknown(),
+            }
+        }
         Type::Array(element) => {
-            let substituted = substitute_type_params(arena, element, bindings);
+            let substituted = substitute_impl(arena, element, bindings, keep_unbound);
             arena.alloc(Type::Array(substituted))
         }
         Type::Function(function) => {
@@ -165,13 +192,13 @@ pub(crate) fn substitute_type_params(
                 .params
                 .iter()
                 .map(|p| crate::types::Param {
-                    type_id: substitute_type_params(arena, p.type_id, bindings),
+                    type_id: substitute_impl(arena, p.type_id, bindings, keep_unbound),
                     optional: p.optional,
                     rest: p.rest,
                     name: p.name.clone(),
                 })
                 .collect();
-            let return_type = substitute_type_params(arena, function.return_type, bindings);
+            let return_type = substitute_impl(arena, function.return_type, bindings, keep_unbound);
             arena.alloc(Type::Function(FunctionType {
                 params,
                 return_type,
@@ -184,8 +211,9 @@ pub(crate) fn substitute_type_params(
                 .iter()
                 .map(|p| PropertyEntry {
                     name: p.name.clone(),
-                    type_id: substitute_type_params(arena, p.type_id, bindings),
+                    type_id: substitute_impl(arena, p.type_id, bindings, keep_unbound),
                     optional: p.optional,
+                    is_method: p.is_method,
                 })
                 .collect();
             arena.alloc(Type::Object(ObjectType::new(properties)))
@@ -193,7 +221,7 @@ pub(crate) fn substitute_type_params(
         Type::Union(members) => {
             let substituted = members
                 .iter()
-                .map(|&m| substitute_type_params(arena, m, bindings))
+                .map(|&m| substitute_impl(arena, m, bindings, keep_unbound))
                 .collect();
             arena.alloc_union(substituted)
         }
