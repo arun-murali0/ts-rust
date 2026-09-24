@@ -172,7 +172,7 @@ impl<'a> TypeNamespace<'a> {
     pub fn push_type_params(
         &mut self,
         arena: &mut TypeArena,
-        func: &oxc_ast::ast::Function<'a>,
+        func: &oxc_ast::ast::Function<'_>,
     ) -> TypeParamScope<'a> {
         self.push_decl_type_params(arena, func.type_parameters.as_deref())
     }
@@ -189,7 +189,7 @@ impl<'a> TypeNamespace<'a> {
     pub fn push_decl_type_params(
         &mut self,
         arena: &mut TypeArena,
-        decl: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'a>>,
+        decl: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
     ) -> TypeParamScope<'a> {
         let Some(decl) = decl else {
             return TypeParamScope(Vec::new());

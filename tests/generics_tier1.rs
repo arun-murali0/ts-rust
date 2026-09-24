@@ -191,9 +191,11 @@ fn unresolvable_constraint_is_reported_instead_of_silently_dropped() {
     let source =
         include_str!("fixtures/generics-tier1/generic_unresolvable_constraint_is_reported.ts");
     let diagnostics = check(source, "generic_unresolvable_constraint_is_reported.ts");
-    // `Wrapper<number>` is a generic interface, which is not supported yet, so the
-    // bound cannot be resolved and `T` is left unconstrained. That must be said out
-    // loud, as a warning, not swallowed. It is not an error: the code is valid.
+    // The tuple bound `[number, string]` is not a type the resolver supports yet, so
+    // the bound cannot be resolved and `T` is left unconstrained. That must be said
+    // out loud, as a warning, not swallowed. It is not an error: the code is valid.
+    // (This used to use a generic interface bound, `Wrapper<number>`, but generic
+    // interfaces are now supported and resolve fine.)
     let constraint_warnings: Vec<_> = diagnostics
         .iter()
         .filter(|d| d.message.contains("constraint of type parameter 'T'"))

@@ -38,6 +38,18 @@ fn resolve_explicit_type_arguments(
         .collect()
 }
 
+// Everything about one call or `new` site that check_callable needs besides the
+// callee's type, the scope info, and the checking context. Grouped into one value
+// so check_callable stays under clippy's too_many_arguments limit instead of
+// growing another positional parameter every time a call feature is added.
+struct CallSite<'s, 'ast> {
+    arguments: &'s [oxc_ast::ast::Argument<'ast>],
+    span: Span,
+    callee_name: &'s str,
+    is_new: bool,
+    explicit_type_args: &'s [TypeId],
+}
+
 pub(super) fn infer_call_expression_type(
     call: &oxc_ast::ast::CallExpression,
     scoping: &Scoping,
@@ -67,11 +79,13 @@ pub(super) fn infer_call_expression_type(
 
     check_callable(
         callee_type,
-        &call.arguments,
-        call.span(),
-        &callee_name,
-        false,
-        &explicit_type_args,
+        CallSite {
+            arguments: &call.arguments,
+            span: call.span(),
+            callee_name: &callee_name,
+            is_new: false,
+            explicit_type_args: &explicit_type_args,
+        },
         scoping,
         ctx,
     )
@@ -96,11 +110,13 @@ pub(super) fn infer_new_expression_type(
 
     check_callable(
         callee_type,
-        &new_expr.arguments,
-        new_expr.span(),
-        &callee_ident.name,
-        true,
-        &explicit_type_args,
+        CallSite {
+            arguments: &new_expr.arguments,
+            span: new_expr.span(),
+            callee_name: &callee_ident.name,
+            is_new: true,
+            explicit_type_args: &explicit_type_args,
+        },
         scoping,
         ctx,
     )
@@ -108,14 +124,18 @@ pub(super) fn infer_new_expression_type(
 
 fn check_callable(
     callee_type: TypeId,
-    arguments: &[oxc_ast::ast::Argument],
-    span: Span,
-    callee_name: &str,
-    is_new: bool,
-    explicit_type_args: &[TypeId],
+    site: CallSite<'_, '_>,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
+    let CallSite {
+        arguments,
+        span,
+        callee_name,
+        is_new,
+        explicit_type_args,
+    } = site;
+
     let Type::Function(function_type) = ctx.arena.get(callee_type).clone() else {
         // Any and Error both mean "do not report a second, likely-noisy error on
         // top of one already reported (or deliberately suppressed) elsewhere."
