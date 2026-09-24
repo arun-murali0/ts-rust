@@ -198,14 +198,22 @@ fn check_callable(
         };
     if !arity_ok {
         // Only "too few" can name a parameter; "too many" has no single one
-        // to blame. A destructured param among the missing ones drops the
-        // whole list rather than naming some and not others.
-        let missing_names: Option<Vec<&str>> = (arguments.len() < required).then(|| {
-            function_type.params[arguments.len()..required]
+        // to blame. The names are those of the required parameters the arguments
+        // do not reach, found by skipping past the arguments given rather than by
+        // slicing up to `required`, so no shape of parameter list can put the
+        // range out of bounds. A destructured param among them drops the whole
+        // list rather than naming some and not others.
+        let missing_names: Option<Vec<&str>> = if arguments.len() < required {
+            function_type
+                .params
                 .iter()
+                .skip(arguments.len())
+                .filter(|p| !p.optional && !p.rest)
                 .map(|p| p.name.as_deref())
-                .collect::<Option<Vec<&str>>>()
-        }).flatten();
+                .collect()
+        } else {
+            None
+        };
 
         ctx.error(
             arity_message(required, max, arguments.len(), missing_names.as_deref()),
