@@ -49,6 +49,35 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
         );
     }
 
+    for issue in ctx.namespace.take_type_argument_issues() {
+        let name = issue.name.as_str();
+        if issue.given == 0 {
+            // A bare reference to a generic type stays a warning: it still
+            // resolves, with its type parameters left as placeholders.
+            ctx.warning(
+                crate::diagnostic_messages::messages::generic_type_missing_type_arguments(
+                    name,
+                    issue.expected,
+                ),
+                issue.span,
+            );
+        } else if issue.expected == 0 {
+            ctx.error(
+                crate::diagnostic_messages::messages::type_is_not_generic(name),
+                issue.span,
+            );
+        } else {
+            ctx.error(
+                crate::diagnostic_messages::messages::type_argument_count_mismatch(
+                    name,
+                    issue.expected,
+                    issue.given,
+                ),
+                issue.span,
+            );
+        }
+    }
+
     tracing::info!(diagnostic_count = ctx.diagnostics.len(), "check complete");
     Ok(ctx.diagnostics)
 }

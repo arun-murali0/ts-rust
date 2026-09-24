@@ -68,6 +68,22 @@ pub fn resolve_ts_type(
                 Resolution::Circular | Resolution::NotFound => return None,
             };
 
+            // A reference whose type argument count disagrees with its
+            // declaration is recorded, not rejected here: resolution carries on
+            // with the same lenient treatment below, and the mismatch is reported
+            // afterward as a diagnostic (see bridge::check_program). A bare `Box`
+            // for `interface Box<T>` is the given == 0 case, reported as a
+            // warning rather than an error.
+            let given = reference
+                .type_arguments
+                .as_ref()
+                .map_or(0, |arguments| arguments.params.len());
+            if let Some(expected) = namespace.declared_type_param_count(&id.name) {
+                if expected != given {
+                    namespace.note_type_argument_issue(&id.name, expected, given, reference.span);
+                }
+            }
+
             // No explicit type arguments (a bare `Box`, or a reference to a
             // non-generic type) -- nothing to substitute.
             let Some(type_arguments) = &reference.type_arguments else {

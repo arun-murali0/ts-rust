@@ -39,6 +39,10 @@ pub enum DiagnosticCode {
     // 1300s -- destructuring
     ArrayDestructuringRequiresArray,
 
+    // 1500s -- generics
+    TypeArgumentCountMismatch,
+    TypeIsNotGeneric,
+
     // 1400s -- implicit any
     ImplicitAnyParameter,
     ImplicitAnyElement,
@@ -59,6 +63,7 @@ pub enum DiagnosticCode {
     UnresolvableTypeAnnotation,
     UnresolvableDestructuringTypeAnnotation,
     UnresolvableTypeParameterConstraint,
+    GenericTypeMissingTypeArguments,
 }
 
 impl DiagnosticCode {
@@ -83,6 +88,9 @@ impl DiagnosticCode {
 
             ArrayDestructuringRequiresArray => "TSR1301",
 
+            TypeArgumentCountMismatch => "TSR1501",
+            TypeIsNotGeneric => "TSR1502",
+
             ImplicitAnyParameter => "TSR1401",
             ImplicitAnyElement => "TSR1402",
             ImplicitAnyThis => "TSR1403",
@@ -101,6 +109,7 @@ impl DiagnosticCode {
             UnresolvableTypeAnnotation => "TSR9012",
             UnresolvableDestructuringTypeAnnotation => "TSR9013",
             UnresolvableTypeParameterConstraint => "TSR9014",
+            GenericTypeMissingTypeArguments => "TSR9015",
         }
     }
 }

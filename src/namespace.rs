@@ -40,6 +40,17 @@ struct TypeEntry<'a> {
     resolving: bool,
 }
 
+// A type reference whose type argument count disagrees with the declaration it
+// names. Recorded during type resolution, which has no access to the diagnostics
+// list, and drained into real diagnostics once checking finishes (see
+// bridge::check_program), the same way implicit_any_params is.
+pub struct TypeArgumentIssue {
+    pub name: String,
+    pub expected: usize,
+    pub given: usize,
+    pub span: Span,
+}
+
 pub struct TypeNamespace<'a> {
     entries: FxHashMap<String, TypeEntry<'a>>,
 
@@ -63,6 +74,10 @@ pub struct TypeNamespace<'a> {
     // here and reported as a warning once checking finishes, the same way
     // implicit_any_params is.
     unresolved_constraints: Vec<(String, Span)>,
+
+    // See TypeArgumentIssue. Deduplicated by source position, since the same
+    // annotation can be resolved more than once.
+    type_argument_issues: Vec<TypeArgumentIssue>,
 }
 
 pub enum Resolution {
@@ -79,6 +94,7 @@ impl<'a> TypeNamespace<'a> {
             type_param_cache: FxHashMap::default(),
             implicit_any_params: Vec::new(),
             unresolved_constraints: Vec::new(),
+            type_argument_issues: Vec::new(),
         }
     }
 
@@ -112,6 +128,46 @@ impl<'a> TypeNamespace<'a> {
 
     pub fn take_unresolved_constraints(&mut self) -> Vec<(String, Span)> {
         std::mem::take(&mut self.unresolved_constraints)
+    }
+
+    // How many type parameters the interface or type alias called `name` declares
+    // (0 for a non-generic one). None for anything else: a class, whose generics
+    // are not supported yet, a type parameter, an enum, or an unknown name. Those
+    // are never reported, so an unsupported feature cannot produce a false error.
+    pub fn declared_type_param_count(&self, name: &str) -> Option<usize> {
+        match self.entries.get(name)?.kind {
+            DeclKind::TypeAlias(_, type_params) => Some(type_params.map_or(0, |d| d.params.len())),
+            DeclKind::Interface(decl) => {
+                Some(decl.type_parameters.as_ref().map_or(0, |d| d.params.len()))
+            }
+            DeclKind::Class(_) | DeclKind::Resolved => None,
+        }
+    }
+
+    pub fn note_type_argument_issue(
+        &mut self,
+        name: &str,
+        expected: usize,
+        given: usize,
+        span: Span,
+    ) {
+        if self
+            .type_argument_issues
+            .iter()
+            .any(|issue| issue.span.start == span.start)
+        {
+            return;
+        }
+        self.type_argument_issues.push(TypeArgumentIssue {
+            name: name.to_string(),
+            expected,
+            given,
+            span,
+        });
+    }
+
+    pub fn take_type_argument_issues(&mut self) -> Vec<TypeArgumentIssue> {
+        std::mem::take(&mut self.type_argument_issues)
     }
 
     pub fn insert_type_alias(
@@ -169,6 +225,11 @@ impl<'a> TypeNamespace<'a> {
     // is reused across repeated calls for the same function through
     // type_param_cache, and whatever a name previously pointed to is restored by
     // the matching pop_type_params call.
+    //
+    // `func` deliberately uses `'_` rather than `'a`: only names and spans are read
+    // from it, nothing borrowed from the AST is stored. Tying it to `'a` would
+    // force every caller to hold a Function with exactly the namespace's lifetime,
+    // because `&mut TypeNamespace<'a>` is invariant in `'a`.
     pub fn push_type_params(
         &mut self,
         arena: &mut TypeArena,

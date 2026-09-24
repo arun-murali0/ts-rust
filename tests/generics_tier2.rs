@@ -113,3 +113,85 @@ fn bare_generic_reference_without_type_arguments_still_resolves() {
         "a bare, un-instantiated generic reference should not be a hard error, got: {diagnostics:?}"
     );
 }
+
+#[test]
+fn too_few_type_arguments_is_reported_as_an_error() {
+    let source =
+        include_str!("fixtures/generics-tier2/type_argument_count_mismatch_is_reported.ts");
+    let diagnostics = check(source, "type_argument_count_mismatch_is_reported.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("requires 2 type argument(s), but 1 were given"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn too_many_type_arguments_is_reported_as_an_error() {
+    let source = include_str!("fixtures/generics-tier2/too_many_type_arguments_is_reported.ts");
+    let diagnostics = check(source, "too_many_type_arguments_is_reported.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("requires 1 type argument(s), but 2 were given"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn type_arguments_on_a_non_generic_type_are_reported_as_an_error() {
+    let source = include_str!(
+        "fixtures/generics-tier2/type_arguments_on_a_non_generic_type_are_reported.ts"
+    );
+    let diagnostics = check(
+        source,
+        "type_arguments_on_a_non_generic_type_are_reported.ts",
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0].message.contains("is not generic"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn bare_generic_reference_is_reported_as_a_warning_not_an_error() {
+    let source = include_str!(
+        "fixtures/generics-tier2/bare_generic_reference_without_type_arguments_still_resolves.ts"
+    );
+    let diagnostics = check(
+        source,
+        "bare_generic_reference_without_type_arguments_still_resolves.ts",
+    );
+    let warnings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| {
+            d.message
+                .contains("expects 1 type argument(s) but none were given")
+        })
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "expected one missing-type-arguments warning, got: {diagnostics:?}"
+    );
+    assert_eq!(warnings[0].severity, Severity::Warning);
+}

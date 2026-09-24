@@ -278,6 +278,37 @@ pub mod messages {
         )
     }
 
+    pub fn type_argument_count_mismatch(
+        name: &str,
+        expected: usize,
+        given: usize,
+    ) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::TypeArgumentCountMismatch,
+            format!(
+                "Generic type '{name}' requires {expected} type argument(s), \
+                 but {given} were given."
+            ),
+        )
+    }
+
+    pub fn type_is_not_generic(name: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::TypeIsNotGeneric,
+            format!("Type '{name}' is not generic, so it cannot be given type arguments."),
+        )
+    }
+
+    pub fn generic_type_missing_type_arguments(name: &str, expected: usize) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::GenericTypeMissingTypeArguments,
+            format!(
+                "Generic type '{name}' expects {expected} type argument(s) but none were given, \
+                 so its type parameters are left unresolved."
+            ),
+        )
+    }
+
     pub fn unresolvable_type_annotation(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::UnresolvableTypeAnnotation,
