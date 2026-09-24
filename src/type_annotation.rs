@@ -221,6 +221,7 @@ pub fn resolve_function_params(
             optional: param.optional
                 || matches!(param.pattern, BindingPattern::AssignmentPattern(_)),
             rest: false,
+            name: binding_name(&param.pattern),
         });
     }
 
@@ -231,10 +232,21 @@ pub fn resolve_function_params(
             type_id,
             optional: false,
             rest: true,
+            name: binding_name(&rest.rest.argument),
         });
     }
 
     Some(resolved)
+}
+
+// None for a destructured pattern, which has no single name -- treated as
+// unnamed rather than guessed.
+fn binding_name(pattern: &BindingPattern) -> Option<std::rc::Rc<str>> {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().into()),
+        BindingPattern::AssignmentPattern(assignment) => binding_name(&assignment.left),
+        BindingPattern::ObjectPattern(_) | BindingPattern::ArrayPattern(_) => None,
+    }
 }
 
 pub fn resolve_params_with_any_fallback(
@@ -256,6 +268,7 @@ pub fn resolve_params_with_any_fallback(
                 optional: param.optional
                     || matches!(param.pattern, BindingPattern::AssignmentPattern(_)),
                 rest: false,
+                name: binding_name(&param.pattern),
             }
         })
         .collect();
@@ -273,6 +286,7 @@ pub fn resolve_params_with_any_fallback(
             type_id,
             optional: false,
             rest: true,
+            name: binding_name(&rest.rest.argument),
         });
     }
 

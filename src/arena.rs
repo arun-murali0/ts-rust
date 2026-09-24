@@ -298,6 +298,7 @@ mod tests {
                     type_id: param,
                     optional,
                     rest: false,
+                    name: None,
                 }],
                 return_type: ret,
                 is_untyped: false,

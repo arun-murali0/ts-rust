@@ -86,6 +86,11 @@ pub struct Param {
     pub optional: bool,
 
     pub rest: bool,
+
+    // Kept for diagnostics only -- naming a missing argument -- so structural
+    // equality ignores it; `(x: number) => void` and `(y: number) => void`
+    // stay the same type.
+    pub name: Option<Rc<str>>,
 }
 
 impl Param {
@@ -95,6 +100,7 @@ impl Param {
             type_id,
             optional: false,
             rest: false,
+            name: None,
         }
     }
 }
