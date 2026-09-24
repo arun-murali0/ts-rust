@@ -12,6 +12,7 @@ mod semantic;
 mod subtyping;
 mod symbol_map;
 mod type_annotation;
+mod type_display;
 mod types;
 
 #[cfg(feature = "wasm")]
