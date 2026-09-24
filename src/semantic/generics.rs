@@ -168,6 +168,7 @@ pub(crate) fn substitute_type_params(
                     type_id: substitute_type_params(arena, p.type_id, bindings),
                     optional: p.optional,
                     rest: p.rest,
+                    name: p.name.clone(),
                 })
                 .collect();
             let return_type = substitute_type_params(arena, function.return_type, bindings);
