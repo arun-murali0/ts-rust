@@ -63,15 +63,55 @@ pub fn resolve_ts_type(
             let TSTypeName::IdentifierReference(id) = &reference.type_name else {
                 return None;
             };
-            // Explicit type arguments on a reference, such as the number in
-            // Box<number>, are not substituted here. Generic interfaces, aliases,
-            // and classes are not supported yet; only generic functions are (see
-            // semantic::generics). Box<number> and bare Box currently resolve to
-            // the same thing.
-            match namespace.resolve(&id.name, arena) {
-                Resolution::Resolved(type_id) => Some(type_id),
-                Resolution::Circular | Resolution::NotFound => None,
+            let base = match namespace.resolve(&id.name, arena) {
+                Resolution::Resolved(type_id) => type_id,
+                Resolution::Circular | Resolution::NotFound => return None,
+            };
+
+            // No explicit type arguments (a bare `Box`, or a reference to a
+            // non-generic type) -- nothing to substitute.
+            let Some(type_arguments) = &reference.type_arguments else {
+                return Some(base);
+            };
+
+            // Each explicit argument (the `number` in `Box<number>`) is resolved
+            // in the *caller's* namespace, not the callee's, exactly like a
+            // generic function call's explicit type arguments in calls.rs.
+            let explicit: Vec<TypeId> = type_arguments
+                .params
+                .iter()
+                .filter_map(|ty| resolve_ts_type(ty, namespace, arena))
+                .collect();
+            if explicit.is_empty() {
+                return Some(base);
             }
+
+            // base is Box's own cached generic shape -- an Object/Function/etc
+            // still containing bare GenericParameter placeholders for T, in the
+            // order `interface Box<T, ...>` declared them (see
+            // TypeNamespace::resolve). Recovering that order the same way a
+            // generic call's explicit type arguments do lets `Box<number>` and
+            // `identity<string>(x)` share one substitution mechanism rather than
+            // needing two.
+            let mut ordered_ids = Vec::new();
+            crate::semantic::ordered_generic_param_ids(arena, base, &mut ordered_ids);
+            if ordered_ids.is_empty() {
+                // Box itself isn't generic (or has no type parameters this
+                // checker resolved) -- type arguments given to it are ignored
+                // rather than substituted into nothing, the same lenient
+                // "erase what can't be honored" stance taken everywhere else in
+                // this function.
+                return Some(base);
+            }
+
+            let bindings: Vec<_> = ordered_ids
+                .iter()
+                .zip(explicit.iter())
+                .map(|(&id, &resolved)| (id, resolved))
+                .collect();
+            Some(crate::semantic::substitute_type_params(
+                arena, base, &bindings,
+            ))
         }
 
         _ => None,

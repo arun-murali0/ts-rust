@@ -18,7 +18,10 @@ use crate::types::{ObjectType, PropertyEntry, Type, TypeParameterId};
 // push_type_params below) rather than motivating a real scope-tree rewrite.
 #[derive(Clone, Copy)]
 enum DeclKind<'a> {
-    TypeAlias(&'a TSType<'a>),
+    TypeAlias(
+        &'a TSType<'a>,
+        Option<&'a oxc_ast::ast::TSTypeParameterDeclaration<'a>>,
+    ),
     Interface(&'a TSInterfaceDeclaration<'a>),
     Class(&'a Class<'a>),
 
@@ -111,11 +114,16 @@ impl<'a> TypeNamespace<'a> {
         std::mem::take(&mut self.unresolved_constraints)
     }
 
-    pub fn insert_type_alias(&mut self, name: &str, body: &'a TSType<'a>) {
+    pub fn insert_type_alias(
+        &mut self,
+        name: &str,
+        body: &'a TSType<'a>,
+        type_parameters: Option<&'a oxc_ast::ast::TSTypeParameterDeclaration<'a>>,
+    ) {
         self.entries.insert(
             name.to_string(),
             TypeEntry {
-                kind: DeclKind::TypeAlias(body),
+                kind: DeclKind::TypeAlias(body, type_parameters),
                 resolved: None,
                 resolving: false,
             },
@@ -164,9 +172,26 @@ impl<'a> TypeNamespace<'a> {
     pub fn push_type_params(
         &mut self,
         arena: &mut TypeArena,
-        func: &oxc_ast::ast::Function,
+        func: &oxc_ast::ast::Function<'a>,
     ) -> TypeParamScope<'a> {
-        let Some(decl) = &func.type_parameters else {
+        self.push_decl_type_params(arena, func.type_parameters.as_deref())
+    }
+
+    // The declaration-shaped generalization of push_type_params above: a
+    // function's own `<T, ...>` list is one source of a type parameter
+    // declaration, but a generic interface (`interface Box<T>`) or generic
+    // type alias (`type Box<T> = ...`) needs the exact same shadow-then-resolve
+    // treatment for its body to be able to refer to T. Both routes end up
+    // allocating the same kind of GenericParameter node, keyed the same way by
+    // TypeParameterId, so a interface's declared T and a type alias's declared
+    // T are never confused with each other (different declaration_span_start)
+    // even though both might be named "T".
+    pub fn push_decl_type_params(
+        &mut self,
+        arena: &mut TypeArena,
+        decl: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'a>>,
+    ) -> TypeParamScope<'a> {
+        let Some(decl) = decl else {
             return TypeParamScope(Vec::new());
         };
 
@@ -250,12 +275,31 @@ impl<'a> TypeNamespace<'a> {
         let Some(kind) = self.entries.get(name).map(|entry| entry.kind) else {
             return Resolution::NotFound;
         };
+
+        // A generic interface or type alias's own `<T, ...>` list is pushed as a
+        // shadow, exactly like a generic function's, before its body is resolved,
+        // so `Box<T>`'s body can refer to T and have it resolve to the same
+        // GenericParameter node a caller will later substitute via
+        // type_annotation::resolve_ts_type's TSTypeReference arm. The resulting
+        // resolved shape -- still containing bare GenericParameter placeholders
+        // -- is what gets cached in entry.resolved; substitution for a specific
+        // `Box<number>` happens later, per reference, against this one cached
+        // generic shape, the same way a generic function's FunctionType is
+        // resolved once and substituted per call.
+        let type_params = match kind {
+            DeclKind::TypeAlias(_, type_params) => type_params,
+            DeclKind::Interface(decl) => decl.type_parameters.as_deref(),
+            DeclKind::Class(_) | DeclKind::Resolved => None,
+        };
+        let scope = self.push_decl_type_params(arena, type_params);
+
         let resolved = match kind {
-            DeclKind::TypeAlias(body) => resolve_ts_type(body, self, arena),
+            DeclKind::TypeAlias(body, _) => resolve_ts_type(body, self, arena),
             DeclKind::Interface(decl) => resolve_object_members(&decl.body.body, self, arena),
             DeclKind::Class(class) => self.resolve_class(class, arena),
             DeclKind::Resolved => None,
         };
+        self.pop_type_params(scope);
 
         let Some(entry) = self.entries.get_mut(name) else {
             return Resolution::NotFound;

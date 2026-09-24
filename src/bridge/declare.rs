@@ -14,8 +14,11 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
     for stmt in &program.body {
         match stmt {
             Statement::TSTypeAliasDeclaration(decl) => {
-                ctx.namespace
-                    .insert_type_alias(&decl.id.name, &decl.type_annotation);
+                ctx.namespace.insert_type_alias(
+                    &decl.id.name,
+                    &decl.type_annotation,
+                    decl.type_parameters.as_deref(),
+                );
             }
             Statement::TSInterfaceDeclaration(decl) => {
                 ctx.namespace.insert_interface(&decl.id.name, decl);

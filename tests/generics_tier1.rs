@@ -275,7 +275,9 @@ fn explicit_type_argument_is_checked_against_its_constraint() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("constraint of type parameter"),
+        diagnostics[0]
+            .message
+            .contains("constraint of type parameter"),
         "got: {diagnostics:?}"
     );
 }

@@ -63,8 +63,7 @@ pub(super) fn infer_call_expression_type(
         }
     };
 
-    let explicit_type_args =
-        resolve_explicit_type_arguments(call.type_arguments.as_deref(), ctx);
+    let explicit_type_args = resolve_explicit_type_arguments(call.type_arguments.as_deref(), ctx);
 
     check_callable(
         callee_type,
@@ -217,15 +216,18 @@ fn check_callable(
     for param in &function_type.params {
         ordered_generic_param_ids(&ctx.arena, param.type_id, &mut declared_param_ids);
     }
-    ordered_generic_param_ids(&ctx.arena, function_type.return_type, &mut declared_param_ids);
+    ordered_generic_param_ids(
+        &ctx.arena,
+        function_type.return_type,
+        &mut declared_param_ids,
+    );
 
     let mut bindings: Vec<(crate::types::TypeParameterId, TypeId)> = declared_param_ids
         .iter()
         .zip(explicit_type_args.iter())
         .map(|(&id, &explicit)| (id, explicit))
         .collect();
-    let locked: Vec<crate::types::TypeParameterId> =
-        bindings.iter().map(|(id, _)| *id).collect();
+    let locked: Vec<crate::types::TypeParameterId> = bindings.iter().map(|(id, _)| *id).collect();
 
     for (index, arg_type) in arg_types.iter().enumerate() {
         let Some(arg_type) = arg_type else { continue };
