@@ -63,6 +63,18 @@ fn function_is_subtype(
     sub: &crate::types::FunctionType,
     sup: &crate::types::FunctionType,
 ) -> bool {
+    function_is_subtype_with(arena, sub, sup, false)
+}
+
+// `bivariant_params` is tsc's rule for methods: a parameter position is compatible
+// when the types are related in *either* direction, not only contravariantly. It
+// applies to the parameters only; the return type stays covariant.
+fn function_is_subtype_with(
+    arena: &TypeArena,
+    sub: &crate::types::FunctionType,
+    sup: &crate::types::FunctionType,
+    bivariant_params: bool,
+) -> bool {
     // sub cannot require more arguments than callers of sup are guaranteed to
     // supply. It is free to require fewer; its extra optional or rest slots simply
     // never get filled by such a caller.
@@ -76,6 +88,7 @@ fn function_is_subtype(
             param_type_at(arena, &sub.params, position),
             param_type_at(arena, &sup.params, position),
         ) && !is_subtype(arena, sup_param, sub_param)
+            && !(bivariant_params && is_subtype(arena, sub_param, sup_param))
         {
             return false;
         }
@@ -137,7 +150,7 @@ fn object_is_subtype(arena: &TypeArena, sub: &ObjectType, sup: &ObjectType) -> b
                     if sub_property.optional && !sup_property.optional {
                         return false;
                     }
-                    if !is_subtype(arena, sub_property.type_id, sup_property.type_id) {
+                    if !property_is_subtype(arena, sub_property.type_id, sup_property) {
                         return false;
                     }
                     continue 'sup_properties;
@@ -151,6 +164,25 @@ fn object_is_subtype(arena: &TypeArena, sub: &ObjectType, sup: &ObjectType) -> b
     }
 
     true
+}
+
+// A property's type against the target property. When the target was declared
+// with method syntax and both sides are functions, tsc's method rule applies
+// (bivariant parameters); anything else is ordinary subtyping. The rule follows
+// the target's declaration, so a function-typed property (`f: (a: A) => R`) stays
+// strictly contravariant.
+fn property_is_subtype(
+    arena: &TypeArena,
+    sub_type: TypeId,
+    sup_property: &crate::types::PropertyEntry,
+) -> bool {
+    if sup_property.is_method
+        && let (Type::Function(sub_function), Type::Function(sup_function)) =
+            (arena.get(sub_type), arena.get(sup_property.type_id))
+    {
+        return function_is_subtype_with(arena, sub_function, sup_function, true);
+    }
+    is_subtype(arena, sub_type, sup_property.type_id)
 }
 
 fn is_sorted_by_name(properties: &[crate::types::PropertyEntry]) -> bool {
@@ -336,6 +368,7 @@ mod tests {
                 name: name.into(),
                 type_id,
                 optional,
+                is_method: false,
             })
             .collect();
         Type::Object(ObjectType::new(properties))
