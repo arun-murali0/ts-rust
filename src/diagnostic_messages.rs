@@ -29,32 +29,67 @@ impl DiagnosticMessage {
 /// place, not that every code maps to exactly one string.
 pub mod messages {
     use super::{DiagnosticCode, DiagnosticMessage};
+    use crate::arena::{TypeArena, TypeId};
+    use crate::type_display::display_type;
 
-    pub fn binary_operand_type_mismatch(operator: &str) -> DiagnosticMessage {
+    pub fn binary_operand_type_mismatch(
+        arena: &TypeArena,
+        operator: &str,
+        left: TypeId,
+        right: TypeId,
+    ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::BinaryOperandTypeMismatch,
-            format!("Operator '{operator}' cannot be applied to these types."),
+            format!(
+                "Operator '{operator}' cannot be applied to types '{}' and '{}'.",
+                display_type(arena, left),
+                display_type(arena, right)
+            ),
         )
     }
 
-    pub fn argument_not_assignable() -> DiagnosticMessage {
+    pub fn argument_not_assignable(
+        arena: &TypeArena,
+        actual: TypeId,
+        expected: TypeId,
+    ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::ArgumentNotAssignable,
-            "Argument type is not assignable to parameter type.",
+            format!(
+                "Argument of type '{}' is not assignable to parameter of type '{}'.",
+                display_type(arena, actual),
+                display_type(arena, expected)
+            ),
         )
     }
 
-    pub fn return_type_mismatch() -> DiagnosticMessage {
+    pub fn return_type_mismatch(
+        arena: &TypeArena,
+        actual: TypeId,
+        expected: TypeId,
+    ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::ReturnTypeMismatch,
-            "Return type does not match the function's declared return type.",
+            format!(
+                "Return type '{}' does not match the function's declared return type '{}'.",
+                display_type(arena, actual),
+                display_type(arena, expected)
+            ),
         )
     }
 
-    pub fn declared_type_mismatch(name: &str) -> DiagnosticMessage {
+    pub fn declared_type_mismatch(
+        arena: &TypeArena,
+        actual: TypeId,
+        expected: TypeId,
+    ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::DeclaredTypeMismatch,
-            format!("Type mismatch: value is not assignable to declared type of '{name}'."),
+            format!(
+                "Type '{}' is not assignable to type '{}'.",
+                display_type(arena, actual),
+                display_type(arena, expected)
+            ),
         )
     }
 
@@ -72,10 +107,20 @@ pub mod messages {
         )
     }
 
-    pub fn type_argument_constraint_violation(name: &str) -> DiagnosticMessage {
+    pub fn type_argument_constraint_violation(
+        arena: &TypeArena,
+        parameter_name: &str,
+        actual: TypeId,
+        constraint: TypeId,
+    ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::TypeArgumentConstraintViolation,
-            format!("Type does not satisfy the constraint of type parameter '{name}'."),
+            format!(
+                "Type '{}' does not satisfy the constraint of type parameter '{parameter_name}' \
+                 ('{}').",
+                display_type(arena, actual),
+                display_type(arena, constraint)
+            ),
         )
     }
 
@@ -157,7 +202,10 @@ pub mod messages {
     ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::ArgumentArityMismatch,
-            with_missing_names(format!("Expected {required} argument(s), but got {got}."), missing),
+            with_missing_names(
+                format!("Expected {required} argument(s), but got {got}."),
+                missing,
+            ),
         )
     }
 
@@ -197,10 +245,17 @@ pub mod messages {
         )
     }
 
-    pub fn property_does_not_exist(property_name: &str) -> DiagnosticMessage {
+    pub fn property_does_not_exist(
+        arena: &TypeArena,
+        property_name: &str,
+        object_type: TypeId,
+    ) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::PropertyDoesNotExist,
-            format!("Property '{property_name}' does not exist on this type."),
+            format!(
+                "Property '{property_name}' does not exist on type '{}'.",
+                display_type(arena, object_type)
+            ),
         )
     }
 
