@@ -1,6 +1,8 @@
 target
 dhat-heap.json
 .harness/
+cfg_dump.txt
+
 
 # wasm-pack build output (see pkg-template/ for the shipped package.json)
 /pkg/
