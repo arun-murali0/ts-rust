@@ -29,6 +29,8 @@ pub fn resolve_ts_type(
         TSType::TSUndefinedKeyword(_) => Some(arena.undefined()),
         TSType::TSAnyKeyword(_) => Some(arena.any()),
         TSType::TSUnknownKeyword(_) => Some(arena.unknown()),
+        TSType::TSNeverKeyword(_) => Some(arena.never()),
+        TSType::TSVoidKeyword(_) => Some(arena.void()),
 
         TSType::TSArrayType(array) => {
             let element = resolve_ts_type(&array.element_type, namespace, arena)?;
