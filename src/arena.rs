@@ -1,3 +1,4 @@
+use crate::fxhash::FxHashMap;
 use crate::types::Type;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -5,6 +6,16 @@ pub struct TypeId(u32);
 
 pub struct TypeArena {
     types: Vec<Type>,
+
+    // How a TypeId should read in a diagnostic, when it's not just its
+    // structural shape: an interface, class or alias by its declared name
+    // ("Dog"), a generic instantiation with its arguments ("Box<number>"), an
+    // enum by its name ("Weird"). Keyed by TypeId rather than carried on Type
+    // itself, so display is a side concern display_type can consult, not
+    // something every match arm over Type has to thread through. Safe because
+    // alloc() never reuses a TypeId for a different value (see its own doc
+    // comment) -- one TypeId always means one thing for the life of this arena.
+    display_names: FxHashMap<TypeId, String>,
 }
 
 impl TypeArena {
@@ -13,7 +24,10 @@ impl TypeArena {
     // needs "the number type" calls arena.number() directly instead of having to
     // thread a TypeId through from wherever that primitive was first resolved.
     pub fn new() -> Self {
-        let mut arena = Self { types: Vec::new() };
+        let mut arena = Self {
+            types: Vec::new(),
+            display_names: FxHashMap::default(),
+        };
 
         arena.alloc(Type::Number);
         arena.alloc(Type::String);
@@ -67,6 +81,19 @@ impl TypeArena {
 
     pub fn get(&self, id: TypeId) -> &Type {
         &self.types[id.0 as usize]
+    }
+
+    // Registers how type_id should print. A later call for the same TypeId
+    // replaces the earlier name rather than erroring, since a generic's own
+    // cached shape and a specific instantiation of it are sometimes the exact
+    // same TypeId (see namespace::resolve's own comment on this) and the more
+    // specific caller should win.
+    pub fn set_display_name(&mut self, type_id: TypeId, name: impl Into<String>) {
+        self.display_names.insert(type_id, name.into());
+    }
+
+    pub fn display_name(&self, type_id: TypeId) -> Option<&str> {
+        self.display_names.get(&type_id).map(String::as_str)
     }
 
     // Whether two types are the same type by shape, not by arena slot.

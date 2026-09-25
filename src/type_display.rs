@@ -24,6 +24,15 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
         return;
     }
 
+    // A named interface, class, alias, generic instantiation or enum prints
+    // its name instead of unfolding its shape -- `Dog`, not
+    // `{ name: string; breed: string }`. Checked before the structural match
+    // below so it applies uniformly, whatever the underlying Type is.
+    if let Some(name) = arena.display_name(type_id) {
+        out.push_str(name);
+        return;
+    }
+
     match arena.get(type_id) {
         Type::Number => out.push_str("number"),
         Type::String => out.push_str("string"),
@@ -329,6 +338,35 @@ mod tests {
         let id = TypeParameterId::new(0, 0);
         let param = arena.alloc(Type::GenericParameter(id, "T".to_string(), None));
         assert_eq!(render(&arena, param), "T");
+    }
+
+    #[test]
+    fn a_named_type_prints_its_name_instead_of_its_shape() {
+        let mut arena = TypeArena::new();
+        let string = arena.string();
+        let dog = arena.alloc(Type::Object(ObjectType::new(vec![PropertyEntry {
+            name: "name".into(),
+            type_id: string,
+            optional: false,
+            is_method: false,
+        }])));
+        arena.set_display_name(dog, "Dog");
+        assert_eq!(render(&arena, dog), "Dog");
+    }
+
+    #[test]
+    fn a_named_type_nested_in_another_type_still_prints_its_name() {
+        let mut arena = TypeArena::new();
+        let string = arena.string();
+        let dog = arena.alloc(Type::Object(ObjectType::new(vec![PropertyEntry {
+            name: "name".into(),
+            type_id: string,
+            optional: false,
+            is_method: false,
+        }])));
+        arena.set_display_name(dog, "Dog");
+        let dogs = arena.alloc(Type::Array(dog));
+        assert_eq!(render(&arena, dogs), "Dog[]");
     }
 
     #[test]
