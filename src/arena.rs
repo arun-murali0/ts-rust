@@ -38,6 +38,7 @@ impl TypeArena {
         arena.alloc(Type::Unknown);
         arena.alloc(Type::Error);
         arena.alloc(Type::Never);
+        arena.alloc(Type::Void);
         arena
     }
 
@@ -124,7 +125,8 @@ impl TypeArena {
             | (Type::Any, Type::Any)
             | (Type::Unknown, Type::Unknown)
             | (Type::Error, Type::Error)
-            | (Type::Never, Type::Never) => true,
+            | (Type::Never, Type::Never)
+            | (Type::Void, Type::Void) => true,
 
             (Type::StringLiteral(x), Type::StringLiteral(y)) => x == y,
             (Type::NumberLiteral(x), Type::NumberLiteral(y)) => x == y,
@@ -199,6 +201,10 @@ impl TypeArena {
 
     pub fn never(&self) -> TypeId {
         TypeId(8)
+    }
+
+    pub fn void(&self) -> TypeId {
+        TypeId(9)
     }
 }
 

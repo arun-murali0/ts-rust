@@ -34,6 +34,16 @@ pub enum Type {
 
     Never,
 
+    // A function with no meaningful return value (`function f(): void {}`).
+    // Distinct from Undefined: undefined is assignable to void (an implicit or
+    // bare `return;` satisfies a void return type), but void is not assignable
+    // back to undefined or anything else concrete -- see subtyping's own note on
+    // this. Real TypeScript also lets a *function type* whose return is void
+    // accept an implementation that returns something else, e.g. assigning
+    // `() => number` where `() => void` is expected; that call-site leniency
+    // isn't implemented, only the plain assignability rule above.
+    Void,
+
     // The Option is the parameter's own `extends` bound (`T extends { length:
     // number }`), resolved once when the placeholder is first created and reused
     // from the same TypeParameterId cache as everything else about this
