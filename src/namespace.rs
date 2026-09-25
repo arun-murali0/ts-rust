@@ -84,9 +84,10 @@ pub struct TypeNamespace<'a> {
 
     // Type arguments that do not satisfy the `extends` bound of the parameter
     // they were given to (`Box<number>` for `Box<T extends string>`): the
-    // parameter's name and the argument's span. Collected here for the same
-    // reason as the issues above and deduplicated the same way.
-    constraint_violations: Vec<(String, Span)>,
+    // parameter's name, the argument's resolved type, the bound it failed, and
+    // the argument's span. Collected here for the same reason as the issues
+    // above and deduplicated the same way.
+    constraint_violations: Vec<(String, TypeId, TypeId, Span)>,
 }
 
 pub enum Resolution {
@@ -236,19 +237,25 @@ impl<'a> TypeNamespace<'a> {
         }
     }
 
-    pub fn note_constraint_violation(&mut self, parameter_name: &str, span: Span) {
+    pub fn note_constraint_violation(
+        &mut self,
+        parameter_name: &str,
+        actual: TypeId,
+        constraint: TypeId,
+        span: Span,
+    ) {
         if self
             .constraint_violations
             .iter()
-            .any(|(_, existing)| existing.start == span.start)
+            .any(|(_, _, _, existing)| existing.start == span.start)
         {
             return;
         }
         self.constraint_violations
-            .push((parameter_name.to_string(), span));
+            .push((parameter_name.to_string(), actual, constraint, span));
     }
 
-    pub fn take_constraint_violations(&mut self) -> Vec<(String, Span)> {
+    pub fn take_constraint_violations(&mut self) -> Vec<(String, TypeId, TypeId, Span)> {
         std::mem::take(&mut self.constraint_violations)
     }
 

@@ -189,7 +189,7 @@ fn check_type_argument_constraint(
         return;
     }
     if !crate::subtyping::is_subtype(arena, argument, constraint) {
-        namespace.note_constraint_violation(parameter_name, span);
+        namespace.note_constraint_violation(parameter_name, argument, constraint, span);
     }
 }
 
