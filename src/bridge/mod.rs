@@ -4,6 +4,7 @@ mod expressions;
 mod narrow;
 mod parse;
 mod statements;
+mod unreachable_code;
 
 use oxc_allocator::Allocator;
 
@@ -38,6 +39,7 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
 
     declare::declare_top_level(&program, &mut ctx);
     statements::check_top_level(&program, scoping, &mut ctx);
+    unreachable_code::check_unreachable_code(&program, &semantic, &mut ctx);
 
     for (name, span) in ctx.namespace.take_implicit_any_params() {
         ctx.error(

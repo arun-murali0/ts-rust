@@ -48,6 +48,9 @@ pub enum DiagnosticCode {
     ImplicitAnyElement,
     ImplicitAnyThis,
 
+    // 1600s -- reachability
+    UnreachableCode,
+
     // 9000s -- not yet implemented (all currently emitted as warnings)
     UnimplementedCallExpressionKind,
     UnimplementedNewExpressionTarget,
@@ -108,6 +111,8 @@ impl DiagnosticCode {
             UnresolvableTypeAnnotation => "TSR9012",
             UnresolvableDestructuringTypeAnnotation => "TSR9013",
             UnresolvableTypeParameterConstraint => "TSR9014",
+
+            UnreachableCode => "TSR1601",
         }
     }
 }

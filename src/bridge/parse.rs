@@ -39,16 +39,19 @@ pub fn parse<'a>(
     Ok(result.program)
 }
 
-// Semantic analysis with control flow graph construction switched on. oxc leaves
-// the graph off by default, since most consumers never read it and building it
-// costs time and memory, and leaving with_cfg(true) out would not fail: cfg() would
-// just return None and flow analysis would find nothing to work with. The whole
-// Semantic is returned, not only its Scoping, because the graph and the node table
-// that maps an AST node to its basic block both live on it; symbol and reference
-// lookups keep working through Semantic::scoping().
+// Semantic analysis with control flow graph construction and the node table
+// switched on. oxc leaves both off by default, since most consumers read neither
+// and both cost time and memory, and leaving either flag out does not fail here:
+// with_cfg(false) makes cfg() return None, and with_build_nodes(false) leaves the
+// node table empty, so every node id in the graph points at nothing and the first
+// lookup panics. Both are needed together, because the graph says how blocks
+// connect and the node table says which block an AST node is in. The whole
+// Semantic is returned, not only its Scoping, since both live on it; symbol and
+// reference lookups keep working through Semantic::scoping().
 pub fn analyze<'a>(program: &'a Program<'a>) -> Semantic<'a> {
     let semantic = SemanticBuilder::new()
         .with_cfg(true)
+        .with_build_nodes(true)
         .build(program)
         .semantic;
 
@@ -70,13 +73,14 @@ pub fn analyze<'a>(program: &'a Program<'a>) -> Semantic<'a> {
 mod tests {
     use super::*;
 
-    // Pins with_cfg(true). oxc's default is no graph at all, and cfg() then returns
-    // None rather than failing, so dropping the flag would leave every later flow
-    // query with nothing to read and no error to say why. An `if` with an early
-    // return cannot fit in one basic block, so a single-block graph would mean the
-    // builder ran but recorded no control flow.
+    // Pins with_cfg(true) and with_build_nodes(true). oxc's default is no graph and
+    // an empty node table, and neither fails at build time: cfg() returns None, and
+    // the node table's lookups panic on first use. So dropping either flag would
+    // leave every later flow query with nothing to read and no error saying why. An
+    // `if` with an early return cannot fit in one basic block, so a single-block
+    // graph would mean the builder ran but recorded no control flow.
     #[test]
-    fn analyze_builds_a_control_flow_graph() {
+    fn analyze_builds_a_control_flow_graph_and_node_table() {
         let allocator = Allocator::default();
         let source = "function f(x: number) { if (x > 0) { return 1; } return 2; }";
         let program = parse(&allocator, source, "cfg.ts").expect("source should parse");
@@ -90,6 +94,17 @@ mod tests {
             cfg.basic_blocks.len() > 1,
             "expected several basic blocks, got {}",
             cfg.basic_blocks.len()
+        );
+
+        // Every node is placed in some block, so this lookup is the one a flow query
+        // makes. It panics if the node table is empty, and the block it returns must
+        // be one the graph actually contains.
+        let nodes = semantic.nodes();
+        let first = nodes.iter().next().expect("node table is empty");
+        let block = nodes.cfg_id(first.id());
+        assert!(
+            cfg.graph.node_weight(block).is_some(),
+            "a node was placed in a block the graph does not contain"
         );
     }
 }

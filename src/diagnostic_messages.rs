@@ -406,6 +406,13 @@ pub mod messages {
         )
     }
 
+    pub fn unreachable_code() -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::UnreachableCode,
+            "Unreachable code detected.",
+        )
+    }
+
     pub fn unresolvable_destructuring_type_annotation() -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::UnresolvableDestructuringTypeAnnotation,
