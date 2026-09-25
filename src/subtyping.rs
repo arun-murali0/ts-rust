@@ -30,6 +30,12 @@ pub fn is_subtype(arena: &TypeArena, sub: TypeId, sup: TypeId) -> bool {
 
         (Type::Never, _) => true,
 
+        // undefined satisfies void (an implicit or bare `return;` is fine for a
+        // void-returning function) but not the reverse, and nothing else is
+        // interchangeable with void either -- see Type::Void's own doc comment
+        // on the leniency this deliberately doesn't implement.
+        (Type::Undefined, Type::Void) => true,
+
         // These two arms are not symmetric on purpose. A union is a subtype of sup
         // only if every member is, since the value could be any of them and all
         // must qualify. sup accepts sub if any one member of sup does, since
@@ -201,6 +207,37 @@ fn is_universally_compatible(arena: &TypeArena, id: TypeId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undefined_satisfies_void() {
+        let arena = TypeArena::new();
+        assert!(is_subtype(&arena, arena.undefined(), arena.void()));
+    }
+
+    #[test]
+    fn void_does_not_satisfy_undefined() {
+        let arena = TypeArena::new();
+        assert!(!is_subtype(&arena, arena.void(), arena.undefined()));
+    }
+
+    #[test]
+    fn nothing_else_satisfies_void() {
+        let arena = TypeArena::new();
+        assert!(!is_subtype(&arena, arena.number(), arena.void()));
+        assert!(!is_subtype(&arena, arena.string(), arena.void()));
+    }
+
+    #[test]
+    fn void_does_not_satisfy_other_types() {
+        let arena = TypeArena::new();
+        assert!(!is_subtype(&arena, arena.void(), arena.number()));
+    }
+
+    #[test]
+    fn never_satisfies_void_like_it_satisfies_everything() {
+        let arena = TypeArena::new();
+        assert!(is_subtype(&arena, arena.never(), arena.void()));
+    }
 
     #[test]
     fn object_built_in_reverse_name_order_is_still_a_subtype() {

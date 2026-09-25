@@ -42,6 +42,7 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
         Type::Any => out.push_str("any"),
         Type::Unknown => out.push_str("unknown"),
         Type::Never => out.push_str("never"),
+        Type::Void => out.push_str("void"),
         Type::Error => out.push_str("error"),
 
         Type::NumberLiteral(value) => {
@@ -164,6 +165,7 @@ mod tests {
         assert_eq!(render(&arena, arena.any()), "any");
         assert_eq!(render(&arena, arena.unknown()), "unknown");
         assert_eq!(render(&arena, arena.never()), "never");
+        assert_eq!(render(&arena, arena.void()), "void");
         assert_eq!(render(&arena, arena.error()), "error");
     }
 
