@@ -463,6 +463,16 @@ impl<'a> TypeNamespace<'a> {
         match resolved {
             Some(type_id) => {
                 entry.resolved = Some(type_id);
+                // A non-generic interface, alias or class prints as its own name
+                // from here on ("Dog", not its member list). A generic one is
+                // left unnamed here: this cached shape still holds bare
+                // GenericParameter placeholders and is never itself the type of
+                // anything a person sees -- each instantiation
+                // (type_annotation::resolve_ts_type's TSTypeReference arm) names
+                // its own substituted result instead ("Box<number>").
+                if type_params.is_none_or(|params| params.params.is_empty()) {
+                    arena.set_display_name(type_id, name);
+                }
                 Resolution::Resolved(type_id)
             }
             None => Resolution::NotFound,

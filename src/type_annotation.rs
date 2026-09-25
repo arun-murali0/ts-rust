@@ -151,9 +151,27 @@ pub fn resolve_ts_type(
             // Only the declaration's own parameters are bound here, so a parameter
             // a member declares for itself (`map<U>(...)`) is kept for inference
             // at the call site instead of becoming unknown.
-            Some(crate::semantic::substitute_bound_type_params(
-                arena, base, &bindings,
-            ))
+            let result = crate::semantic::substitute_bound_type_params(arena, base, &bindings);
+
+            // Prints as `Box<number>`, not Box's full member list, in a message.
+            // Skipped when substitution left `result` identical to `base`: that
+            // happens when none of Box's declared parameters actually appear in
+            // its body, in which case every instantiation of Box shares this one
+            // TypeId, and naming it per-instantiation would just have the last
+            // one processed silently overwrite every earlier one's name.
+            if result != base {
+                // Each argument's own text (via display_type) may itself be a
+                // name set moments ago by this same resolve, e.g. `Box<Dog>`
+                // once Dog's own reference resolved and named it.
+                let args = bindings
+                    .iter()
+                    .map(|(_, bound)| crate::type_display::display_type(arena, *bound))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                arena.set_display_name(result, format!("{}<{args}>", id.name));
+            }
+
+            Some(result)
         }
 
         _ => None,
