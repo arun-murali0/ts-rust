@@ -45,7 +45,7 @@ pub(super) fn infer_binary_expression_type(
             } else if left == ctx.arena.any() || right == ctx.arena.any() {
                 ctx.arena.any()
             } else {
-                push_binary_op_mismatch(ctx, span, "+");
+                push_binary_op_mismatch(ctx, span, "+", left, right);
                 ctx.arena.error()
             }
         }
@@ -61,7 +61,7 @@ pub(super) fn infer_binary_expression_type(
             {
                 ctx.arena.number()
             } else {
-                push_binary_op_mismatch(ctx, span, operator.as_str());
+                push_binary_op_mismatch(ctx, span, operator.as_str(), left, right);
                 ctx.arena.error()
             }
         }
@@ -74,9 +74,17 @@ pub(super) fn infer_binary_expression_type(
 // diagnostic shape and differ only in which operator string to name, so it's
 // pulled out here rather than duplicated -- if the message format changes,
 // there is one call to update instead of two that have to be kept in sync.
-fn push_binary_op_mismatch(ctx: &mut CheckContext<'_, '_>, span: Span, operator: &str) {
+fn push_binary_op_mismatch(
+    ctx: &mut CheckContext<'_, '_>,
+    span: Span,
+    operator: &str,
+    left: TypeId,
+    right: TypeId,
+) {
     ctx.error(
-        crate::diagnostic_messages::messages::binary_operand_type_mismatch(operator),
+        crate::diagnostic_messages::messages::binary_operand_type_mismatch(
+            &ctx.arena, operator, left, right,
+        ),
         span,
     );
 }

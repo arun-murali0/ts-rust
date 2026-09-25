@@ -105,7 +105,9 @@ fn check_identifier_declarator(
         (AnnotationOutcome::Resolved(declared), Some(actual)) => {
             if !ctx.semantic().is_assignable(actual, declared) {
                 ctx.error(
-                    crate::diagnostic_messages::messages::declared_type_mismatch(&id.name),
+                    crate::diagnostic_messages::messages::declared_type_mismatch(
+                        &ctx.arena, actual, declared,
+                    ),
                     declarator
                         .init
                         .as_ref()

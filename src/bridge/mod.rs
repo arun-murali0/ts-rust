@@ -75,9 +75,14 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
         }
     }
 
-    for (name, span) in ctx.namespace.take_constraint_violations() {
+    for (parameter_name, actual, constraint, span) in ctx.namespace.take_constraint_violations() {
         ctx.error(
-            crate::diagnostic_messages::messages::type_argument_constraint_violation(&name),
+            crate::diagnostic_messages::messages::type_argument_constraint_violation(
+                &ctx.arena,
+                &parameter_name,
+                actual,
+                constraint,
+            ),
             span,
         );
     }

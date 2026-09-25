@@ -33,7 +33,9 @@ pub(super) fn infer_arrow_function_type(
             Some(declared) => {
                 if !ctx.semantic().is_assignable(inferred, declared) {
                     ctx.error(
-                        crate::diagnostic_messages::messages::return_type_mismatch(),
+                        crate::diagnostic_messages::messages::return_type_mismatch(
+                            &ctx.arena, inferred, declared,
+                        ),
                         body_expr.span(),
                     );
                 }

@@ -302,7 +302,12 @@ fn check_callable(
         };
         if !ctx.semantic().is_assignable(*bound, *constraint) {
             ctx.error(
-                crate::diagnostic_messages::messages::type_argument_constraint_violation(name),
+                crate::diagnostic_messages::messages::type_argument_constraint_violation(
+                    &ctx.arena,
+                    name,
+                    *bound,
+                    *constraint,
+                ),
                 span,
             );
         }
@@ -321,7 +326,9 @@ fn check_callable(
         let expected = substitute_type_params(&mut ctx.arena, param_type, &bindings);
         if !ctx.semantic().is_assignable(arg_type, expected) {
             ctx.error(
-                crate::diagnostic_messages::messages::argument_not_assignable(),
+                crate::diagnostic_messages::messages::argument_not_assignable(
+                    &ctx.arena, arg_type, expected,
+                ),
                 arg_expr.span(),
             );
         } else {

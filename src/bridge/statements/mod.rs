@@ -43,7 +43,9 @@ pub(super) fn check_return_statement(
     if let Some(expected) = ctx.current_return_type {
         if !ctx.semantic().is_assignable(actual, expected) {
             ctx.error(
-                crate::diagnostic_messages::messages::return_type_mismatch(),
+                crate::diagnostic_messages::messages::return_type_mismatch(
+                    &ctx.arena, actual, expected,
+                ),
                 ret.span(),
             );
         } else if let Some(argument) = &ret.argument {

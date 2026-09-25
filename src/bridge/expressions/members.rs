@@ -32,7 +32,11 @@ pub(crate) fn infer_member_access_type(
     let Type::Object(object) = ctx.arena.get(effective_type) else {
         if !matches!(ctx.arena.get(effective_type), Type::Any | Type::Error) {
             ctx.error(
-                crate::diagnostic_messages::messages::property_does_not_exist(property_name),
+                crate::diagnostic_messages::messages::property_does_not_exist(
+                    &ctx.arena,
+                    property_name,
+                    effective_type,
+                ),
                 span,
             );
         }
@@ -43,7 +47,11 @@ pub(crate) fn infer_member_access_type(
         Some(property) => property.type_id,
         None => {
             ctx.error(
-                crate::diagnostic_messages::messages::property_does_not_exist(property_name),
+                crate::diagnostic_messages::messages::property_does_not_exist(
+                    &ctx.arena,
+                    property_name,
+                    effective_type,
+                ),
                 span,
             );
             ctx.arena.error()
