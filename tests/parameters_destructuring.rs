@@ -73,7 +73,7 @@ fn rest_param_argument_type_mismatch_is_caught() {
     assert!(
         diagnostics[0]
             .message
-            .contains("not assignable to parameter type"),
+            .contains("not assignable to parameter of type"),
         "got: {diagnostics:?}"
     );
 }
