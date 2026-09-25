@@ -47,7 +47,16 @@ pub(super) fn check_while_statement(
     ctx: &mut CheckContext<'_, '_>,
 ) {
     infer_expression_type(&while_stmt.test, scoping, ctx);
+
+    // Not narrowed against the loop's own test (`while (x !== null)`), unlike an
+    // `if`'s condition -- a gap, not a leak, and left for later. What is fixed
+    // here is the leak: the body is only walked once, not once per iteration, so
+    // whatever a guard clause inside it narrows must not survive past the loop's
+    // closing brace, the same way an if-branch's narrowing does not survive past
+    // its own.
+    let outer_narrow = ctx.narrow.clone();
     check_statement(&while_stmt.body, scoping, ctx);
+    ctx.narrow = outer_narrow;
 }
 
 pub(super) fn check_for_statement(
@@ -65,7 +74,12 @@ pub(super) fn check_for_statement(
     if let Some(update) = &for_stmt.update {
         infer_expression_type(update, scoping, ctx);
     }
+
+    // Same reasoning as check_while_statement: the body is walked once, so any
+    // narrowing a guard clause inside it establishes must stay inside the loop.
+    let outer_narrow = ctx.narrow.clone();
     check_statement(&for_stmt.body, scoping, ctx);
+    ctx.narrow = outer_narrow;
 }
 
 pub(super) fn check_switch_statement(
@@ -78,7 +92,15 @@ pub(super) fn check_switch_statement(
     // union narrowing (`switch (shape.kind) { case "circle": ... }`) is not
     // implemented yet, unlike the if-statement narrowing above.
     infer_expression_type(&switch_stmt.discriminant, scoping, ctx);
+
+    // Each case starts from the same narrowing the switch itself started with,
+    // not from whatever the previous case left behind: cases are checked in
+    // textual order here regardless of fallthrough, so without this a guard
+    // clause in one case would narrow the next case's code too, and every case's
+    // narrowing would otherwise leak past the switch's closing brace.
+    let outer_narrow = ctx.narrow.clone();
     for case in &switch_stmt.cases {
+        ctx.narrow = outer_narrow.clone();
         if let Some(test) = &case.test {
             infer_expression_type(test, scoping, ctx);
         }
@@ -86,4 +108,5 @@ pub(super) fn check_switch_statement(
             check_statement(stmt, scoping, ctx);
         }
     }
+    ctx.narrow = outer_narrow;
 }

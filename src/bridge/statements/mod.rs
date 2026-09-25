@@ -71,9 +71,14 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
         | Statement::TSInterfaceDeclaration(_)
         | Statement::TSEnumDeclaration(_) => {}
         Statement::BlockStatement(block) => {
+            // A bare `{ ... }` introduces its own scope in real TypeScript, so
+            // narrowing established inside it (a guard clause, say) must not
+            // outlive its closing brace, the same as an if-branch's does not.
+            let outer_narrow = ctx.narrow.clone();
             for inner in &block.body {
                 check_statement(inner, scoping, ctx);
             }
+            ctx.narrow = outer_narrow;
         }
         Statement::IfStatement(if_stmt) => check_if_statement(if_stmt, scoping, ctx),
         Statement::VariableDeclaration(decl) => check_variable_declaration(decl, scoping, ctx),

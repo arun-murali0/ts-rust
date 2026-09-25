@@ -1,4 +1,4 @@
-use ts_rust::TypeChecker;
+use ts_rust::{DiagnosticCode, TypeChecker};
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -141,5 +141,98 @@ fn local_annotated_variable_without_initializer_is_registered() {
         diagnostics.len(),
         1,
         "expected exactly one diagnostic for assigning number to string, got: {diagnostics:?}"
+    );
+}
+
+// A guard clause's narrowing must stay inside the scope it ran in: it should not
+// survive past a loop body, a bare block, a switch case, or a function body that
+// only ran once. Each fixture below pairs a leak that must not happen with, in
+// the last two, a check that the ordinary same-scope case the fix must not break
+// still works.
+
+#[test]
+fn guard_clause_in_while_body_does_not_leak() {
+    let source =
+        include_str!("fixtures/narrowing-scopes/guard_clause_in_while_body_does_not_leak.ts");
+    let diagnostics = check(source, "guard_clause_in_while_body_does_not_leak.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
+}
+
+#[test]
+fn guard_clause_in_for_body_does_not_leak() {
+    let source =
+        include_str!("fixtures/narrowing-scopes/guard_clause_in_for_body_does_not_leak.ts");
+    let diagnostics = check(source, "guard_clause_in_for_body_does_not_leak.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
+}
+
+#[test]
+fn guard_clause_in_block_does_not_leak() {
+    let source = include_str!("fixtures/narrowing-scopes/guard_clause_in_block_does_not_leak.ts");
+    let diagnostics = check(source, "guard_clause_in_block_does_not_leak.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
+}
+
+#[test]
+fn narrowing_does_not_leak_between_switch_cases() {
+    let source =
+        include_str!("fixtures/narrowing-scopes/narrowing_does_not_leak_between_switch_cases.ts");
+    let diagnostics = check(source, "narrowing_does_not_leak_between_switch_cases.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
+}
+
+#[test]
+fn narrowing_does_not_leak_past_switch() {
+    let source = include_str!("fixtures/narrowing-scopes/narrowing_does_not_leak_past_switch.ts");
+    let diagnostics = check(source, "narrowing_does_not_leak_past_switch.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
+}
+
+// check_function_declaration also resets ctx.narrow around a function body (see
+// src/bridge/statements/functions.rs), for the same reason as the scopes tested
+// above. It has no test here: NarrowState is keyed by SymbolId, and oxc assigns
+// every binding in a program a distinct one, so two different functions' own
+// parameters can never collide on a lookup. Skipping the reset would still leave
+// ctx.narrow holding entries no later lookup can ever match -- a real hygiene
+// issue, since the map grows for the rest of the check for no reason, but not one
+// a diagnostic-based test can observe.
+
+#[test]
+fn guard_clause_still_narrows_within_the_same_function() {
+    let source = include_str!(
+        "fixtures/narrowing-scopes/guard_clause_still_narrows_within_the_same_function.ts"
+    );
+    let diagnostics = check(
+        source,
+        "guard_clause_still_narrows_within_the_same_function.ts",
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
     );
 }

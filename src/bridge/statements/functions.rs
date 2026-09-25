@@ -31,6 +31,13 @@ pub(super) fn check_function_declaration(
 
     bind_params(&func.params, &function_type.params, scoping, ctx);
 
+    // A function body starts with no narrowing at all, not with whatever the
+    // caller's scope had established: this checker does not narrow a closed-over
+    // variable inside a nested function, so nothing from the enclosing scope
+    // applies here, and without resetting, narrowing from one top-level function
+    // would otherwise leak into the next one checked after it.
+    let outer_narrow = std::mem::take(&mut ctx.narrow);
+
     // Pushed again here, separately from declare_top_level's own push, since the
     // declare pass and this body-check pass are two independent traversals. Both
     // must resolve func's own T to the exact same GenericParameter node, which is
@@ -44,6 +51,7 @@ pub(super) fn check_function_declaration(
         check_statement(body_stmt, scoping, ctx);
     }
     ctx.current_return_type = outer_return_type;
+    ctx.narrow = outer_narrow;
 
     ctx.namespace.pop_type_params(type_param_scope);
 }
