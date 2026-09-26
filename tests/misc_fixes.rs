@@ -76,7 +76,9 @@ fn strict_equality_with_null_does_not_match_undefined() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].severity, Severity::Error);
-    assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
+    // ReturnTypeMismatch, not DeclaredTypeMismatch: the mismatch is on a
+    // `return x;`, not a `const`/`let` with a declared type.
+    assert_eq!(diagnostics[0].code, DiagnosticCode::ReturnTypeMismatch);
 }
 
 #[test]
