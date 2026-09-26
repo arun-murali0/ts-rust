@@ -30,15 +30,39 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install Node (for tsc)
+      - name: Install Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install tsc
-        run: npm install -g typescript
+      - name: Install GNU time (for compare3.js memory figures)
+        run: sudo apt-get update && sudo apt-get install -y time
 
-      - name: Run harness
+      - name: Build ts-rust (release)
+        run: cargo build --release --bin ts-rust
+
+      # `typescript` now ships two different things depending on version:
+      # 5.x is the classic compiler with the real `tsc` binary; 7.x replaced
+      # the implementation with the native/Go port ("tsgo") but kept
+      # shipping it under the SAME `tsc` binary name, with no `tsgo`-named
+      # binary at all. A plain `npm install -g typescript` therefore
+      # silently installs whichever is latest (now 7.x) under the `tsc`
+      # name -- meaning TSC_BIN below would actually run tsgo mislabeled as
+      # tsc, and TSGO_BIN's default (a literal `tsgo` command) would never
+      # resolve to anything, since that binary name doesn't exist in either
+      # package. Both are installed explicitly and separately here so each
+      # is what its name says it is.
+      - name: Install classic tsc (typescript@5, real tsc binary)
+        run: npm install -g typescript@5
+
+      - name: Install tsgo (typescript@7, native compiler under the `tsc` binary name)
+        run: |
+          mkdir -p /tmp/tsgo-scratch && cd /tmp/tsgo-scratch
+          npm init -y >/dev/null
+          npm install typescript@7
+          echo "TSGO_BIN=/tmp/tsgo-scratch/node_modules/.bin/tsc" >> "$GITHUB_ENV"
+
+      - name: Run harness (real project, timing/memory)
         env:
           ZUSTAND_REF: ${{ inputs.fixture_ref }}
           HARNESS_RUNS: ${{ inputs.runs }}
@@ -48,10 +72,35 @@ jobs:
         # `|| true`: a nonzero exit from ts-rust finding diagnostics on the
         # fixture is expected right now and must not fail this workflow.
 
+      # Fixture-level three-way comparison: same tsc/tsgo/ts-rust trio as
+      # the harness step above, but per-fixture diagnostics + an HTML
+      # report, instead of one aggregate timing number against Zustand.
+      # See compare3.js's own module doc comment and this repo's README
+      # ("Compatibility harness" -> "Fixture-level three-way report") for
+      # what it measures and why its numbers have the caveats they do.
+      - name: Install ts-diag-tool dependencies
+        working-directory: scripts/ts-diag-tool
+        run: npm ci
+
+      - name: Fixture-level three-way comparison (tsc/tsgo/ts-rust)
+        run: |
+          mkdir -p .harness
+          node scripts/ts-diag-tool/compare3.js tests/fixtures \
+            target/release/ts-rust \
+            "${TSGO_BIN}" \
+            --html .harness/fixture-report.html \
+            --json > .harness/fixture-report.json || true
+        # `|| true`: same reasoning as the harness step above -- this is a
+        # measurement, and existing divergence from tsc/tsgo is expected
+        # while the checker is still being built out feature by feature.
+
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: harness-results
-          path: .harness/results/
+          path: |
+            .harness/results/
+            .harness/fixture-report.html
+            .harness/fixture-report.json
           retention-days: 30
