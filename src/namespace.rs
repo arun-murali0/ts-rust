@@ -503,33 +503,32 @@ impl<'a> TypeNamespace<'a> {
         };
         let scope = self.push_decl_type_params(arena, type_params);
 
-        let resolved = match kind {
-            DeclKind::TypeAlias(body, _) => resolve_ts_type(body, self, arena),
-            DeclKind::Interface(decl) => {
-                // Declaration merging: every part's members are resolved
-                // together as one shape, decl's own first, then each merged
-                // part's in the order they were declared. A property name
-                // repeated across parts is not specially detected -- it hits
-                // resolve_object_members' existing duplicate-name check, the
-                // same one that already applies within a single interface, and
-                // makes the whole merged interface unresolvable, which is safe
-                // (if imprecise) rather than silently picking one.
-                let merged = self.merged_interface_parts.get(name);
-                let members: Vec<&TSSignature> = decl
-                    .body
-                    .body
-                    .iter()
-                    .chain(
-                        merged
-                            .into_iter()
-                            .flat_map(|parts| parts.iter().flat_map(|part| part.body.body.iter())),
-                    )
-                    .collect();
-                resolve_object_members(&members, self, arena)
-            }
-            DeclKind::Class(class) => self.resolve_class(class, arena),
-            DeclKind::Resolved => None,
-        };
+        let resolved =
+            match kind {
+                DeclKind::TypeAlias(body, _) => resolve_ts_type(body, self, arena),
+                DeclKind::Interface(decl) => {
+                    // Declaration merging: every part's members are resolved
+                    // together as one shape, decl's own first, then each merged
+                    // part's in the order they were declared. A property name
+                    // repeated across parts is not specially detected -- it hits
+                    // resolve_object_members' existing duplicate-name check, the
+                    // same one that already applies within a single interface, and
+                    // makes the whole merged interface unresolvable, which is safe
+                    // (if imprecise) rather than silently picking one.
+                    let merged = self.merged_interface_parts.get(name);
+                    let members: Vec<&TSSignature> =
+                        decl.body
+                            .body
+                            .iter()
+                            .chain(merged.into_iter().flat_map(|parts| {
+                                parts.iter().flat_map(|part| part.body.body.iter())
+                            }))
+                            .collect();
+                    resolve_object_members(&members, self, arena)
+                }
+                DeclKind::Class(class) => self.resolve_class(class, arena),
+                DeclKind::Resolved => None,
+            };
         self.pop_type_params(scope);
 
         let Some(entry) = self.entries.get_mut(name) else {
