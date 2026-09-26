@@ -1,6 +1,6 @@
 use oxc_ast::ast::{
     Class, ClassElement, Expression, MethodDefinitionKind, PropertyKey, TSInterfaceDeclaration,
-    TSType,
+    TSSignature, TSType,
 };
 use oxc_span::{GetSpan, Span};
 
@@ -78,6 +78,21 @@ pub struct TypeNamespace<'a> {
     // implicit_any_params is.
     unresolved_constraints: Vec<(String, Span)>,
 
+    // Real TypeScript merges multiple `interface Foo { ... }` declarations for
+    // the same name into one shape; declaring the same name as a class or a type
+    // alias twice, by contrast, is a real error. Rather than change
+    // DeclKind::Interface to hold a Vec (which would cost DeclKind its Copy
+    // derive, and every one of its several by-value `entry.kind` reads elsewhere
+    // in this file would need reworking to match by reference instead), the
+    // first `interface Foo` for a name is kept exactly where it already was, in
+    // entries as DeclKind::Interface(decl), and every declaration after the
+    // first is appended here instead. resolve() below folds this in when the
+    // kind is Interface, alongside decl itself, so nothing else has to know two
+    // tables exist. A class or alias with a colliding name is unaffected: it
+    // still just overwrites in entries, exactly as before this feature -- a
+    // separate, existing limitation, not addressed here.
+    merged_interface_parts: FxHashMap<String, Vec<&'a TSInterfaceDeclaration<'a>>>,
+
     // See TypeArgumentIssue. Deduplicated by source position, since the same
     // annotation can be resolved more than once.
     type_argument_issues: Vec<TypeArgumentIssue>,
@@ -101,6 +116,7 @@ impl<'a> TypeNamespace<'a> {
     pub fn new() -> Self {
         Self {
             entries: FxHashMap::default(),
+            merged_interface_parts: FxHashMap::default(),
             type_param_cache: FxHashMap::default(),
             implicit_any_params: Vec::new(),
             unresolved_constraints: Vec::new(),
@@ -152,9 +168,30 @@ impl<'a> TypeNamespace<'a> {
     ) -> Option<Option<&'a oxc_ast::ast::TSTypeParameterDeclaration<'a>>> {
         match self.entries.get(name)?.kind {
             DeclKind::TypeAlias(_, type_params) => Some(type_params),
-            DeclKind::Interface(decl) => Some(decl.type_parameters.as_deref()),
+            DeclKind::Interface(decl) => Some(
+                decl.type_parameters
+                    .as_deref()
+                    .or_else(|| self.merged_type_parameters(name)),
+            ),
             DeclKind::Class(_) | DeclKind::Resolved => None,
         }
+    }
+
+    // A merged interface's own `<T, ...>` list, from whichever part (if any)
+    // happens to declare one. Real TypeScript requires every merged part that
+    // declares type parameters to declare the identical list; this does not
+    // check that and just takes the first one found, which is the right answer
+    // for the common case (only one part is generic) and a reasonable one
+    // otherwise, since nothing here can express "two declarations must agree"
+    // as an error yet.
+    fn merged_type_parameters(
+        &self,
+        name: &str,
+    ) -> Option<&'a oxc_ast::ast::TSTypeParameterDeclaration<'a>> {
+        self.merged_interface_parts
+            .get(name)?
+            .iter()
+            .find_map(|part| part.type_parameters.as_deref())
     }
 
     // (required, total) type argument counts. A parameter with a default may be
@@ -280,6 +317,22 @@ impl<'a> TypeNamespace<'a> {
     }
 
     pub fn insert_interface(&mut self, name: &str, decl: &'a TSInterfaceDeclaration<'a>) {
+        // A second (or later) `interface Foo` for a name already holding one is
+        // declaration merging, not a redeclaration: it adds to the first part
+        // rather than replacing it. See the doc comment on
+        // merged_interface_parts for why this is stored separately instead of
+        // changing what DeclKind::Interface itself holds.
+        let already_an_interface = matches!(
+            self.entries.get(name),
+            Some(entry) if matches!(entry.kind, DeclKind::Interface(_))
+        );
+        if already_an_interface {
+            self.merged_interface_parts
+                .entry(name.to_string())
+                .or_default()
+                .push(decl);
+            return;
+        }
         self.entries.insert(
             name.to_string(),
             TypeEntry {
@@ -442,14 +495,38 @@ impl<'a> TypeNamespace<'a> {
         // resolved once and substituted per call.
         let type_params = match kind {
             DeclKind::TypeAlias(_, type_params) => type_params,
-            DeclKind::Interface(decl) => decl.type_parameters.as_deref(),
+            DeclKind::Interface(decl) => decl
+                .type_parameters
+                .as_deref()
+                .or_else(|| self.merged_type_parameters(name)),
             DeclKind::Class(_) | DeclKind::Resolved => None,
         };
         let scope = self.push_decl_type_params(arena, type_params);
 
         let resolved = match kind {
             DeclKind::TypeAlias(body, _) => resolve_ts_type(body, self, arena),
-            DeclKind::Interface(decl) => resolve_object_members(&decl.body.body, self, arena),
+            DeclKind::Interface(decl) => {
+                // Declaration merging: every part's members are resolved
+                // together as one shape, decl's own first, then each merged
+                // part's in the order they were declared. A property name
+                // repeated across parts is not specially detected -- it hits
+                // resolve_object_members' existing duplicate-name check, the
+                // same one that already applies within a single interface, and
+                // makes the whole merged interface unresolvable, which is safe
+                // (if imprecise) rather than silently picking one.
+                let merged = self.merged_interface_parts.get(name);
+                let members: Vec<&TSSignature> = decl
+                    .body
+                    .body
+                    .iter()
+                    .chain(
+                        merged
+                            .into_iter()
+                            .flat_map(|parts| parts.iter().flat_map(|part| part.body.body.iter())),
+                    )
+                    .collect();
+                resolve_object_members(&members, self, arena)
+            }
             DeclKind::Class(class) => self.resolve_class(class, arena),
             DeclKind::Resolved => None,
         };

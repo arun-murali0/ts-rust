@@ -46,7 +46,13 @@ pub fn resolve_ts_type(
         }
 
         TSType::TSTypeLiteral(literal) => {
-            resolve_object_members(&literal.members, namespace, arena)
+            // resolve_object_members takes references to signatures rather than
+            // owned ones so the interface-merging call site in namespace.rs can
+            // pass members gathered from more than one declaration; a plain type
+            // literal only ever has the one Vec of its own, so this collects a
+            // Vec of references to it just to match that shared shape.
+            let members: Vec<&TSSignature> = literal.members.iter().collect();
+            resolve_object_members(&members, namespace, arena)
         }
 
         TSType::TSFunctionType(func_type) => {
@@ -344,7 +350,16 @@ pub fn resolve_params_with_any_fallback(
 }
 
 pub fn resolve_object_members(
-    members: &[TSSignature],
+    // References rather than owned signatures: interface declaration merging
+    // (see merged_interface_parts in namespace.rs) needs to resolve members
+    // gathered from more than one TSInterfaceDeclaration's own Vec together as
+    // one shape, so this takes a caller-built slice of references rather than
+    // borrowing one Vec's storage directly. TSSignature has no plain Clone
+    // (only oxc's arena-allocating CloneIn), so collecting owned copies instead
+    // was not an option; a plain type literal, which only ever has the one Vec,
+    // pays the small cost of collecting a Vec of references to its own members
+    // just to match this shared shape.
+    members: &[&TSSignature],
     namespace: &mut TypeNamespace,
     arena: &mut TypeArena,
 ) -> Option<TypeId> {
@@ -355,7 +370,7 @@ pub fn resolve_object_members(
         // represent, such as a call signature or an index signature inside an
         // interface, makes the whole interface unresolvable rather than silently
         // dropping just that member.
-        let entry = match member {
+        let entry = match *member {
             TSSignature::TSPropertySignature(property) => {
                 let PropertyKey::StaticIdentifier(key) = &property.key else {
                     return None;
