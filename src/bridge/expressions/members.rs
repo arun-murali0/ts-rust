@@ -9,10 +9,19 @@ use super::super::context::CheckContext;
 use super::super::narrow::narrow_to_non_nullish;
 use super::infer_expression_type;
 
-// Member access is only understood on Type::Object today; a union type (for
-// example, a discriminated union not yet narrowed by its tag) is not looked
-// through here, so accessing a property on an un-narrowed union reports it as
-// missing even if every member happens to share that property.
+// Member access is fully modelled only on Type::Object. String and array member
+// access is limited to `.length`, deliberately: every other String.prototype and
+// Array.prototype method (`.map`, `.slice`, `.indexOf`, ...) would need this
+// checker to model a whole method's signature, and several of the array ones
+// take a callback whose parameter types have to be inferred from the element
+// type, which is a feature in its own right, not a small addition here. `.length`
+// needs neither: it is a fixed property returning `number` on both, so it is
+// covered without pulling in either of those.
+//
+// A union type (for example, a discriminated union not yet narrowed by its tag)
+// is not looked through here either, so accessing a property on an un-narrowed
+// union reports it as missing even if every member happens to share that
+// property.
 pub(crate) fn infer_member_access_type(
     object_type: TypeId,
     property_name: &str,
@@ -28,6 +37,15 @@ pub(crate) fn infer_member_access_type(
         Type::GenericParameter(_, _, Some(constraint)) => *constraint,
         _ => object_type,
     };
+
+    if property_name == "length"
+        && matches!(
+            ctx.arena.get(effective_type),
+            Type::String | Type::StringLiteral(_) | Type::Array(_)
+        )
+    {
+        return ctx.arena.number();
+    }
 
     let Type::Object(object) = ctx.arena.get(effective_type) else {
         if !matches!(ctx.arena.get(effective_type), Type::Any | Type::Error) {

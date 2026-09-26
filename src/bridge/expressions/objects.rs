@@ -24,13 +24,23 @@ pub(super) fn infer_object_expression_type(
         let ObjectPropertyKind::ObjectProperty(property) = property else {
             continue;
         };
-        let PropertyKey::StaticIdentifier(key) = &property.key else {
-            continue;
+        // A key can be a plain identifier (`{ a: 1 }`), a string literal
+        // (`{ "a": 1 }`), or a numeric literal (`{ 1: "x" }`); JavaScript stores
+        // all three as string-keyed properties, so a numeric key is formatted the
+        // same way its runtime string form would be. Anything else -- a computed
+        // key (`{ [expr]: 1 }`) or a private name -- has no static name to give
+        // this property, so it is skipped rather than guessed at, same as a
+        // spread property already was before this fix.
+        let name = match &property.key {
+            PropertyKey::StaticIdentifier(key) => key.name.to_string(),
+            PropertyKey::StringLiteral(key) => key.value.to_string(),
+            PropertyKey::NumericLiteral(key) => key.value.to_string(),
+            _ => continue,
         };
         let type_id = infer_expression_type(&property.value, scoping, ctx);
         let type_id = crate::types::widen(&ctx.arena, type_id);
         properties.push(PropertyEntry {
-            name: key.name.to_string().into(),
+            name: name.into(),
             type_id,
             optional: false,
             is_method: false,
