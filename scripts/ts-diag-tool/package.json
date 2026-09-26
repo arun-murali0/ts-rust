@@ -1,0 +1,9 @@
+{
+  "name": "ts-diag-tool",
+  "private": true,
+  "description": "TS compiler-API based diagnostic dump/compare tools, using classic TypeScript (not tsgo/typescript@7, which drops the JS compiler API).",
+  "dependencies": {
+    "cli-table3": "^0.6.5",
+    "typescript": "5.9.3"
+  }
+}
