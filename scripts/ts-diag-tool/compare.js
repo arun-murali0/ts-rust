@@ -287,18 +287,25 @@ function renderFile(file, tsRustLines, tscLines) {
   const verdictColor =
     verdict === "MATCH" ? c.green : verdict === "GAP" ? c.yellow : c.red;
 
-  report.push({
-    file,
-    verdict,
-    lines: allLineNumbers.map((ln) => ({
-      line: ln,
-      tsRust: (tsRustLines.get(ln) || []).map((d) => `${d.code} ${d.message}`),
-      tsc: (tscLines.get(ln) || []).map((d) => `${d.code} ${d.message}`),
-    })),
-  });
+  // --only-differ applies to --json too: a MATCH file (even one that had
+  // matching diagnostics on both sides, not just a fully-clean file) is
+  // left out of the `files` array entirely, not just hidden from the table.
+  if (!(onlyDiffer && fileOk)) {
+    report.push({
+      file,
+      verdict,
+      lines: allLineNumbers.map((ln) => ({
+        line: ln,
+        tsRust: (tsRustLines.get(ln) || []).map(
+          (d) => `${d.code} ${d.message}`,
+        ),
+        tsc: (tscLines.get(ln) || []).map((d) => `${d.code} ${d.message}`),
+      })),
+    });
+  }
 
   if (asJson) return;
-  if (onlyDiffer && fileOk) return; // --only-differ: hide files that fully MATCH
+  if (onlyDiffer && fileOk) return; // --only-differ: hide files that fully MATCH from the table too
 
   ensureTierHeader();
   tierFileCount++;
@@ -378,6 +385,10 @@ if (asJson) {
           gap: totalGap,
           falsePositive: totalFp,
           strictOnly,
+          onlyDiffer,
+          // `files` below is filtered to just the differing ones when
+          // onlyDiffer is set -- totalFiles/agree/etc. above still reflect
+          // the whole run, not just what's listed.
         },
         files: report,
       },
