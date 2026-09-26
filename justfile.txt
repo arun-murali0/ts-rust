@@ -1,8 +1,55 @@
 
-------------like checklist------------
+# ts-rust — Remaining Work Checklist
 
+## 🔴 Highest priority (per your own conformance methodology)
+- [ ] Fix the false positive: `array_indexing_dynamic_key_includes_undefined.ts`
+      (check whether `tsc` was run with `noUncheckedIndexedAccess` — may be a
+      config mismatch, not a logic bug)
+- [ ] Re-run conformance harness after the fix, confirm 0 false positives
 
-diagonis code and stable code introduced.....::::DONE
-DOCS to be updated to our current state:::::WIP
-yet docs need to update and generics and module resolution need to be completed next...::::WIP
-then lsp thin server need to added.::::NOT started.....
+## 🟡 Generics track
+- [x] Constraints on type params (interfaces, aliases)
+- [x] Explicit call-site type arguments
+- [x] Defaults (`<T, U = T>`)
+- [x] Bare-reference error (`Box` for `Box<T>`)
+- [x] Constraint violation errors (interfaces, aliases) w/ real type names
+- [x] Interface / type-literal method signature resolution
+- [x] Method parameter bivariance
+- [x] Arity errors name the missing parameter
+- [ ] **Generic classes** — `resolve_class` push/pop type-param scope *(in progress)*
+- [ ] Generic class + inheritance interaction (`class D<T> extends B<T>`)
+- [ ] `this` inside generic class methods resolves through the class's type params
+- [ ] Construction-site inference (`new Box(5)` → `T = number`)
+- [ ] Instantiation memoization (avoid re-resolving `Box<number>` repeatedly)
+
+## 🟡 CFG track
+- [x] Fix `with_build_nodes(true)` bug (graph node table was empty)
+- [x] First real CFG consumer: unreachable-code detection (`TSR1601`)
+- [ ] **Narrowing itself moved onto the CFG** (biggest remaining item —
+      currently still `NarrowState`'s tree-walk overlay)
+      - [ ] Decide: CFG *replaces* the overlay, or *augments* it?
+- [ ] Switch-case discriminated-union narrowing
+- [ ] Loop-aware / back-edge narrowing
+- [ ] Unreachable-code gaps: class methods, try, labeled, do-while, for-in/of bodies
+
+## 🟢 Diagnostic messages track
+- [x] Type printer built (`display_type`)
+- [x] Wired into constraint-violation message
+- [x] Wired into 6 message builders (`c853cfb`)
+- [ ] Confirm remaining type-blind messages are covered:
+      `argument_not_assignable`, `return_type_mismatch`,
+      `binary_operand_type_mismatch`, `declared_type_mismatch`
+- [ ] Spot-check wording against real `tsc` output (as done in `c286d00`)
+
+## ⚪ Deferred / not started (per your own sequencing)
+- [ ] Module resolution (`oxc_resolver` + `TypeNamespace` project-index design)
+- [ ] Real-repo test pass (Zustand — expect core to pass, middleware/tuples to fail)
+- [ ] Docs sync: `docs/generics-tier1.md`, `docs/roadmap.md`,
+      `docs/control-flow-narrowing.md` (currently stale/incomplete vs. code)
+- [ ] CHANGELOG.md (you declined for now, revisit at docs-sync time)
+- [ ] v1 release + "known limitations" section
+
+## Known permanent gaps (scope, not TODO)
+Tuples · Intersections · `keyof` / mapped / conditional types ·
+Template literal types · Namespaces/modules · `bigint` / `symbol` ·
+Function overloads · `readonly` / `as const`
