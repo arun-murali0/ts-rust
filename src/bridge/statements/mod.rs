@@ -73,14 +73,19 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
         | Statement::TSInterfaceDeclaration(_)
         | Statement::TSEnumDeclaration(_) => {}
         Statement::BlockStatement(block) => {
-            // A bare `{ ... }` introduces its own scope in real TypeScript, so
-            // narrowing established inside it (a guard clause, say) must not
-            // outlive its closing brace, the same as an if-branch's does not.
-            let outer_narrow = ctx.narrow.clone();
+            // Deliberately no save/restore of ctx.narrow here, despite variable
+            // declarations genuinely being block-scoped: TypeScript's narrowing
+            // is not. It follows control flow, not lexical scope, and a bare
+            // `{ ... }` has no effect on control flow at all -- it's not a
+            // branch, a loop, or an exit. A guard clause's narrowing does
+            // survive past a bare block's closing brace in real TypeScript
+            // (verified against tsc; see
+            // tests/fixtures/narrowing-scopes/guard_clause_in_block_does_survive.ts),
+            // unlike the while/for/switch/function cases nearby, each of which
+            // really is a distinct control-flow construct.
             for inner in &block.body {
                 check_statement(inner, scoping, ctx);
             }
-            ctx.narrow = outer_narrow;
         }
         Statement::IfStatement(if_stmt) => check_if_statement(if_stmt, scoping, ctx),
         Statement::VariableDeclaration(decl) => check_variable_declaration(decl, scoping, ctx),

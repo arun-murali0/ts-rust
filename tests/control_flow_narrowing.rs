@@ -177,15 +177,16 @@ fn guard_clause_in_for_body_does_not_leak() {
 }
 
 #[test]
-fn guard_clause_in_block_does_not_leak() {
-    let source = include_str!("fixtures/narrowing-scopes/guard_clause_in_block_does_not_leak.ts");
-    let diagnostics = check(source, "guard_clause_in_block_does_not_leak.ts");
-    assert_eq!(
-        diagnostics.len(),
-        1,
-        "expected exactly one diagnostic, got: {diagnostics:?}"
+fn guard_clause_in_block_does_survive() {
+    let source = include_str!("fixtures/narrowing-scopes/guard_clause_in_block_does_survive.ts");
+    let diagnostics = check(source, "guard_clause_in_block_does_survive.ts");
+    // Confirmed against real tsc, not assumed: a bare block is not a
+    // control-flow construct, so narrowing correctly survives past it, unlike
+    // the while/for/switch/function cases nearby.
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
     );
-    assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
 }
 
 #[test]

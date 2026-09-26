@@ -61,13 +61,16 @@ pub(super) fn infer_binary_expression_type(
         | BinaryOperator::Division
         | BinaryOperator::Remainder
         | BinaryOperator::Exponential => {
-            let any_ty = ctx.arena.any();
-            if left == any_ty || right == any_ty {
-                // Same reasoning as Addition above: `any` is a subtype of
-                // `number` too, so without this, `any - 1` would already pass
-                // the number check below and wrongly come out as `number`.
-                return ctx.arena.any();
-            }
+            // No `any` special-case here, unlike Addition above: verified
+            // against real tsc (see
+            // tests/fixtures/misc-fixes/any_minus_number_infers_number_not_any.ts),
+            // `any - 1` actually infers `number`, not `any`. Only `+` propagates
+            // `any` in real TypeScript, because of its ambiguity between the
+            // string and number overloads when one side is `any`; every other
+            // arithmetic operator only has a (number, number) => number
+            // overload, and `any` simply satisfies that parameter type the same
+            // way it satisfies any other, giving back the overload's own
+            // `number` result rather than `any`.
             let number_ty = ctx.arena.number();
             if ctx.semantic().is_assignable(left, number_ty)
                 && ctx.semantic().is_assignable(right, number_ty)

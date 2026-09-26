@@ -38,13 +38,19 @@ fn any_plus_number_infers_any_not_string() {
 }
 
 #[test]
-fn any_minus_number_infers_any_not_number() {
-    let source = include_str!("fixtures/misc-fixes/any_minus_number_infers_any_not_number.ts");
-    let diagnostics = check(source, "any_minus_number_infers_any_not_number.ts");
-    assert!(
-        diagnostics.is_empty(),
-        "expected `any - 1` to stay `any` (assignable to string), got: {diagnostics:?}"
+fn any_minus_number_infers_number_not_any() {
+    let source = include_str!("fixtures/misc-fixes/any_minus_number_infers_number_not_any.ts");
+    let diagnostics = check(source, "any_minus_number_infers_number_not_any.ts");
+    // Confirmed against real tsc, not assumed: `any - 1` genuinely is `number`,
+    // unlike `any + 1`, which stays `any`. This should report the real mismatch
+    // between that `number` and the `string` target, not stay silent.
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
     );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
 }
 
 #[test]
