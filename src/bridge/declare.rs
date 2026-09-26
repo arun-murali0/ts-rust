@@ -113,14 +113,35 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
 
                 let (constructor_params, constructor_is_untyped) = match find_constructor(class) {
                     None => (Vec::new(), false),
-                    Some(ctor) => match resolve_function_params(
-                        &ctor.params,
-                        &mut ctx.namespace,
-                        &mut ctx.arena,
-                    ) {
-                        Some(params) => (params, false),
-                        None => (Vec::new(), true),
-                    },
+                    Some(ctor) => {
+                        // A generic class's own type parameters need to be in
+                        // scope while its constructor's parameters are
+                        // resolved, the same as a generic function's are just
+                        // above -- otherwise `T` in `constructor(value: T)`
+                        // fails to resolve, the whole signature falls back to
+                        // "untyped, can't check arity", and `new Box(1)` never
+                        // gets the inference-and-substitution treatment a
+                        // generic function call already gets in
+                        // check_callable. This only re-declares the same
+                        // shadow namespace::resolve already set up while
+                        // computing instance_type above; type_param_cache
+                        // means it resolves to the identical GenericParameter
+                        // TypeId, not a second, disconnected one.
+                        let scope = ctx.namespace.push_decl_type_params(
+                            &mut ctx.arena,
+                            class.type_parameters.as_deref(),
+                        );
+                        let params = resolve_function_params(
+                            &ctor.params,
+                            &mut ctx.namespace,
+                            &mut ctx.arena,
+                        );
+                        ctx.namespace.pop_type_params(scope);
+                        match params {
+                            Some(params) => (params, false),
+                            None => (Vec::new(), true),
+                        }
+                    }
                 };
 
                 let constructor_type =
