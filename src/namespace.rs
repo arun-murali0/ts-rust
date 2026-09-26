@@ -474,14 +474,7 @@ impl<'a> TypeNamespace<'a> {
             return Resolution::Circular;
         }
 
-        let Some(entry_being_resolved) = self.entries.get_mut(name) else {
-            return Resolution::NotFound;
-        };
-        entry_being_resolved.resolving = true;
-
-        let Some(kind) = self.entries.get(name).map(|entry| entry.kind) else {
-            return Resolution::NotFound;
-        };
+        let kind = entry.kind;
 
         // A generic interface or type alias's own `<T, ...>` list is pushed as a
         // shadow, exactly like a generic function's, before its body is resolved,
@@ -501,6 +494,33 @@ impl<'a> TypeNamespace<'a> {
                 .or_else(|| self.merged_type_parameters(name)),
             DeclKind::Class(_) | DeclKind::Resolved => None,
         };
+
+        // An interface, a class, and a type-literal alias (`type X = { ... }`)
+        // are always object-shaped, so a property inside one can legitimately
+        // refer back to the declaration itself -- a linked list's
+        // `next: Node | null`, a tree's `children: Node[]`. For these, a
+        // placeholder object is registered as this name's resolved type
+        // *before* its members are resolved, so the self-reference finds a real
+        // TypeId (via the entry.resolved short-circuit above) instead of
+        // hitting the Circular case below. That case stays reserved for a bare
+        // alias chain that never bottoms out in an object shape (`type A = A;`,
+        // which really is invalid TypeScript and stays unresolvable here too).
+        let self_referenceable = matches!(kind, DeclKind::Interface(_) | DeclKind::Class(_))
+            || matches!(kind, DeclKind::TypeAlias(body, _) if matches!(body, TSType::TSTypeLiteral(_)));
+
+        let placeholder = if self_referenceable {
+            let id = arena.alloc_object_placeholder();
+            if let Some(entry) = self.entries.get_mut(name) {
+                entry.resolved = Some(id);
+            }
+            Some(id)
+        } else {
+            if let Some(entry) = self.entries.get_mut(name) {
+                entry.resolving = true;
+            }
+            None
+        };
+
         let scope = self.push_decl_type_params(arena, type_params);
 
         let resolved =
@@ -536,22 +556,45 @@ impl<'a> TypeNamespace<'a> {
         };
         entry.resolving = false;
 
-        match resolved {
-            Some(type_id) => {
+        // A non-generic interface, alias or class prints as its own name from
+        // here on ("Dog", not its member list). A generic one is left unnamed:
+        // this cached shape still holds bare GenericParameter placeholders and
+        // is never itself the type of anything a person sees -- each
+        // instantiation (type_annotation::resolve_ts_type's TSTypeReference
+        // arm) names its own substituted result instead ("Box<number>").
+        let is_non_generic = type_params.is_none_or(|params| params.params.is_empty());
+
+        match (placeholder, resolved) {
+            (Some(placeholder_id), Some(final_id)) => {
+                // resolve_object_members and resolve_class always allocate
+                // their own fresh Object, so final_id is a different, now
+                // redundant TypeId holding the right content -- placeholder_id
+                // is the one a self-reference (and entry.resolved) actually
+                // points to, so that's what gets filled in and reported.
+                let final_type = arena.get(final_id).clone();
+                arena.set(placeholder_id, final_type);
+                entry.resolved = Some(placeholder_id);
+                if is_non_generic {
+                    arena.set_display_name(placeholder_id, name);
+                }
+                Resolution::Resolved(placeholder_id)
+            }
+            (Some(_), None) => {
+                // A member turned out to be unresolvable after all. A failed
+                // resolution's partial work is discarded, never handed to a
+                // caller, so nothing outside this call could have captured the
+                // placeholder as real by now -- safe to just forget it.
+                entry.resolved = None;
+                Resolution::NotFound
+            }
+            (None, Some(type_id)) => {
                 entry.resolved = Some(type_id);
-                // A non-generic interface, alias or class prints as its own name
-                // from here on ("Dog", not its member list). A generic one is
-                // left unnamed here: this cached shape still holds bare
-                // GenericParameter placeholders and is never itself the type of
-                // anything a person sees -- each instantiation
-                // (type_annotation::resolve_ts_type's TSTypeReference arm) names
-                // its own substituted result instead ("Box<number>").
-                if type_params.is_none_or(|params| params.params.is_empty()) {
+                if is_non_generic {
                     arena.set_display_name(type_id, name);
                 }
                 Resolution::Resolved(type_id)
             }
-            None => Resolution::NotFound,
+            (None, None) => Resolution::NotFound,
         }
     }
 

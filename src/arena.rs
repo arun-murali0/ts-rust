@@ -1,5 +1,5 @@
 use crate::fxhash::FxHashMap;
-use crate::types::Type;
+use crate::types::{ObjectType, Type};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
@@ -95,6 +95,25 @@ impl TypeArena {
 
     pub fn display_name(&self, type_id: TypeId) -> Option<&str> {
         self.display_names.get(&type_id).map(String::as_str)
+    }
+
+    // Allocates an empty object shape and hands back its id, to be filled in
+    // later with `set` once the real properties are known. This is what lets
+    // an interface, class, or type-literal alias refer to itself through a
+    // property -- a linked list's `next: Node | null` -- before its own shape
+    // is finished: the self-reference resolves to this placeholder's TypeId by
+    // identity, and `set` completes that same id afterward (see
+    // namespace::resolve for how it's used).
+    pub fn alloc_object_placeholder(&mut self) -> TypeId {
+        self.alloc(Type::Object(ObjectType::new(Vec::new())))
+    }
+
+    // Overwrites whatever is already at id. Only meant for finishing a
+    // placeholder from alloc_object_placeholder above: a property only ever
+    // stores a TypeId, never a cloned Type, so nothing can be holding a stale
+    // copy of the placeholder's old (empty) content by the time this runs.
+    pub fn set(&mut self, id: TypeId, ty: Type) {
+        self.types[id.0 as usize] = ty;
     }
 
     // Whether two types are the same type by shape, not by arena slot.
