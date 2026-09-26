@@ -32,6 +32,14 @@ pub(super) fn infer_binary_expression_type(
             // so ctx.arena can't be reached again (even just to read a fixed
             // primitive id) while a SemanticQueries value from an earlier call
             // in this same expression is still alive.
+            let any_ty = ctx.arena.any();
+            if left == any_ty || right == any_ty {
+                // Checked before the string/number rules below, not after: `any`
+                // is a subtype of every type, string included, so `is_string`
+                // would otherwise already be true for `any + 1` and wrongly win,
+                // reporting `string` instead of the `any` real TypeScript infers.
+                return ctx.arena.any();
+            }
             let string_ty = ctx.arena.string();
             let number_ty = ctx.arena.number();
             let is_string = ctx.semantic().is_assignable(left, string_ty)
@@ -42,8 +50,6 @@ pub(super) fn infer_binary_expression_type(
                 ctx.arena.string()
             } else if is_number {
                 ctx.arena.number()
-            } else if left == ctx.arena.any() || right == ctx.arena.any() {
-                ctx.arena.any()
             } else {
                 push_binary_op_mismatch(ctx, span, "+", left, right);
                 ctx.arena.error()
@@ -55,6 +61,13 @@ pub(super) fn infer_binary_expression_type(
         | BinaryOperator::Division
         | BinaryOperator::Remainder
         | BinaryOperator::Exponential => {
+            let any_ty = ctx.arena.any();
+            if left == any_ty || right == any_ty {
+                // Same reasoning as Addition above: `any` is a subtype of
+                // `number` too, so without this, `any - 1` would already pass
+                // the number check below and wrongly come out as `number`.
+                return ctx.arena.any();
+            }
             let number_ty = ctx.arena.number();
             if ctx.semantic().is_assignable(left, number_ty)
                 && ctx.semantic().is_assignable(right, number_ty)

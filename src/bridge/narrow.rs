@@ -73,6 +73,11 @@ pub fn narrow_condition(
                 return empty_pair();
             }
 
+            let is_loose = matches!(
+                bin.operator,
+                BinaryOperator::Equality | BinaryOperator::Inequality
+            );
+
             if let Some((symbol_id, tag)) = typeof_check(&bin.left, &bin.right, scoping)
                 .or_else(|| typeof_check(&bin.right, &bin.left, scoping))
             {
@@ -93,7 +98,7 @@ pub fn narrow_condition(
                 .or_else(|| nullish_check(&bin.right, &bin.left, scoping))
             {
                 return by_symbol(ctx, symbol_id, |arena, current, want_true| {
-                    narrow_by_nullish(arena, current, is_null, want_true != negated)
+                    narrow_by_nullish(arena, current, is_null, is_loose, want_true != negated)
                 });
             }
 
@@ -233,10 +238,19 @@ fn narrow_by_nullish(
     arena: &mut TypeArena,
     id: TypeId,
     target_is_null: bool,
+    is_loose: bool,
     want_match: bool,
 ) -> TypeId {
     let is_target = |arena: &TypeArena, t: TypeId| {
-        if target_is_null {
+        // `==`/`!=` against either `null` or `undefined` matches both: this is
+        // JavaScript's specific loose-equality-with-null quirk, not general
+        // loose equality, and it is symmetric -- `x == undefined` matches a
+        // `null` value too, the same as `x == null` does. `===`/`!==` only ever
+        // matches the exact literal on the right, so target_is_null still
+        // decides which single type counts there.
+        if is_loose {
+            matches!(arena.get(t), Type::Null | Type::Undefined)
+        } else if target_is_null {
             matches!(arena.get(t), Type::Null)
         } else {
             matches!(arena.get(t), Type::Undefined)

@@ -17,6 +17,14 @@ pub(crate) fn resolve_identifier_type(
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
     let Some(symbol_id) = resolve_symbol_id(ident, scoping) else {
+        // `undefined` is a real value in JS, not a keyword, but it is also not a
+        // declared binding anywhere: oxc's scope analysis correctly reports it as
+        // unresolved, the same as it would for any other undeclared global. A
+        // local named `undefined` (`let undefined = 1;`) shadows this, since that
+        // case resolves to a real symbol above and never reaches here.
+        if ident.name == "undefined" {
+            return ctx.arena.undefined();
+        }
         ctx.error(
             crate::diagnostic_messages::messages::unresolved_identifier(&ident.name),
             ident.span(),
