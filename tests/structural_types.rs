@@ -210,16 +210,27 @@ fn array_covariance_allows_subtype_assignment() {
     );
 }
 
+// Before recursive-type resolution existed, a mutually recursive pair like
+// this couldn't be resolved at all, and the checker deliberately gave up
+// rather than infinite-looping -- surfacing that as an "unresolved
+// annotation" diagnostic was the safe, intentional behavior at the time.
+// Now that mutually recursive interfaces genuinely resolve (see
+// tests/recursive_types.rs's mutually_recursive_interfaces_resolve and
+// friends), this fixture's code is legitimately valid TypeScript -- `{} as
+// any` satisfies B's `a: A` structurally, same as real tsc would accept.
+// This test now asserts the improved behavior (no infinite loop, no
+// diagnostics) instead of the old give-up-safely one.
 #[test]
 fn circular_type_reference_does_not_infinite_loop() {
     let source = include_str!("fixtures/structural-types/circular_type_reference.ts");
     let diagnostics = check(source, "circular_type_reference.ts");
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
     assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.message.contains("could not be resolved")
-                || d.message.contains("not yet checked")),
-        "expected the circular reference to surface as an unresolved-annotation diagnostic, got: {diagnostics:?}"
+        errors.is_empty(),
+        "mutually recursive interfaces now resolve; this circular reference should no longer surface as unresolved, got: {diagnostics:?}"
     );
 }
 

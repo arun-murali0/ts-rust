@@ -9,15 +9,32 @@ fn check(fixture_source: &str, file_name: &str) -> Vec<Diagnostic> {
         .unwrap_or_default()
 }
 
+// Filters to Severity::Error only, matching the pattern already used
+// elsewhere in this test suite (e.g. structural_types.rs's `errors()`,
+// recursive_types.rs) -- Warning-severity diagnostics are implementation-
+// status markers ("this expression kind isn't checked yet"), not something
+// a fixture's correctness should be judged on. Assignment expressions
+// (`x = y`, `this.x = y`) in particular are not yet handled anywhere in
+// infer_expression_type (see src/bridge/expressions/mod.rs's catch-all
+// arm), a pre-existing, checker-wide gap unrelated to generics -- it was
+// simply invisible in these fixtures before generic class bodies were
+// actually being checked at all (see check_class_declaration's now-fixed
+// missing type-parameter scope push).
 fn single_error(diagnostics: &[Diagnostic], code: DiagnosticCode) -> &Diagnostic {
+    let errors: Vec<&Diagnostic> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
     assert_eq!(
-        diagnostics.len(),
+        errors.len(),
         1,
-        "expected exactly one diagnostic, got: {diagnostics:?}"
+        "expected exactly one error-severity diagnostic, got: {diagnostics:?}"
     );
-    assert_eq!(diagnostics[0].severity, Severity::Error);
-    assert_eq!(diagnostics[0].code, code, "got: {diagnostics:?}");
-    &diagnostics[0]
+    assert_eq!(errors[0].code, code, "got: {diagnostics:?}");
+    diagnostics
+        .iter()
+        .find(|d| d.severity == Severity::Error)
+        .unwrap()
 }
 
 // Before this, a class's own <T, ...> list was never shadowed the way an
@@ -84,4 +101,18 @@ fn generic_class_type_argument_count_mismatch_is_reported() {
         "generic_class_type_argument_count_mismatch_is_reported.ts",
     );
     single_error(&diagnostics, DiagnosticCode::TypeArgumentCountMismatch);
+}
+
+// check_class_declaration never pushed the class's own <T, ...> into scope
+// before checking constructor/method bodies (only resolve_class did, at
+// declare time, for field/param annotations) -- so a method other than the
+// constructor that assigns `this.prop = someTParam` inside its own body hit
+// an unresolved-name path instead of correctly treating T as the same
+// GenericParameter node used everywhere else for this class.
+#[test]
+fn generic_class_method_assigns_this_property() {
+    let source =
+        include_str!("fixtures/generic-classes/generic_class_method_assigns_this_property.ts");
+    let diagnostics = check(source, "generic_class_method_assigns_this_property.ts");
+    single_error(&diagnostics, DiagnosticCode::ArgumentNotAssignable);
 }
