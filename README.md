@@ -314,6 +314,65 @@ The harness is **not** part of the `ci.sh` quality gate and never runs automatic
 
 It can be run on demand from GitHub Actions instead: go to **Actions → Compatibility Harness → Run workflow**. Results are uploaded as a downloadable artifact (`harness-results`), not committed to the repository.
 
+### Fixture-level three-way report (on demand)
+
+`scripts/harness.sh` above benchmarks against one real project (Zustand, by default). `scripts/ts-diag-tool/compare3.js` applies the same three-way idea (`tsc`, `tsgo`, `ts-rust`) to `tests/fixtures/` instead — per-fixture diagnostics, timing, and memory, plus a browsable HTML report. Like the harness above, this is on-demand tooling, not part of the fast, CI-gated loop described under "Fixture-level diagnostic comparison" below.
+
+```bash
+# tsgo needs its own scratch install -- see "Fixture-level diagnostic
+# comparison" below: the plain `typescript` package now resolves to v7+,
+# which drops the classic JS compiler API entirely, so it can't share the
+# typescript@5.9.3 install pinned in scripts/ts-diag-tool/
+mkdir -p /tmp/tsgo-scratch && cd /tmp/tsgo-scratch && npm init -y && npm install typescript@7
+
+cd /path/to/ts-rust
+node scripts/ts-diag-tool/compare3.js tests/fixtures \
+  target/release/ts-rust \
+  /tmp/tsgo-scratch/node_modules/.bin/tsc \
+  --html report.html
+```
+
+Open `report.html` in a browser: one card per compiler (error count, wall-clock time, peak memory), pairwise line-agreement counts, and an expandable per-file breakdown. `--json` gives the same data as structured output instead of the HTML/table view.
+
+Two measurement caveats worth knowing before reading too much into the numbers:
+- **tsc's memory figure is this Node process's own peak RSS**, not an isolated subprocess measurement like the other two get — there's no in-process way to isolate just the compiler API's own memory use, so this number includes the comparison tool's own overhead (V8, `cli-table3`, etc.).
+- **tsgo runs one subprocess per file** (same reason `check-fixtures.js` gives `tsc` one `ts.Program` per file: fixtures across the suite commonly reuse top-level names, and non-module `.ts` files share a global scope, so batching them would produce spurious duplicate-identifier errors unrelated to real type checking). Its reported time is the *sum* across all those subprocess invocations, and its memory is the *max* peak RSS seen across them — not a single steady-state number the way a one-shot `tsc --project` run would give you.
+
+Memory figures need [GNU time](https://www.gnu.org/software/time/) (`/usr/bin/time -v`) on your `PATH`; without it, `compare3.js` still runs and reports timing, just without the memory columns.
+
+## Fixture-level diagnostic comparison (`scripts/ts-diag-tool/`)
+
+Where the harness above answers "is ts-rust roughly as fast/compatible as tsc on a real project", this fast, CI-gated tool answers a narrower, more precise question asked continuously: "for each individual fixture under `tests/fixtures/`, which exact diagnostic (code, line, message) does ts-rust produce versus tsc, and where do they disagree?"
+
+It uses the real TypeScript compiler API (not text-parsing) for `tsc`, so diagnostics are read as structured `ts.Diagnostic` objects — no regex against pretty-printed CLI output, which broke down on type names containing parens or colons in an earlier version of this tooling.
+
+### Setup
+
+```bash
+cd scripts/ts-diag-tool
+npm install
+```
+
+This pins `typescript@5.9.3` deliberately: the plain `typescript` package now resolves to v7+, which ships the native/Go-ported compiler (`tsgo`) instead of the classic JS one, and that package no longer exposes `ts.createProgram`/`ts.Diagnostics` at all.
+
+### Running it locally
+
+```bash
+./scripts/compare-local.sh                              # every fixture under tests/fixtures
+./scripts/compare-local.sh tests/fixtures/generics-tier1 # one folder
+./scripts/compare-local.sh path/to/one_file.ts           # one file
+./scripts/compare-local.sh tests/fixtures --only-differ  # hide fixtures where both sides fully agree
+./scripts/compare-local.sh tests/fixtures --json         # structured output, e.g. for scripting
+```
+
+Prints one table per fixture folder: file, line, ts-rust's diagnostic, tsc's diagnostic, and a per-line/per-file verdict (`match`, `tsc extra (gap)`, `ts-rust extra (fp)`). A **gap** (tsc catches something ts-rust doesn't yet) is expected on a checker still being built out feature by feature. A **false positive** (ts-rust rejects code tsc accepts) is the more damaging kind, since it breaks valid code rather than under-checking it.
+
+Builds `target/release/ts-rust` automatically if it isn't already there, and `npm install`s on first run if needed.
+
+### Running it in CI
+
+Unlike the harness above, this one **is** wired into CI: the `tsc-drift` job in `ci.yml` runs `compare-local.sh --json` against the full `tests/fixtures/` suite on every push and pull request, and fails the build only if the false-positive count exceeds what `scripts/ts-diag-tool/baseline.json` currently allows. Gaps are never gated on — they're expected while the checker is still being built out feature by feature; only false positives (which break valid code, rather than just under-checking it) block a merge.
+
 ## Security
 
 See [SECURITY.md](SECURITY.md) for vulnerability reporting and security expectations.
