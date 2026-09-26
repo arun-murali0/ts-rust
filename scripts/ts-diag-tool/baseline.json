@@ -1,0 +1,4 @@
+{
+  "maxFalsePositive": 1,
+  "_comment": "False positives (ts-rust flags an error real tsc under --strict+extras does not) are the more damaging failure mode -- they reject valid code. Gaps (tsc catches something ts-rust doesn't yet) are expected and not gated here; the checker is still a work in progress. Current known false positive: tests/fixtures/narrowing-scopes/guard_clause_in_block_does_not_leak.ts -- narrowing incorrectly leaks past a bare block. When that's fixed, lower maxFalsePositive to 0 so any new false positive fails CI immediately instead of silently sneaking in under this allowance."
+}

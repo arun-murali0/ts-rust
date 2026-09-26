@@ -19,7 +19,7 @@
 // land, not all at once at the very end. --json still buffers into one
 // object, since a partial/streamed JSON document isn't useful.
 //
-// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json]
+// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json] [--only-differ]
 
 const fs = require("fs");
 const path = require("path");
@@ -31,6 +31,7 @@ const args = process.argv.slice(2);
 const positional = args.filter((a) => !a.startsWith("--"));
 const strictOnly = args.includes("--strict-only");
 const asJson = args.includes("--json");
+const onlyDiffer = args.includes("--only-differ");
 
 const [target, tsRustBin] = positional;
 if (!target || !tsRustBin) {
@@ -214,14 +215,25 @@ function flushTier() {
   tierFileCount = 0;
 }
 
+// Tier header is printed lazily, right before the first row that actually
+// gets added -- so under --only-differ, a tier with nothing but MATCHes
+// never prints an empty "== foo ==" heading with no table under it.
+let pendingTierHeader = null;
+function ensureTierHeader() {
+  if (pendingTierHeader !== null) {
+    log("");
+    log(pendingTierHeader);
+    pendingTierHeader = null;
+  }
+}
+
 function renderFile(file, tsRustLines, tscLines) {
   const t = tier(file);
 
   if (t !== currentTier) {
     if (!asJson) {
       flushTier();
-      log("");
-      log(`${c.bold}== ${t} ==${c.reset}`);
+      pendingTierHeader = `${c.bold}== ${t} ==${c.reset}`;
       tierTable = newTierTable();
     }
     currentTier = t;
@@ -229,7 +241,8 @@ function renderFile(file, tsRustLines, tscLines) {
 
   if (tsRustLines.size === 0 && tscLines.size === 0) {
     totalAgree++;
-    if (!asJson) {
+    if (!asJson && !onlyDiffer) {
+      ensureTierHeader();
       tierFileCount++;
       const clean = `${c.dim}did not produce any error or warning${c.reset}`;
       tierTable.push([
@@ -285,7 +298,9 @@ function renderFile(file, tsRustLines, tscLines) {
   });
 
   if (asJson) return;
+  if (onlyDiffer && fileOk) return; // --only-differ: hide files that fully MATCH
 
+  ensureTierHeader();
   tierFileCount++;
   const cellText = (d) =>
     d ? `${d.code} ${d.message.replace(/\s+/g, " ")}` : `${c.dim}—${c.reset}`;

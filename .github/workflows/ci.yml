@@ -72,3 +72,30 @@ jobs:
               exit 1
             fi
           done
+
+  tsc-drift:
+    name: Compare against real tsc (false-positive gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build ts-rust (release)
+        run: cargo build --release --bin ts-rust
+      - name: Install ts-diag-tool dependencies
+        working-directory: scripts/ts-diag-tool
+        run: npm ci
+      - name: Compare ts-rust against real tsc over tests/fixtures
+        # Informational by design: many fixtures deliberately diverge from
+        # tsc on purpose (this checker's own recovery behavior -- see
+        # bin/compare-tsc.rs's module doc comment), so this step's own exit
+        # code is never checked. What's gated is only the false-positive
+        # count, via check-baseline.js in the next step.
+        run: |
+          node scripts/ts-diag-tool/compare.js tests/fixtures target/release/ts-rust --json \
+            > /tmp/tsc-drift-result.json || true
+      - name: Enforce false-positive baseline
+        run: node scripts/ts-diag-tool/check-baseline.js < /tmp/tsc-drift-result.json

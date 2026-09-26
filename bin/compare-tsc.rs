@@ -38,6 +38,31 @@
 //! and are expected to diverge from tsc, so mixing them in would produce
 //! constant, meaningless failures.
 //!
+//! ## Flag-set policy
+//!
+//! ts-rust targets tsc run with `--strict` PLUS these checks, which are real
+//! and commonly enabled but are NOT part of `--strict` itself:
+//! `allowUnreachableCode: false`, `noUncheckedIndexedAccess`,
+//! `noImplicitOverride`, `exactOptionalPropertyTypes`,
+//! `noPropertyAccessFromIndexSignature`, `noFallthroughCasesInSwitch`,
+//! `noImplicitReturns`. Without these, tsc silently never reports several
+//! things ts-rust deliberately implements (e.g. unreachable-code detection),
+//! and a comparison run under plain `--strict` would misreport those as
+//! false positives when they are not -- ts-rust just implements a slightly
+//! stricter default than plain `--strict` ships with.
+//!
+//! KNOWN INCONSISTENCY: this binary currently invokes `tsc` with only
+//! `--strict` (see the tsc invocation below), not the fuller flag set above.
+//! scripts/ts-diag-tool/check-fixtures.js (used by scripts/compare-local.sh)
+//! already uses the fuller set by default. Until this binary is updated to
+//! match, expect this binary's comparison to show false positives for
+//! unreachable-code and `noUncheckedIndexedAccess`-shaped fixtures that
+//! scripts/compare-local.sh correctly reports as MATCH. Prefer
+//! scripts/compare-local.sh's result over this binary's for those cases
+//! until they're reconciled; pass `--strict-only` to compare.js to reproduce
+//! this binary's current (narrower) flag set exactly, for an apples-to-apples
+//! comparison in the meantime.
+//!
 //! IMPORTANT: this binary cannot yet point at a real multi-file project
 //! (e.g. zustand). ts-rust has no cross-file import/export resolution yet,
 //! so every file in a multi-file project would report spurious "cannot see
