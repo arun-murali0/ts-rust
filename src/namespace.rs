@@ -173,7 +173,8 @@ impl<'a> TypeNamespace<'a> {
                     .as_deref()
                     .or_else(|| self.merged_type_parameters(name)),
             ),
-            DeclKind::Class(_) | DeclKind::Resolved => None,
+            DeclKind::Class(class) => Some(class.type_parameters.as_deref()),
+            DeclKind::Resolved => None,
         }
     }
 
@@ -492,7 +493,15 @@ impl<'a> TypeNamespace<'a> {
                 .type_parameters
                 .as_deref()
                 .or_else(|| self.merged_type_parameters(name)),
-            DeclKind::Class(_) | DeclKind::Resolved => None,
+            // A class's own `<T, ...>` list is shadowed the same way an
+            // interface's or alias's is, so a field or method typed `T` (or
+            // referring to the class's own name generically, `next: Box<T>`)
+            // resolves inside resolve_class the same way. Substitution for a
+            // specific `Box<number>` happens later, per reference, exactly as
+            // it does for an interface -- resolve_class itself needs no
+            // change at all for this.
+            DeclKind::Class(class) => class.type_parameters.as_deref(),
+            DeclKind::Resolved => None,
         };
 
         // An interface, a class, and a type-literal alias (`type X = { ... }`)
