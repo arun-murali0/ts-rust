@@ -69,9 +69,8 @@ fn loose_equality_with_null_matches_undefined_too() {
 // and the declared-type mismatch must still fire.
 #[test]
 fn strict_equality_with_null_does_not_match_undefined() {
-    let source = include_str!(
-        "fixtures/misc-fixes/strict_equality_with_null_does_not_match_undefined.ts"
-    );
+    let source =
+        include_str!("fixtures/misc-fixes/strict_equality_with_null_does_not_match_undefined.ts");
     let diagnostics = check(
         source,
         "strict_equality_with_null_does_not_match_undefined.ts",

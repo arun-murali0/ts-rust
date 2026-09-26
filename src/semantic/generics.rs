@@ -23,7 +23,14 @@ pub(crate) fn infer_type_param_bindings(
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
     locked: &[crate::types::TypeParameterId],
 ) {
-    infer_type_param_bindings_inner(arena, param_type, arg_type, bindings, locked, &mut Vec::new())
+    infer_type_param_bindings_inner(
+        arena,
+        param_type,
+        arg_type,
+        bindings,
+        locked,
+        &mut Vec::new(),
+    )
 }
 
 // A recursive param_type (e.g. `Box<T>`'s own self-referential `next: Box<T>`,
@@ -124,7 +131,9 @@ fn infer_type_param_bindings_uncached(
                 return;
             };
             for (p, a) in param_fn.params.iter().zip(&arg_fn.params) {
-                infer_type_param_bindings_inner(arena, p.type_id, a.type_id, bindings, locked, seen);
+                infer_type_param_bindings_inner(
+                    arena, p.type_id, a.type_id, bindings, locked, seen,
+                );
             }
             infer_type_param_bindings_inner(
                 arena,
@@ -480,12 +489,7 @@ fn collect_generic_param_constraints_inner(
         }
         Type::Object(o) => {
             for property in &o.properties {
-                collect_generic_param_constraints_inner(
-                    arena,
-                    property.type_id,
-                    constraints,
-                    seen,
-                );
+                collect_generic_param_constraints_inner(arena, property.type_id, constraints, seen);
             }
         }
         Type::Union(members) => {

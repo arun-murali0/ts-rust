@@ -79,7 +79,8 @@ pub fn resolve_ts_type(
             // so an unusual user-defined `interface Array { ... }` is never
             // shadowed by this.
             if !namespace.contains(&id.name) {
-                if let Some(builtin) = resolve_builtin_generic(&id.name, reference, namespace, arena)
+                if let Some(builtin) =
+                    resolve_builtin_generic(&id.name, reference, namespace, arena)
                 {
                     return Some(builtin);
                 }

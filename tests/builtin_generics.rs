@@ -32,15 +32,17 @@ fn array_generic_syntax_resolves_like_bracket_syntax() {
     let source = include_str!(
         "fixtures/builtin-generics/array_generic_syntax_resolves_like_bracket_syntax.ts"
     );
-    let diagnostics = check(source, "array_generic_syntax_resolves_like_bracket_syntax.ts");
+    let diagnostics = check(
+        source,
+        "array_generic_syntax_resolves_like_bracket_syntax.ts",
+    );
     single_error(&diagnostics, DiagnosticCode::ReturnTypeMismatch);
 }
 
 #[test]
 fn array_generic_element_type_mismatch_is_caught() {
-    let source = include_str!(
-        "fixtures/builtin-generics/array_generic_element_type_mismatch_is_caught.ts"
-    );
+    let source =
+        include_str!("fixtures/builtin-generics/array_generic_element_type_mismatch_is_caught.ts");
     let diagnostics = check(source, "array_generic_element_type_mismatch_is_caught.ts");
     single_error(&diagnostics, DiagnosticCode::DeclaredTypeMismatch);
 }
@@ -71,10 +73,7 @@ fn promise_return_type_no_longer_blocks_resolution() {
     let source = include_str!(
         "fixtures/builtin-generics/promise_return_type_no_longer_blocks_resolution.ts"
     );
-    let diagnostics = check(
-        source,
-        "promise_return_type_no_longer_blocks_resolution.ts",
-    );
+    let diagnostics = check(source, "promise_return_type_no_longer_blocks_resolution.ts");
     single_error(&diagnostics, DiagnosticCode::ArgumentNotAssignable);
 }
 
