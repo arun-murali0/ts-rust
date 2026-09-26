@@ -135,9 +135,20 @@ pub(super) fn check_class_declaration(
                     });
                 let outer_return_type =
                     std::mem::replace(&mut ctx.current_return_type, return_type);
+                // `this` inside a static method is not the instance -- tsc types
+                // it as the class's constructor type, which this checker does
+                // not model. Clearing current_class_instance to None for just
+                // this body (rather than leaving the outer_class_instance value
+                // set above in place) stops `this` from wrongly resolving to the
+                // instance type here; it falls into the same Error-sentinel,
+                // no-diagnostic case a `this` of legitimately unknown origin
+                // already gets (see the doc comment on Expression::ThisExpression
+                // in expressions/mod.rs), rather than being silently wrong.
+                let outer_class_instance_for_this = ctx.current_class_instance.take();
                 for body_stmt in &method_body.statements {
                     check_statement(body_stmt, scoping, ctx);
                 }
+                ctx.current_class_instance = outer_class_instance_for_this;
                 ctx.current_return_type = outer_return_type;
             }
 
