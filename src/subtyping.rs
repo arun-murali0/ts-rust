@@ -10,6 +10,22 @@ use crate::types::{ObjectType, Param, Type};
 // that already failed to check, would need its own arm in every single case of that
 // match instead of one shared escape hatch here.
 pub fn is_subtype(arena: &TypeArena, sub: TypeId, sup: TypeId) -> bool {
+    is_subtype_inner(arena, sub, sup, &mut Vec::new())
+}
+
+// A recursive type (Node { next: Node }, built by namespace::resolve's
+// placeholder backpatch) means comparing sub and sup can lead back to
+// comparing the same (sub, sup) pair again before either call has returned.
+// `seen` tracks pairs currently on the call stack. Re-entering one is treated
+// as true (coinductively: two types that only differ by "going in circles"
+// are equivalent) rather than as a fresh comparison to keep making -- this is
+// the standard rule for equirecursive subtyping and is what breaks the loop.
+fn is_subtype_inner(
+    arena: &TypeArena,
+    sub: TypeId,
+    sup: TypeId,
+    seen: &mut Vec<(TypeId, TypeId)>,
+) -> bool {
     if sub == sup {
         return true;
     }
@@ -18,6 +34,22 @@ pub fn is_subtype(arena: &TypeArena, sub: TypeId, sup: TypeId) -> bool {
         return true;
     }
 
+    let pair = (sub, sup);
+    if seen.contains(&pair) {
+        return true;
+    }
+    seen.push(pair);
+    let result = is_subtype_uncached(arena, sub, sup, seen);
+    seen.pop();
+    result
+}
+
+fn is_subtype_uncached(
+    arena: &TypeArena,
+    sub: TypeId,
+    sup: TypeId,
+    seen: &mut Vec<(TypeId, TypeId)>,
+) -> bool {
     match (arena.get(sub), arena.get(sup)) {
         (_, Type::Unknown) => true,
 
@@ -42,17 +74,17 @@ pub fn is_subtype(arena: &TypeArena, sub: TypeId, sup: TypeId) -> bool {
         // matching one alternative is enough to satisfy an expected union.
         (Type::Union(sub_members), _) => sub_members
             .iter()
-            .all(|&member| is_subtype(arena, member, sup)),
+            .all(|&member| is_subtype_inner(arena, member, sup, seen)),
 
         (_, Type::Union(sup_members)) => sup_members
             .iter()
-            .any(|&member| is_subtype(arena, sub, member)),
+            .any(|&member| is_subtype_inner(arena, sub, member, seen)),
 
-        (Type::Function(a), Type::Function(b)) => function_is_subtype(arena, a, b),
+        (Type::Function(a), Type::Function(b)) => function_is_subtype(arena, a, b, seen),
 
-        (Type::Array(a), Type::Array(b)) => is_subtype(arena, *a, *b),
+        (Type::Array(a), Type::Array(b)) => is_subtype_inner(arena, *a, *b, seen),
 
-        (Type::Object(a), Type::Object(b)) => object_is_subtype(arena, a, b),
+        (Type::Object(a), Type::Object(b)) => object_is_subtype(arena, a, b, seen),
 
         _ => false,
     }
@@ -68,8 +100,9 @@ fn function_is_subtype(
     arena: &TypeArena,
     sub: &crate::types::FunctionType,
     sup: &crate::types::FunctionType,
+    seen: &mut Vec<(TypeId, TypeId)>,
 ) -> bool {
-    function_is_subtype_with(arena, sub, sup, false)
+    function_is_subtype_with(arena, sub, sup, false, seen)
 }
 
 // `bivariant_params` is tsc's rule for methods: a parameter position is compatible
@@ -80,6 +113,7 @@ fn function_is_subtype_with(
     sub: &crate::types::FunctionType,
     sup: &crate::types::FunctionType,
     bivariant_params: bool,
+    seen: &mut Vec<(TypeId, TypeId)>,
 ) -> bool {
     // sub cannot require more arguments than callers of sup are guaranteed to
     // supply. It is free to require fewer; its extra optional or rest slots simply
@@ -93,14 +127,14 @@ fn function_is_subtype_with(
         if let (Some(sub_param), Some(sup_param)) = (
             param_type_at(arena, &sub.params, position),
             param_type_at(arena, &sup.params, position),
-        ) && !is_subtype(arena, sup_param, sub_param)
-            && !(bivariant_params && is_subtype(arena, sub_param, sup_param))
+        ) && !is_subtype_inner(arena, sup_param, sub_param, seen)
+            && !(bivariant_params && is_subtype_inner(arena, sub_param, sup_param, seen))
         {
             return false;
         }
     }
 
-    is_subtype(arena, sub.return_type, sup.return_type)
+    is_subtype_inner(arena, sub.return_type, sup.return_type, seen)
 }
 
 fn required_param_count(params: &[Param]) -> usize {
@@ -132,7 +166,12 @@ fn param_type_at(arena: &TypeArena, params: &[Param], position: usize) -> Option
 // the peekable iterator, which is where width subtyping (sub may have more fields
 // than sup) falls out for free, and any sup property sub never reaches is only
 // acceptable if sup itself marks that property optional.
-fn object_is_subtype(arena: &TypeArena, sub: &ObjectType, sup: &ObjectType) -> bool {
+fn object_is_subtype(
+    arena: &TypeArena,
+    sub: &ObjectType,
+    sup: &ObjectType,
+    seen: &mut Vec<(TypeId, TypeId)>,
+) -> bool {
     // The merge-join below silently gives wrong answers on unsorted input, so an
     // unsorted ObjectType reaching here is a construction bug elsewhere, not
     // something to tolerate. Checked in debug builds (which is what the tests run).
@@ -156,7 +195,7 @@ fn object_is_subtype(arena: &TypeArena, sub: &ObjectType, sup: &ObjectType) -> b
                     if sub_property.optional && !sup_property.optional {
                         return false;
                     }
-                    if !property_is_subtype(arena, sub_property.type_id, sup_property) {
+                    if !property_is_subtype(arena, sub_property.type_id, sup_property, seen) {
                         return false;
                     }
                     continue 'sup_properties;
@@ -181,14 +220,15 @@ fn property_is_subtype(
     arena: &TypeArena,
     sub_type: TypeId,
     sup_property: &crate::types::PropertyEntry,
+    seen: &mut Vec<(TypeId, TypeId)>,
 ) -> bool {
     if sup_property.is_method
         && let (Type::Function(sub_function), Type::Function(sup_function)) =
             (arena.get(sub_type), arena.get(sup_property.type_id))
     {
-        return function_is_subtype_with(arena, sub_function, sup_function, true);
+        return function_is_subtype_with(arena, sub_function, sup_function, true, seen);
     }
-    is_subtype(arena, sub_type, sup_property.type_id)
+    is_subtype_inner(arena, sub_type, sup_property.type_id, seen)
 }
 
 fn is_sorted_by_name(properties: &[crate::types::PropertyEntry]) -> bool {
