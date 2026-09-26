@@ -72,6 +72,19 @@ pub fn resolve_ts_type(
             let TSTypeName::IdentifierReference(id) = &reference.type_name else {
                 return None;
             };
+
+            // A handful of TypeScript's own built-in generics aren't declared
+            // anywhere in user source, so the namespace would never find them.
+            // Only consulted when the namespace doesn't already claim the name,
+            // so an unusual user-defined `interface Array { ... }` is never
+            // shadowed by this.
+            if !namespace.contains(&id.name) {
+                if let Some(builtin) = resolve_builtin_generic(&id.name, reference, namespace, arena)
+                {
+                    return Some(builtin);
+                }
+            }
+
             let base = match namespace.resolve(&id.name, arena) {
                 Resolution::Resolved(type_id) => type_id,
                 Resolution::Circular | Resolution::NotFound => return None,
@@ -216,6 +229,64 @@ fn check_type_argument_constraint(
     }
     if !crate::subtyping::is_subtype(arena, argument, constraint) {
         namespace.note_constraint_violation(parameter_name, argument, constraint, span);
+    }
+}
+
+// TypeScript's own built-in generics that this checker gives at least a
+// partial, honest representation rather than leaving totally unresolvable --
+// which, before Void got the same treatment, could take an entire enclosing
+// interface or function down with it through a single `?`.
+//
+// `Array<T>`/`ReadonlyArray<T>` map onto this checker's existing array type
+// directly, the same as `T[]`, including propagating a failure to resolve
+// their own argument the same way `T[]` does. tsc actually requires the
+// argument here (TS2314) rather than defaulting a bare `Array` to
+// `Array<any>`, so a missing argument is treated the same as an unresolvable
+// one -- this checker doesn't raise its own arity diagnostic for a built-in
+// (only for a user's own generic), but it won't silently invent `any` either.
+//
+// `Promise<T>` has no await/`.then()` modeling at all yet, so it resolves to
+// an opaque, empty, named object: honest about what isn't checked (member
+// access on it correctly reports "does not exist") without blocking
+// everything around it. Unlike Array, a bad argument doesn't fail the whole
+// type here -- nothing structurally depends on it being right, since nothing
+// looks inside a Promise anyway, so it's treated the same lenient way an
+// unresolvable explicit argument is treated for a user-defined generic
+// elsewhere in this file.
+//
+// `Record`, `Partial`, and friends need an index signature or mapped-type
+// concept this checker doesn't have yet, and are deliberately left alone; a
+// plain `Record<K, V>` still resolves to nothing.
+fn resolve_builtin_generic(
+    name: &str,
+    reference: &oxc_ast::ast::TSTypeReference,
+    namespace: &mut TypeNamespace,
+    arena: &mut TypeArena,
+) -> Option<TypeId> {
+    let first_type_argument = |namespace: &mut TypeNamespace, arena: &mut TypeArena| {
+        reference
+            .type_arguments
+            .as_ref()
+            .and_then(|arguments| arguments.params.first())
+            .map(|argument| resolve_ts_type(argument, namespace, arena))
+    };
+
+    match name {
+        "Array" | "ReadonlyArray" => {
+            let element = first_type_argument(namespace, arena)??;
+            Some(arena.alloc(Type::Array(element)))
+        }
+        "Promise" => {
+            let argument = match first_type_argument(namespace, arena) {
+                Some(resolved) => resolved.unwrap_or_else(|| arena.error()),
+                None => arena.void(),
+            };
+            let argument_text = crate::type_display::display_type(arena, argument);
+            let opaque = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+            arena.set_display_name(opaque, format!("Promise<{argument_text}>"));
+            Some(opaque)
+        }
+        _ => None,
     }
 }
 
