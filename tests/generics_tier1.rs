@@ -60,9 +60,22 @@ fn generic_multiple_type_params_infer_independently() {
 fn generic_array_element_type_is_inferred() {
     let source = include_str!("fixtures/generics-tier1/generic_array_element_type_is_inferred.ts");
     let diagnostics = check(source, "generic_array_element_type_is_inferred.ts");
+    // This used to assert no diagnostics. d91f583 ("Include undefined on array
+    // element access consistently") made `items[0]` include `| undefined` for
+    // *every* array, including a generic `T[]`, so `firstElement`'s body now
+    // honestly returns `T | undefined` against a declared `T`. That's the one
+    // expected diagnostic here; it does not affect what this test actually
+    // checks, which is that `T` is still inferred correctly at the call site
+    // (`const n: number = firstElement([1, 2, 3])` still needs no diagnostic
+    // of its own).
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic (the honest element | undefined vs T mismatch), got: {diagnostics:?}"
+    );
     assert!(
-        diagnostics.is_empty(),
-        "expected no false positives, got: {diagnostics:?}"
+        diagnostics[0].message.contains("declared return type"),
+        "got: {diagnostics:?}"
     );
 }
 
@@ -81,9 +94,24 @@ fn two_generic_functions_share_type_param_name_without_cross_contamination() {
     let source =
         include_str!("fixtures/generics-tier1/two_generic_functions_share_type_param_name.ts");
     let diagnostics = check(source, "two_generic_functions_share_type_param_name.ts");
+    // This used to assert no diagnostics. Same cause as
+    // generic_array_element_type_is_inferred: d91f583 made `firstOf`'s
+    // `items[0]` include `| undefined`, so its body now mismatches its
+    // declared `T`. That one diagnostic is expected and orthogonal to what
+    // this test actually verifies -- that resolving `firstOf`'s `T` and
+    // `identity`'s `T` stay independent. Cross-contamination would show up
+    // as a second, unexpected diagnostic on `const b: string =
+    // identity("hello")` (e.g. `T` resolved to `number` there instead of
+    // `string`), so asserting exactly one diagnostic, and that it's the
+    // known `firstOf` mismatch, still proves no leak occurred.
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic (the honest element | undefined vs T mismatch in firstOf), got: {diagnostics:?}"
+    );
     assert!(
-        diagnostics.is_empty(),
-        "expected no false positives, got: {diagnostics:?}"
+        diagnostics[0].message.contains("declared return type"),
+        "got: {diagnostics:?}"
     );
 }
 

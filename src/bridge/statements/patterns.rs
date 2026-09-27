@@ -102,15 +102,24 @@ fn bind_array_pattern(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) {
-    let element_type = match ctx.arena.get(type_id) {
-        Type::Array(element) => *element,
-        Type::Any | Type::Error => type_id,
+    // Whether `type_id` was an honest `T[]`, distinct from the Any/Error/
+    // not-an-array fallbacks below, all of which also set `element_type` but
+    // must not get the "| undefined" treatment applied further down: adding
+    // undefined to an already-Error element type produces a second, cascading
+    // diagnostic (e.g. "undefined | error does not match declared return type
+    // number") on top of the real array_destructuring_requires_array error
+    // already reported for the bad source, the same cascade
+    // bind_object_pattern's rest-destructuring case avoids by binding
+    // straight to Error instead of wrapping it further.
+    let (element_type, is_real_array) = match ctx.arena.get(type_id) {
+        Type::Array(element) => (*element, true),
+        Type::Any | Type::Error => (type_id, false),
         _ => {
             ctx.error(
                 crate::diagnostic_messages::messages::array_destructuring_requires_array(),
                 array.span(),
             );
-            ctx.arena.error()
+            (ctx.arena.error(), false)
         }
     };
 
@@ -119,10 +128,18 @@ fn bind_array_pattern(
         // infer_computed_member_access_type): destructuring past the end of a
         // real array yields undefined at runtime, and this checker cannot
         // prove the array is long enough to cover every position destructured,
-        // so each bound element includes undefined regardless of its position.
-        let element_type_with_undefined =
-            ctx.arena.alloc_union(vec![element_type, ctx.arena.undefined()]);
-        bind_pattern(element_pattern, element_type_with_undefined, scoping, ctx);
+        // so each bound element includes undefined regardless of its position
+        // -- but only when there is a real array element type to union it
+        // with in the first place. Any/Error stay as-is, so a bad source
+        // (or an already-Any/Error one) doesn't cascade into a second,
+        // unrelated diagnostic on every use of the destructured bindings.
+        let bound_type = if is_real_array {
+            ctx.arena
+                .alloc_union(vec![element_type, ctx.arena.undefined()])
+        } else {
+            element_type
+        };
+        bind_pattern(element_pattern, bound_type, scoping, ctx);
     }
 
     // Array rest does have a precise type, unlike object rest above: whatever is

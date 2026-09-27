@@ -84,9 +84,23 @@ fn rest_param_identifier_is_bound_as_an_array() {
         "fixtures/parameters-destructuring/rest_param_identifier_is_bound_as_array.ts"
     );
     let diagnostics = check(source, "rest_param_identifier_is_bound_as_array.ts");
+    // This used to assert no diagnostics, on the assumption that `values[0]`
+    // on a rest param bound as `number[]` is a plain `number`. Same cause as
+    // the other array-indexing fixtures fixed alongside d91f583: this checker
+    // adds `| undefined` to every element access, so `values[0]` assigned
+    // into a `const value: number` is a real mismatch. The rest-param
+    // binding itself (the thing this test actually covers) is still
+    // correct -- `values` is bound as `number[]`, not `any` or something
+    // unbound, which is why there's exactly this one diagnostic and not, say,
+    // a property-does-not-exist error.
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic (the honest element | undefined vs number mismatch), got: {diagnostics:?}"
+    );
     assert!(
-        diagnostics.is_empty(),
-        "expected no false positives, got: {diagnostics:?}"
+        diagnostics[0].message.contains("not assignable to type"),
+        "got: {diagnostics:?}"
     );
 }
 

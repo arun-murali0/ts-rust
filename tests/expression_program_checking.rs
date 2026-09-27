@@ -649,13 +649,26 @@ fn switch_case_body_checks_clean_including_default() {
 }
 
 #[test]
-fn array_indexing_with_numeric_literal_checks_clean() {
+fn array_indexing_with_numeric_literal_result_includes_undefined() {
     let source =
         include_str!("fixtures/expression-program-checking/array_indexing_numeric_literal.ts");
     let diagnostics = check(source, "array_indexing_numeric_literal.ts");
+    // This used to assert no diagnostics, on the assumption that a literal
+    // index (`numbers[0]`) is provably in bounds and so yields a plain
+    // `number`. d91f583 removed that assumption: this checker does not track
+    // array lengths any more than tsc does under noUncheckedIndexedAccess, so
+    // a literal index includes `| undefined` exactly like a variable index
+    // does (see array_indexing_with_dynamic_key_result_includes_undefined).
+    // Declaring the return type as plain `number` is therefore a real
+    // mismatch, the same one tsc reports on this line.
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic (the honest element | undefined vs number mismatch), got: {diagnostics:?}"
+    );
     assert!(
-        diagnostics.is_empty(),
-        "expected no false positives, got: {diagnostics:?}"
+        diagnostics[0].message.contains("declared return type"),
+        "got: {diagnostics:?}"
     );
 }
 
