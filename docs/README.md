@@ -21,10 +21,12 @@ Expression and Program Checking
     ↓
 Parameters and Destructuring
     ↓
-Generics Tier 1  ← current baseline
+Generics (functions, interfaces, aliases, classes, recursion, builtins) ← current baseline, substantially complete
 ```
 
 These names describe capabilities. They are not release versions and should not be interpreted as a versioning scheme.
+
+For the full, item-by-item picture of what's checked and what isn't across the entire TypeScript type system (not just this milestone list), see [`checklist.md`](../checklist.md) at the repository root — it's the actively maintained source of truth for current coverage, kept more granular than this milestone list.
 
 ## Milestones
 
@@ -37,7 +39,9 @@ These names describe capabilities. They are not release versions and should not 
 | Classes and Inheritance | Model class members, constructors, inheritance, static state, and `this`. | `tests/classes_inheritance.rs` | [classes-inheritance](classes-inheritance.md) |
 | Expression and Program Checking | Expand expression inference, calls, members, logical operations, loops, switches, assertions, and program-level checking. | `tests/expression_program_checking.rs` | [expression-program-checking](expression-program-checking.md) |
 | Parameters and Destructuring | Model parameter metadata and binding/destructuring semantics. | `tests/parameters_destructuring.rs` | [parameters-destructuring](parameters-destructuring.md) |
-| Generics Tier 1 | Establish reusable generic function inference, substitution, and type-parameter scoping. | `tests/generics_tier1.rs` | [generics-tier1](generics-tier1.md) |
+| Generics | Type parameters on functions, interfaces, aliases, and classes: inference, substitution, constraints, defaults, explicit type arguments, recursive generic shapes, and builtin generics (`Array<T>`, opaque `Promise<T>`). One consolidated document, not split by tier — see it for why. | `tests/generics_tier1.rs`, `tests/generics_tier2.rs`, `tests/generic_classes.rs`, `tests/recursive_types.rs`, `tests/builtin_generics.rs`, `tests/interface_methods.rs` | [generics](generics.md) |
+
+A handful of smaller, cross-cutting suites support these milestones rather than being their own tier: `tests/call_arity.rs`, `tests/void_and_never.rs`, `tests/unreachable_code.rs`, `tests/named_types_in_messages.rs`, `tests/diagnostic_codes.rs`, `tests/misc_fixes.rs`, and `tests/subtype_cache_stress.rs` (a performance/correctness regression suite, not a feature milestone).
 
 ## Architecture
 
@@ -63,27 +67,9 @@ Oxc remains the front-end foundation. ts-rust implements the semantic behavior t
 
 ## Roadmap
 
-[roadmap.md](roadmap.md) describes the intended progression after Generics Tier 1:
+[roadmap.md](roadmap.md) covers the project's longer-term direction (semantic facts, typed IR, project-scale checking, performance philosophy) that doesn't change week to week.
 
-```text
-stronger generic constraints/inference
-        ↓
-keyof + indexed access
-        ↓
-overloads + contextual typing
-        ↓
-mapped types
-        ↓
-conditional types + infer
-        ↓
-utility types
-        ↓
-semantic facts
-        ↓
-typed IR
-```
-
-This is a dependency-oriented plan, not a promise that every TypeScript feature will arrive in that exact order.
+For the actual current build order — what's next and why, in priority order — see [`BUILD.md`](../BUILD.md) at the repository root, which is derived from and stays in sync with `checklist.md`. Both are updated more frequently than this documentation and are the ones to check for "what's actually being worked on right now."
 
 ## Testing and performance
 
