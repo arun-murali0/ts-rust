@@ -10,6 +10,7 @@ use crate::type_annotation::{
     resolve_function_params, resolve_object_members, resolve_ts_type, resolve_type_annotation,
 };
 use crate::types::{ObjectType, PropertyEntry, Type, TypeParameterId};
+use crate::semantic::substitute_type_params;
 
 // A type namespace is a single flat map from name to declaration, not a scope tree.
 // There is no block or module scoping for types in this checker; every top-level
@@ -620,6 +621,32 @@ impl<'a> TypeNamespace<'a> {
         if let Some(heritage) = &class.heritage {
             if let Expression::Identifier(parent_name) = &heritage.expression {
                 if let Resolution::Resolved(parent_type) = self.resolve(&parent_name.name, arena) {
+                    // `extends Animal<string>`: the parent's own declared type
+                    // parameters (if any) are bound to the arguments given here,
+                    // one per declared parameter in order, the same way a type
+                    // reference like `Box<number>` substitutes in
+                    // type_annotation.rs. A parent with no type parameters, or
+                    // heritage with no `<...>` at all, just uses the parent's
+                    // shape as-is -- the common, non-generic case.
+                    let parent_type = match self.declared_type_param_decl(&parent_name.name) {
+                        Some(decl) => {
+                            let mut bindings: Vec<(TypeParameterId, TypeId)> =
+                                Vec::with_capacity(decl.params.len());
+                            for (index, param) in decl.params.iter().enumerate() {
+                                let parameter_id =
+                                    TypeParameterId::new(param.span().start, index as u32);
+                                let bound = heritage
+                                    .type_arguments
+                                    .as_ref()
+                                    .and_then(|args| args.params.get(index))
+                                    .and_then(|arg| resolve_ts_type(arg, self, arena))
+                                    .unwrap_or_else(|| arena.error());
+                                bindings.push((parameter_id, bound));
+                            }
+                            substitute_type_params(arena, parent_type, &bindings)
+                        }
+                        None => parent_type,
+                    };
                     if let Type::Object(parent_object) = arena.get(parent_type) {
                         properties = parent_object.properties.clone();
                     }

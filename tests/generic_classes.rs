@@ -116,3 +116,31 @@ fn generic_class_method_assigns_this_property() {
     let diagnostics = check(source, "generic_class_method_assigns_this_property.ts");
     single_error(&diagnostics, DiagnosticCode::ArgumentNotAssignable);
 }
+
+// `extends Box<number>`: the parent's own declared type parameter is bound to
+// the argument given in the heritage clause, the same way a type reference
+// like Box<number> substitutes elsewhere. Previously the heritage clause only
+// captured the parent's name, never its type arguments, so an inherited
+// generic base kept its bare, unsubstituted shape.
+#[test]
+fn generic_base_class_field_is_substituted() {
+    let source =
+        include_str!("fixtures/generic-classes/generic_base_class_field_is_substituted.ts");
+    let diagnostics = check(source, "generic_base_class_field_is_substituted.ts");
+    single_error(&diagnostics, DiagnosticCode::ReturnTypeMismatch);
+}
+
+// An explicit type argument on `new` locks T the same way it does for a
+// generic function call, overriding what the constructor argument would
+// otherwise have inferred.
+#[test]
+fn explicit_type_argument_on_new_overrides_inference() {
+    let source = include_str!(
+        "fixtures/generic-classes/explicit_type_argument_on_new_overrides_inference.ts"
+    );
+    let diagnostics = check(
+        source,
+        "explicit_type_argument_on_new_overrides_inference.ts",
+    );
+    single_error(&diagnostics, DiagnosticCode::ArgumentNotAssignable);
+}
