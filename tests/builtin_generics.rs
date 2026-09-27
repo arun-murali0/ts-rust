@@ -91,3 +91,33 @@ fn promise_member_access_correctly_reports_missing_property() {
     );
     single_error(&diagnostics, DiagnosticCode::PropertyDoesNotExist);
 }
+
+// The practical case this was for, the same class of bug void and Promise
+// both had before they were wired up: a Record-typed property used to make
+// the whole containing interface unresolvable.
+#[test]
+fn record_no_longer_blocks_resolution() {
+    let source = include_str!("fixtures/builtin-generics/record_no_longer_blocks_resolution.ts");
+    let diagnostics = check(source, "record_no_longer_blocks_resolution.ts");
+    single_error(&diagnostics, DiagnosticCode::DeclaredTypeMismatch);
+}
+
+#[test]
+fn record_dot_access_returns_value_type() {
+    let source =
+        include_str!("fixtures/builtin-generics/record_dot_access_returns_value_type.ts");
+    let diagnostics = check(source, "record_dot_access_returns_value_type.ts");
+    assert!(errors(&diagnostics).is_empty(), "got: {diagnostics:?}");
+}
+
+// K is not modelled -- see TypeArena::record_value_type's own doc comment --
+// so this only proves a computed access resolves and returns V, not that a
+// key outside K would be rejected (it wouldn't be, which is the documented,
+// deliberate under-check).
+#[test]
+fn record_bracket_access_returns_value_type() {
+    let source =
+        include_str!("fixtures/builtin-generics/record_bracket_access_returns_value_type.ts");
+    let diagnostics = check(source, "record_bracket_access_returns_value_type.ts");
+    assert!(errors(&diagnostics).is_empty(), "got: {diagnostics:?}");
+}

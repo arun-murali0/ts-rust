@@ -63,17 +63,20 @@ pub(crate) fn infer_member_access_type(
 
     match object.properties.iter().find(|p| *p.name == *property_name) {
         Some(property) => property.type_id,
-        None => {
-            ctx.error(
-                crate::diagnostic_messages::messages::property_does_not_exist(
-                    &ctx.arena,
-                    property_name,
-                    effective_type,
-                ),
-                span,
-            );
-            ctx.arena.error()
-        }
+        None => match ctx.arena.record_value_type(effective_type) {
+            Some(value_type) => value_type,
+            None => {
+                ctx.error(
+                    crate::diagnostic_messages::messages::property_does_not_exist(
+                        &ctx.arena,
+                        property_name,
+                        effective_type,
+                    ),
+                    span,
+                );
+                ctx.arena.error()
+            }
+        },
     }
 }
 
@@ -107,6 +110,13 @@ pub(super) fn infer_computed_member_access_type(
 ) -> TypeId {
     let key_type = infer_expression_type(key_expr, scoping, ctx);
 
+    // A Record<K, V>-tagged object accepts any key and yields V -- see
+    // TypeArena::record_value_type's own doc comment on why K itself is not
+    // checked here.
+    if let Some(value_type) = ctx.arena.record_value_type(object_type) {
+        return value_type;
+    }
+
     if let &Type::Array(element_type) = ctx.arena.get(object_type) {
         // Every access to an array element, whether the index is a literal or
         // not, includes undefined: a literal index being in range is no more
@@ -114,9 +124,7 @@ pub(super) fn infer_computed_member_access_type(
         // (like tsc under noUncheckedIndexedAccess) does not track array
         // lengths. `arr[0]` and `arr[i]` are both indexing past the end of a
         // real array at runtime if the array turns out to be empty.
-        return ctx
-            .arena
-            .alloc_union(vec![element_type, ctx.arena.undefined()]);
+        return ctx.arena.alloc_union(vec![element_type, ctx.arena.undefined()]);
     }
 
     let Expression::StringLiteral(key) = key_expr else {

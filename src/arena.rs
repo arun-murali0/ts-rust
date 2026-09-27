@@ -16,6 +16,15 @@ pub struct TypeArena {
     // alloc() never reuses a TypeId for a different value (see its own doc
     // comment) -- one TypeId always means one thing for the life of this arena.
     display_names: FxHashMap<TypeId, String>,
+
+    // The value type of a `Record<K, V>`-shaped TypeId (see
+    // type_annotation::resolve_builtin_generic). Record has no real index
+    // signature representation here -- this is a narrower, honest stand-in: a
+    // property access on a Record-tagged TypeId returns this value type for
+    // *any* key, rather than modelling K at all (so a Record<"a" | "b",
+    // number> does not reject an unrelated key the way tsc would). Same
+    // TypeId-uniqueness safety as display_names above.
+    record_value_types: FxHashMap<TypeId, TypeId>,
 }
 
 impl TypeArena {
@@ -27,6 +36,7 @@ impl TypeArena {
         let mut arena = Self {
             types: Vec::new(),
             display_names: FxHashMap::default(),
+            record_value_types: FxHashMap::default(),
         };
 
         arena.alloc(Type::Number);
@@ -95,6 +105,14 @@ impl TypeArena {
 
     pub fn display_name(&self, type_id: TypeId) -> Option<&str> {
         self.display_names.get(&type_id).map(String::as_str)
+    }
+
+    pub fn set_record_value_type(&mut self, record_type: TypeId, value_type: TypeId) {
+        self.record_value_types.insert(record_type, value_type);
+    }
+
+    pub fn record_value_type(&self, type_id: TypeId) -> Option<TypeId> {
+        self.record_value_types.get(&type_id).copied()
     }
 
     // Allocates an empty object shape and hands back its id, to be filled in

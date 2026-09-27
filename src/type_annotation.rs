@@ -255,9 +255,15 @@ fn check_type_argument_constraint(
 // unresolvable explicit argument is treated for a user-defined generic
 // elsewhere in this file.
 //
-// `Record`, `Partial`, and friends need an index signature or mapped-type
-// concept this checker doesn't have yet, and are deliberately left alone; a
-// plain `Record<K, V>` still resolves to nothing.
+// `Record<K, V>` gets the same opaque-object treatment as Promise, plus one
+// more thing Promise doesn't need: its value type V is recorded on the
+// arena (see TypeArena::set_record_value_type) so a later property access
+// can return V instead of "does not exist". This does not model K at all --
+// any key is accepted, not just ones K would allow -- so it under-checks
+// rather than risking a false positive on a key it can't classify. `Partial`
+// and other mapped types need real mapped-type support this checker doesn't
+// have yet, and are deliberately left alone; a plain `Partial<T>` still
+// resolves to nothing.
 fn resolve_builtin_generic(
     name: &str,
     reference: &oxc_ast::ast::TSTypeReference,
@@ -285,6 +291,29 @@ fn resolve_builtin_generic(
             let argument_text = crate::type_display::display_type(arena, argument);
             let opaque = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
             arena.set_display_name(opaque, format!("Promise<{argument_text}>"));
+            Some(opaque)
+        }
+        "Record" => {
+            let key_argument = first_type_argument(namespace, arena)
+                .map(|resolved| resolved.unwrap_or_else(|| arena.error()));
+            let value_argument = reference
+                .type_arguments
+                .as_ref()
+                .and_then(|arguments| arguments.params.get(1))
+                .map(|argument| {
+                    resolve_ts_type(argument, namespace, arena).unwrap_or_else(|| arena.error())
+                });
+            let (Some(key), Some(value)) = (key_argument, value_argument) else {
+                // Fewer than two arguments: not a well-formed Record. Left
+                // unresolvable rather than guessing at a key or value type
+                // that was never given.
+                return None;
+            };
+            let key_text = crate::type_display::display_type(arena, key);
+            let value_text = crate::type_display::display_type(arena, value);
+            let opaque = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+            arena.set_display_name(opaque, format!("Record<{key_text}, {value_text}>"));
+            arena.set_record_value_type(opaque, value);
             Some(opaque)
         }
         _ => None,
