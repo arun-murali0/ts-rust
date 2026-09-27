@@ -7,6 +7,7 @@ use crate::types::Type;
 
 use super::context::CheckContext;
 
+mod assignment;
 mod binary;
 mod calls;
 mod core;
@@ -23,6 +24,7 @@ pub(super) use crate::semantic::{
     collect_generic_param_constraints, expected_param_type, infer_type_param_bindings,
     ordered_generic_param_ids, substitute_type_params,
 };
+use assignment::infer_assignment_expression_type;
 use binary::infer_binary_expression_type;
 use calls::{infer_call_expression_type, infer_new_expression_type};
 pub(super) use core::resolve_identifier_type;
@@ -133,6 +135,10 @@ pub fn infer_expression_type(
 
         Expression::TSNonNullExpression(non_null) => {
             infer_non_null_expression_type(non_null, scoping, ctx)
+        }
+
+        Expression::AssignmentExpression(assign) => {
+            infer_assignment_expression_type(assign, scoping, ctx)
         }
 
         Expression::UnaryExpression(unary)
