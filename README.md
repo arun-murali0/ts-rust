@@ -81,7 +81,7 @@ The project is also an architecture study. The implementation is intentionally b
 
 ## Current implementation
 
-The project records progress using **semantic milestone names**, not opaque version labels. The current baseline is **Generics Tier 1**.
+The project records progress using **semantic milestone names**, not opaque version labels. The current baseline is **Generics** — substantially complete across functions, interfaces, type aliases, and classes (see [docs/generics.md](docs/generics.md)) — with `checklist.md` at the repository root tracking the full TypeScript type-system surface item by item, and `BUILD.md` tracking the current build order beyond it.
 
 ```text
 Foundation
@@ -91,7 +91,7 @@ Control-Flow Narrowing
 Classes and Inheritance
 Expression and Program Checking
 Parameters and Destructuring
-Generics Tier 1                 <- current baseline
+Generics                         <- current baseline
 ```
 
 These names are deliberately descriptive so a contributor can infer the purpose of a test suite or document without first learning an arbitrary version history.
@@ -160,24 +160,35 @@ tests/fixtures/
 ├── classes-inheritance/
 ├── expression-program-checking/
 ├── parameters-destructuring/
-└── generics-tier1/
+├── generics-tier1/
+├── generics-tier2/
+├── generic-classes/
+├── recursive-types/
+├── builtin-generics/
+├── interface-methods/
+└── unreachable-code/
 
 docs/
 ├── README.md
 ├── architecture.md
+├── generics.md
 ├── roadmap.md
 ├── testing.md
 ├── purpose-and-overdesign.md
-└── <semantic milestone documents>
+└── <other semantic milestone documents>
 
 scripts/
 ├── ci.sh
 ├── harness.sh
+├── compare-local.sh
+├── ts-diag-tool/          # tsc/tsgo diagnostic comparison, see README's own section on it
 └── enable-hooks.sh
 
 benches/                 # Criterion and IAI benchmarks
 examples/                # Small usage and profiling examples
 bin/                     # CLI target
+checklist.md             # full TypeScript type-system surface, item-by-item status
+BUILD.md                 # current build order, derived from checklist.md
 ```
 
 ## Architecture direction
@@ -251,9 +262,8 @@ Start with the [documentation index](docs/README.md), then inspect the relevant 
 | Classes and Inheritance | `tests/classes_inheritance.rs` | `tests/fixtures/classes-inheritance/` | [Classes and Inheritance](docs/classes-inheritance.md) |
 | Expression and Program Checking | `tests/expression_program_checking.rs` | `tests/fixtures/expression-program-checking/` | [Expression and Program Checking](docs/expression-program-checking.md) |
 | Parameters and Destructuring | `tests/parameters_destructuring.rs` | `tests/fixtures/parameters-destructuring/` | [Parameters and Destructuring](docs/parameters-destructuring.md) |
-| Generics Tier 1 | `tests/generics_tier1.rs` | `tests/fixtures/generics-tier1/` | [Generics Tier 1](docs/generics-tier1.md) |
+| Generics | `tests/generics_tier1.rs`, `tests/generics_tier2.rs`, `tests/generic_classes.rs`, `tests/recursive_types.rs`, `tests/builtin_generics.rs`, `tests/interface_methods.rs` | `tests/fixtures/generics-tier1/`, `generics-tier2/`, `generic-classes/`, `recursive-types/`, `builtin-generics/`, `interface-methods/` | [Generics](docs/generics.md) |
 
-The current Generics Tier 1 suite is intentionally the active semantic frontier. It should grow with generic constraints, substitution, instantiation, and inference rather than being replaced by another opaque numbered stage.
 
 ## Documentation
 
