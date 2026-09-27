@@ -132,13 +132,24 @@ fn destructured_function_parameter_checks_clean() {
 }
 
 #[test]
-fn array_destructuring_binds_element_type_and_checks_clean() {
+fn array_destructuring_binds_element_type_but_includes_undefined() {
     let source =
         include_str!("fixtures/parameters-destructuring/array_destructuring_binds_element_type.ts");
     let diagnostics = check(source, "array_destructuring_binds_element_type.ts");
+    // This used to assert no diagnostics, on the assumption that destructuring
+    // `pair: number[]` gives `first`/`second` a plain `number`. Real tsc
+    // disagrees (confirmed by scripts/ts-diag-tool/compare.js): destructuring
+    // past the end of a real array yields undefined at runtime, the same as a
+    // numeric-literal index does, so each element includes undefined and using
+    // it directly in arithmetic is an error.
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
     assert!(
-        diagnostics.is_empty(),
-        "expected no false positives, got: {diagnostics:?}"
+        diagnostics[0].message.contains("cannot be applied"),
+        "got: {diagnostics:?}"
     );
 }
 

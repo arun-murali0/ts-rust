@@ -108,17 +108,13 @@ pub(super) fn infer_computed_member_access_type(
     let key_type = infer_expression_type(key_expr, scoping, ctx);
 
     if let &Type::Array(element_type) = ctx.arena.get(object_type) {
-        return match key_expr {
-            // arr[0] with a literal index is assumed in bounds and yields the
-            // element type directly. Any other key, a variable index for
-            // example, cannot be proven in bounds, so undefined is included to
-            // reflect that indexing past the end of a real array yields
-            // undefined at runtime.
-            Expression::NumericLiteral(_) => element_type,
-            _ => ctx
-                .arena
-                .alloc_union(vec![element_type, ctx.arena.undefined()]),
-        };
+        // Every access to an array element, whether the index is a literal or
+        // not, includes undefined: a literal index being in range is no more
+        // provable at compile time than a variable one is, since this checker
+        // (like tsc under noUncheckedIndexedAccess) does not track array
+        // lengths. `arr[0]` and `arr[i]` are both indexing past the end of a
+        // real array at runtime if the array turns out to be empty.
+        return ctx.arena.alloc_union(vec![element_type, ctx.arena.undefined()]);
     }
 
     let Expression::StringLiteral(key) = key_expr else {

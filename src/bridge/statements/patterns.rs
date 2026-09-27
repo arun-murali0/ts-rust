@@ -115,7 +115,14 @@ fn bind_array_pattern(
     };
 
     for element_pattern in array.elements.iter().flatten() {
-        bind_pattern(element_pattern, element_type, scoping, ctx);
+        // Same reasoning as computed array access (see
+        // infer_computed_member_access_type): destructuring past the end of a
+        // real array yields undefined at runtime, and this checker cannot
+        // prove the array is long enough to cover every position destructured,
+        // so each bound element includes undefined regardless of its position.
+        let element_type_with_undefined =
+            ctx.arena.alloc_union(vec![element_type, ctx.arena.undefined()]);
+        bind_pattern(element_pattern, element_type_with_undefined, scoping, ctx);
     }
 
     // Array rest does have a precise type, unlike object rest above: whatever is
