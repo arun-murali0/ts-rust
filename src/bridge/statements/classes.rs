@@ -1,9 +1,10 @@
+use std::collections::HashSet;
+
 use oxc_ast::ast::{
-    ArrowFunctionExpression, AssignmentExpression, AssignmentOperator, AssignmentTarget,
-    ClassElement, Expression, Function, MethodDefinitionKind, PropertyDefinitionType, PropertyKey,
+    AssignmentOperator, AssignmentTarget, ClassElement, Expression, MethodDefinitionKind,
+    PropertyDefinitionType, PropertyKey, Statement,
 };
-use oxc_ast_visit::{Visit, walk};
-use oxc_semantic::{ScopeFlags, Scoping};
+use oxc_semantic::Scoping;
 use oxc_span::GetSpan;
 
 use crate::namespace::Resolution;
@@ -212,13 +213,16 @@ pub(super) fn check_class_declaration(
 // a type but given no initializer must be assigned in the constructor, unless
 // its type already allows `undefined`.
 //
-// Deliberately narrow, and deliberately wrong in one direction only. Any
-// `this.name = ...` anywhere in the constructor body counts as assigning `name`,
-// even inside an `if`, where tsc's flow analysis would want it assigned on every
-// path. That leaves some real errors unreported, which is a gap. It never
-// reports a property that is in fact assigned, which would be a false positive
-// on correct code. Assignments inside a nested function or arrow do not count,
-// matching tsc, since they may run after the constructor has finished.
+// The assignment check is a real, if narrow, definite-assignment analysis (see
+// definitely_assigned_names below): sequential statements and if/else are
+// understood, so a guard-clause pattern (`if (!x) throw ...; this.value = 1;`)
+// correctly counts, and an assignment inside only one arm of an if with no
+// else, or an if/else where only one branch assigns, correctly does not. A
+// loop, switch, or try is not analyzed per-branch and never contributes an
+// assignment -- narrower than tsc, but only in the direction of reporting a
+// real gap rather than a false positive on correct code. Assignments inside a
+// nested function or arrow also never count, matching tsc, since they may run
+// after the constructor has finished.
 //
 // A property is skipped, without an error, when any of these hold: it is static
 // or `declare`d or abstract, it has an initializer, it is optional (`x?: T`), it
@@ -233,12 +237,10 @@ fn report_uninitialized_properties(
         return;
     }
 
-    let mut assigned = ThisAssignments::default();
-    if let Some(body) =
-        super::super::declare::find_constructor(class).and_then(|ctor| ctor.body.as_ref())
-    {
-        assigned.visit_function_body(body);
-    }
+    let assigned_names = super::super::declare::find_constructor(class)
+        .and_then(|ctor| ctor.body.as_ref())
+        .map(|body| definitely_assigned_names(&body.statements))
+        .unwrap_or_default();
 
     for element in &class.body.body {
         let ClassElement::PropertyDefinition(prop) = element else {
@@ -262,7 +264,7 @@ fn report_uninitialized_properties(
         let Some(annotation) = &prop.type_annotation else {
             continue;
         };
-        if assigned.names.iter().any(|name| name == key.name.as_str()) {
+        if assigned_names.contains(key.name.as_str()) {
             continue;
         }
         let Some(declared) =
@@ -282,25 +284,77 @@ fn report_uninitialized_properties(
     }
 }
 
-// Collects the name of every `this.name = ...` in a constructor body, without
-// descending into nested functions or arrows.
-#[derive(Default)]
-struct ThisAssignments {
-    names: Vec<String>,
+// Property names definitely assigned (`this.name = ...`) by every path through
+// a sequence of statements. Union across the sequence -- each statement here
+// runs unconditionally after the ones before it, so whatever any one of them
+// definitely assigns is definitely assigned by the end of the sequence too.
+// Does not descend into a nested function or arrow (see names_assigned_by).
+fn definitely_assigned_names(stmts: &[Statement]) -> HashSet<String> {
+    let mut assigned = HashSet::new();
+    for stmt in stmts {
+        assigned.extend(names_assigned_by(stmt));
+    }
+    assigned
 }
 
-impl<'a> Visit<'a> for ThisAssignments {
-    fn visit_assignment_expression(&mut self, expr: &AssignmentExpression<'a>) {
-        if expr.operator == AssignmentOperator::Assign
-            && let AssignmentTarget::StaticMemberExpression(member) = &expr.left
-            && matches!(member.object, Expression::ThisExpression(_))
-        {
-            self.names.push(member.property.name.to_string());
+// What one statement, on its own, definitely assigns. A loop, switch, try, or
+// anything else not matched here contributes nothing -- not because it never
+// assigns anything, but because this analysis does not attempt to reason about
+// it, the same conservative "leave it a gap rather than risk a false positive"
+// stance the whole function takes.
+fn names_assigned_by(stmt: &Statement) -> HashSet<String> {
+    match stmt {
+        Statement::ExpressionStatement(expr_stmt) => {
+            this_property_assigned_by(&expr_stmt.expression)
+                .into_iter()
+                .collect()
         }
-        walk::walk_assignment_expression(self, expr);
+        Statement::BlockStatement(block) => definitely_assigned_names(&block.body),
+        Statement::IfStatement(if_stmt) => {
+            let Some(alternate) = &if_stmt.alternate else {
+                // No else: the implicit empty else assigns nothing, so nothing
+                // is definite after the `if` regardless of what the consequent
+                // assigns internally.
+                return HashSet::new();
+            };
+            let consequent_exits = super::support::statement_always_exits(&if_stmt.consequent);
+            let alternate_exits = super::support::statement_always_exits(alternate);
+            match (consequent_exits, alternate_exits) {
+                // Both branches always exit: there is no "falling out" of this
+                // `if` for anything after it to run through.
+                (true, true) => HashSet::new(),
+                // Only the branch that does not always exit can reach code
+                // after the `if`, so only its assignments are definite.
+                (true, false) => names_assigned_by(alternate),
+                (false, true) => names_assigned_by(&if_stmt.consequent),
+                // Neither exits: a name is definite only if both branches
+                // assign it.
+                (false, false) => names_assigned_by(&if_stmt.consequent)
+                    .intersection(&names_assigned_by(alternate))
+                    .cloned()
+                    .collect(),
+            }
+        }
+        _ => HashSet::new(),
     }
+}
 
-    fn visit_function(&mut self, _func: &Function<'a>, _flags: ScopeFlags) {}
-
-    fn visit_arrow_function_expression(&mut self, _arrow: &ArrowFunctionExpression<'a>) {}
+// `this.name = value` (plain assignment only, not `+=` and friends) at the top
+// level of one expression. Never looks inside a nested function or arrow
+// expression, since an assignment there may run after the constructor has
+// already finished, matching tsc.
+fn this_property_assigned_by(expr: &Expression) -> Option<String> {
+    let Expression::AssignmentExpression(assign) = expr else {
+        return None;
+    };
+    if assign.operator != AssignmentOperator::Assign {
+        return None;
+    }
+    let AssignmentTarget::StaticMemberExpression(member) = &assign.left else {
+        return None;
+    };
+    if !matches!(member.object, Expression::ThisExpression(_)) {
+        return None;
+    }
+    Some(member.property.name.to_string())
 }
