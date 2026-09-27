@@ -16,10 +16,18 @@
 // it happens), then tsc checks files one at a time via checkFiles'
 // options.onFile callback, and each file's comparison prints immediately as
 // it's computed -- so on a large fixture set you see results appear as they
-// land, not all at once at the very end. --json still buffers into one
-// object, since a partial/streamed JSON document isn't useful.
+// land, not all at once at the very end. Plain --json still buffers into
+// one object at the very end, since a single valid JSON document is the
+// point of that flag (something a downstream tool can JSON.parse() whole).
+// --json-stream is for watching progress in JSON form instead: one
+// complete JSON object per file, printed the moment that file is done
+// (newline-delimited JSON / NDJSON -- see https://jsonlines.org), plus a
+// final `{"summary": ...}` line once every file has been processed. Each
+// line parses on its own; the whole stream does not parse as one JSON
+// document, so don't pipe --json-stream output into something expecting a
+// single JSON.parse().
 //
-// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json] [--only-differ]
+// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ]
 
 const fs = require("fs");
 const path = require("path");
@@ -31,12 +39,19 @@ const args = process.argv.slice(2);
 const positional = args.filter((a) => !a.startsWith("--"));
 const strictOnly = args.includes("--strict-only");
 const asJson = args.includes("--json");
+const jsonStream = args.includes("--json-stream");
 const onlyDiffer = args.includes("--only-differ");
 
 const [target, tsRustBin] = positional;
 if (!target || !tsRustBin) {
   console.error(
-    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json]",
+    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ]",
+  );
+  process.exit(2);
+}
+if (asJson && jsonStream) {
+  console.error(
+    "error: --json and --json-stream are mutually exclusive -- pick one",
   );
   process.exit(2);
 }
@@ -55,7 +70,10 @@ const c = NO_COLOR
     };
 
 function log(msg = "") {
-  if (!asJson) console.log(msg);
+  if (!asJson && !jsonStream) console.log(msg);
+}
+function jsonLine(obj) {
+  if (jsonStream) console.log(JSON.stringify(obj));
 }
 function status(msg) {
   // Progress/status lines go to stderr so `--json` stdout stays clean and
@@ -231,7 +249,7 @@ function renderFile(file, tsRustLines, tscLines) {
   const t = tier(file);
 
   if (t !== currentTier) {
-    if (!asJson) {
+    if (!asJson && !jsonStream) {
       flushTier();
       pendingTierHeader = `${c.bold}== ${t} ==${c.reset}`;
       tierTable = newTierTable();
@@ -241,7 +259,8 @@ function renderFile(file, tsRustLines, tscLines) {
 
   if (tsRustLines.size === 0 && tscLines.size === 0) {
     totalAgree++;
-    if (!asJson && !onlyDiffer) {
+    if (!onlyDiffer) jsonLine({ file, verdict: "MATCH", lines: [] });
+    if (!asJson && !jsonStream && !onlyDiffer) {
       ensureTierHeader();
       tierFileCount++;
       const clean = `${c.dim}did not produce any error or warning${c.reset}`;
@@ -287,11 +306,11 @@ function renderFile(file, tsRustLines, tscLines) {
   const verdictColor =
     verdict === "MATCH" ? c.green : verdict === "GAP" ? c.yellow : c.red;
 
-  // --only-differ applies to --json too: a MATCH file (even one that had
-  // matching diagnostics on both sides, not just a fully-clean file) is
-  // left out of the `files` array entirely, not just hidden from the table.
+  // --only-differ applies to --json/--json-stream too: a MATCH file (even
+  // one that had matching diagnostics on both sides, not just a fully-clean
+  // file) is left out entirely, not just hidden from the table.
   if (!(onlyDiffer && fileOk)) {
-    report.push({
+    const fileReport = {
       file,
       verdict,
       lines: allLineNumbers.map((ln) => ({
@@ -301,10 +320,12 @@ function renderFile(file, tsRustLines, tscLines) {
         ),
         tsc: (tscLines.get(ln) || []).map((d) => `${d.code} ${d.message}`),
       })),
-    });
+    };
+    report.push(fileReport);
+    jsonLine(fileReport);
   }
 
-  if (asJson) return;
+  if (asJson || jsonStream) return;
   if (onlyDiffer && fileOk) return; // --only-differ: hide files that fully MATCH from the table too
 
   ensureTierHeader();
@@ -395,6 +416,29 @@ if (asJson) {
       null,
       2,
     ),
+  );
+  process.exit(0);
+}
+
+if (jsonStream) {
+  // Everything else has already been printed line-by-line, per file, as it
+  // was computed (see jsonLine() calls in renderFile above). This final
+  // line is the only thing printed after all files are done -- a summary
+  // object, on its own line, the same NDJSON shape as every file line
+  // before it. A consumer distinguishes it from a file line by the
+  // presence of `summary` rather than `file`.
+  console.log(
+    JSON.stringify({
+      summary: {
+        totalFiles: files.length,
+        agree: totalAgree,
+        differ: totalDiffer,
+        gap: totalGap,
+        falsePositive: totalFp,
+        strictOnly,
+        onlyDiffer,
+      },
+    }),
   );
   process.exit(0);
 }
