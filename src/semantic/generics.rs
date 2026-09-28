@@ -1,5 +1,5 @@
 use crate::arena::{TypeArena, TypeId};
-use crate::subtyping::is_subtype;
+use crate::semantic::queries::{SemanticQueries, SubtypeCache};
 use crate::types::{FunctionType, ObjectType, PropertyEntry, Type};
 
 // Structural inference: walks a generic function's declared parameter type
@@ -22,6 +22,7 @@ pub(crate) fn infer_type_param_bindings(
     arg_type: TypeId,
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
     locked: &[crate::types::TypeParameterId],
+    cache: &mut SubtypeCache,
 ) {
     infer_type_param_bindings_inner(
         arena,
@@ -29,8 +30,24 @@ pub(crate) fn infer_type_param_bindings(
         arg_type,
         bindings,
         locked,
+        cache,
         &mut Vec::new(),
     )
+}
+
+// Inference mutates the arena (widening and union building allocate), so it cannot
+// keep one SemanticQueries alive across its steps: that holds a shared borrow of the
+// arena for its whole life. Building one per question keeps the borrow to the call.
+// The reason to go through it at all is that candidates are compared against the same
+// existing binding over and over (`allSame(1, 2, ..., 8)`), and those repeats were the
+// one place the cache never saw.
+fn is_subtype_cached(
+    arena: &TypeArena,
+    cache: &mut SubtypeCache,
+    sub: TypeId,
+    sup: TypeId,
+) -> bool {
+    SemanticQueries::new(arena, cache).is_subtype(sub, sup)
 }
 
 // A recursive param_type (e.g. `Box<T>`'s own self-referential `next: Box<T>`,
@@ -45,6 +62,7 @@ fn infer_type_param_bindings_inner(
     arg_type: TypeId,
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
     locked: &[crate::types::TypeParameterId],
+    cache: &mut SubtypeCache,
     seen: &mut Vec<(TypeId, TypeId)>,
 ) {
     let pair = (param_type, arg_type);
@@ -52,7 +70,7 @@ fn infer_type_param_bindings_inner(
         return;
     }
     seen.push(pair);
-    infer_type_param_bindings_uncached(arena, param_type, arg_type, bindings, locked, seen);
+    infer_type_param_bindings_uncached(arena, param_type, arg_type, bindings, locked, cache, seen);
     seen.pop();
 }
 
@@ -62,6 +80,7 @@ fn infer_type_param_bindings_uncached(
     arg_type: TypeId,
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
     locked: &[crate::types::TypeParameterId],
+    cache: &mut SubtypeCache,
     seen: &mut Vec<(TypeId, TypeId)>,
 ) {
     match arena.get(param_type).clone() {
@@ -83,9 +102,9 @@ fn infer_type_param_bindings_uncached(
             match bindings.iter_mut().find(|(bound, _)| *bound == id) {
                 None => bindings.push((id, candidate)),
                 Some((_, existing)) => {
-                    if is_subtype(arena, candidate, *existing) {
+                    if is_subtype_cached(arena, cache, candidate, *existing) {
                         // The existing binding already covers this candidate.
-                    } else if is_subtype(arena, *existing, candidate) {
+                    } else if is_subtype_cached(arena, cache, *existing, candidate) {
                         *existing = candidate;
                     }
                 }
@@ -102,6 +121,7 @@ fn infer_type_param_bindings_uncached(
                 arg_element,
                 bindings,
                 locked,
+                cache,
                 seen,
             );
         }
@@ -121,6 +141,7 @@ fn infer_type_param_bindings_uncached(
                         arg_prop.type_id,
                         bindings,
                         locked,
+                        cache,
                         seen,
                     );
                 }
@@ -132,7 +153,7 @@ fn infer_type_param_bindings_uncached(
             };
             for (p, a) in param_fn.params.iter().zip(&arg_fn.params) {
                 infer_type_param_bindings_inner(
-                    arena, p.type_id, a.type_id, bindings, locked, seen,
+                    arena, p.type_id, a.type_id, bindings, locked, cache, seen,
                 );
             }
             infer_type_param_bindings_inner(
@@ -141,6 +162,7 @@ fn infer_type_param_bindings_uncached(
                 arg_fn.return_type,
                 bindings,
                 locked,
+                cache,
                 seen,
             );
         }
@@ -165,7 +187,8 @@ fn infer_type_param_bindings_uncached(
                         return true;
                     }
                     !param_members.iter().any(|&concrete| {
-                        !contains_type_param(arena, concrete) && is_subtype(arena, member, concrete)
+                        !contains_type_param(arena, concrete)
+                            && is_subtype_cached(arena, cache, member, concrete)
                     })
                 })
                 .collect();
@@ -180,7 +203,7 @@ fn infer_type_param_bindings_uncached(
             for &member in &param_members {
                 if contains_type_param(arena, member) {
                     infer_type_param_bindings_inner(
-                        arena, member, remainder, bindings, locked, seen,
+                        arena, member, remainder, bindings, locked, cache, seen,
                     );
                 }
             }
@@ -500,4 +523,31 @@ fn collect_generic_param_constraints_inner(
         _ => {}
     }
     seen.pop();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::TypeParameterId;
+
+    // Pins the reason this path was rerouted: a second candidate for an already
+    // bound parameter is compared against the existing binding, and that comparison
+    // has to land in the shared cache or repeated candidates recompute it forever.
+    // Neither direction holds between number and string, so both are asked and the
+    // first binding survives; two entries is the proof both went through the cache.
+    #[test]
+    fn competing_candidates_are_compared_through_the_subtype_cache() {
+        let mut arena = TypeArena::new();
+        let id = TypeParameterId::new(0, 0);
+        let t = arena.alloc(Type::GenericParameter(id, "T".to_string(), None));
+        let (number, string) = (arena.number(), arena.string());
+        let mut bindings = Vec::new();
+        let mut cache = SubtypeCache::default();
+
+        infer_type_param_bindings(&mut arena, t, number, &mut bindings, &[], &mut cache);
+        infer_type_param_bindings(&mut arena, t, string, &mut bindings, &[], &mut cache);
+
+        assert_eq!(bindings, vec![(id, number)]);
+        assert_eq!(cache.len(), 2);
+    }
 }

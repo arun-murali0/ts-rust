@@ -13,6 +13,11 @@ use crate::subtyping;
 /// allocate types or otherwise mutate the arena. The `&mut` is purely to let
 /// repeated identical questions be answered from a cache instead of
 /// re-walking the type structure.
+// Named once so the places that thread the cache by hand (generic inference, which
+// cannot hold a SemanticQueries across its arena mutations) spell the type the same
+// way the owner does.
+pub(crate) type SubtypeCache = FxHashMap<(TypeId, TypeId), bool>;
+
 pub struct SemanticQueries<'a> {
     arena: &'a TypeArena,
 
@@ -46,10 +51,11 @@ impl<'a> SemanticQueries<'a> {
     // would cost more than the memoization ever saves. This is a leaf method:
     // it is the only thing in the checker allowed to call subtyping::is_subtype
     // directly, precisely so "did this go through the cache" has one place to
-    // check rather than needing an audit of every call site. (One exception
-    // exists today, generics::infer_type_param_bindings, which predates this
-    // cache and works on a bare &mut TypeArena with no CheckContext to draw the
-    // cache from -- see the note on CheckContext::subtype_cache.)
+    // check rather than needing an audit of every call site. The one deliberate
+    // exception is type_annotation::check_type_argument_constraint: it runs while
+    // a declaration is still being resolved, when a placeholder can be empty, and a
+    // result cached against an empty placeholder would outlive it. Generic
+    // inference used to be an exception too and now comes through here.
     pub fn is_subtype(&mut self, source: TypeId, target: TypeId) -> bool {
         // Answered before the map is touched. Recomputing these costs a couple of
         // integer compares, less than hashing a (TypeId, TypeId) key, and storing

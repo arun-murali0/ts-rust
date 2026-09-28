@@ -39,14 +39,13 @@ pub struct CheckContext<'ast, 'src> {
     // same subterm pair reached from different branches of one recursive
     // object/union comparison, which all go through ctx.semantic().
     //
-    // NOT caught: generics::infer_type_param_bindings widens a type parameter's
-    // binding by calling subtyping::is_subtype directly on a bare &mut TypeArena,
-    // since inference runs before a CheckContext's other state (namespace,
-    // symbols) is relevant to it. So `allSame(1, 2, 3, ..., 8)` re-checking each
-    // new candidate against the same bound T does repeat (candidate, existing)
-    // pairs, but none of those repeats are memoized here. If that path is ever
-    // made cache-aware, route it through ctx.semantic() like everything else
-    // rather than calling subtyping::is_subtype directly.
+    // NOT caught: type_annotation::check_type_argument_constraint, on purpose. It
+    // runs while a declaration is still being resolved, when a placeholder can still
+    // be empty, and this cache is keyed on TypeId alone. A result stored against an
+    // empty placeholder would stay after set() fills it in, and nothing invalidates
+    // it. Generic inference does go through this cache now (it runs after every
+    // declaration is complete), so a call like `allSame(1, 2, ..., 8)` no longer
+    // recomputes each (candidate, existing) pair.
     pub subtype_cache: FxHashMap<(TypeId, TypeId), bool>,
 
     pub current_return_type: Option<TypeId>,
