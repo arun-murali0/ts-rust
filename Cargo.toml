@@ -71,8 +71,26 @@ wasm = [
 ]
 dhat-heap = ["dep:dhat"]
 
+# Native build: what `cargo build --release` and the criterion / iai-callgrind
+# benches (cargo's bench profile inherits release) measure. Speed matters here and
+# binary size does not, so this is opt-level 3 with fat LTO and one codegen unit,
+# which lets the small arena and subtyping helpers inline across modules. The
+# previous "s" traded exactly that inlining for size, which was right for the wasm
+# bundle but skewed every native measurement.
 [profile.release]
 panic = "abort"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# The browser bundle keeps the size-first settings the release profile used to
+# carry. A separate profile (rather than an override in release) is what lets the
+# two builds differ. wasm-pack always passes --release, so it cannot select this;
+# build with cargo and run wasm-bindgen on the result:
+#   cargo build --profile wasm-release --lib --target wasm32-unknown-unknown --features wasm
+#   wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/wasm-release/ts_rust.wasm
+[profile.wasm-release]
+inherits = "release"
 opt-level = "s"
 
 [workspace]
