@@ -51,6 +51,16 @@ impl<'a> SemanticQueries<'a> {
     // cache and works on a bare &mut TypeArena with no CheckContext to draw the
     // cache from -- see the note on CheckContext::subtype_cache.)
     pub fn is_subtype(&mut self, source: TypeId, target: TypeId) -> bool {
+        // Answered before the map is touched. Recomputing these costs a couple of
+        // integer compares, less than hashing a (TypeId, TypeId) key, and storing
+        // them would only grow the map with entries that can never save any work.
+        // Error and Any operands are the common case once one diagnostic has been
+        // reported, since Error then flows through every expression built on it,
+        // so this is where a broken file would otherwise flood the cache.
+        if subtyping::is_trivial_subtype(self.arena, source, target) {
+            return true;
+        }
+
         let key = (source, target);
         if let Some(&cached) = self.cache.get(&key) {
             return cached;
@@ -92,6 +102,33 @@ mod tests {
 
         assert!(!queries.is_subtype(arena.boolean(), arena.string()));
         assert!(!queries.is_subtype(arena.boolean(), arena.string()));
+    }
+
+    #[test]
+    fn trivial_pairs_are_answered_without_a_cache_entry() {
+        // Guards the reason the fast path exists: if these ever start landing in the
+        // map again, the bypass has silently stopped doing its job, and nothing else
+        // would notice because the answers stay correct either way.
+        let arena = TypeArena::new();
+        let mut cache = FxHashMap::default();
+        let mut queries = SemanticQueries::new(&arena, &mut cache);
+
+        assert!(queries.is_subtype(arena.number(), arena.number()));
+        assert!(queries.is_subtype(arena.error(), arena.string()));
+        assert!(queries.is_subtype(arena.string(), arena.any()));
+        assert!(cache.is_empty(), "trivial pairs must not be memoized");
+    }
+
+    #[test]
+    fn non_trivial_pairs_still_populate_the_cache() {
+        // The other half of the guard above: the bypass must stay narrow, otherwise
+        // the cache would quietly stop caching the questions it exists for.
+        let arena = TypeArena::new();
+        let mut cache = FxHashMap::default();
+        let mut queries = SemanticQueries::new(&arena, &mut cache);
+
+        assert!(!queries.is_subtype(arena.number(), arena.string()));
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]

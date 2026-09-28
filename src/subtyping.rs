@@ -26,11 +26,7 @@ fn is_subtype_inner(
     sup: TypeId,
     seen: &mut Vec<(TypeId, TypeId)>,
 ) -> bool {
-    if sub == sup {
-        return true;
-    }
-
-    if is_universally_compatible(arena, sub) || is_universally_compatible(arena, sup) {
+    if is_trivial_subtype(arena, sub, sup) {
         return true;
     }
 
@@ -240,6 +236,17 @@ fn is_sorted_by_name(properties: &[crate::types::PropertyEntry]) -> bool {
 // checking. Error is this checker's internal sentinel for an expression that
 // already failed to type-check; treating it as universally compatible stops one
 // mistake from cascading into a wall of unrelated-looking follow-on errors.
+// The answers that need no structural walk at all: the same id, or an escape-hatch
+// type (Any, or Error standing in for an already-reported failure) on either side.
+//
+// Lives here, and is shared with SemanticQueries, so the cache's fast path and the
+// real relation cannot drift apart. If the cache bypassed on a rule that this
+// function did not also apply, a cached run and an uncached run could disagree, and
+// that class of bug only shows up as flaky diagnostics, never as a crash.
+pub(crate) fn is_trivial_subtype(arena: &TypeArena, sub: TypeId, sup: TypeId) -> bool {
+    sub == sup || is_universally_compatible(arena, sub) || is_universally_compatible(arena, sup)
+}
+
 fn is_universally_compatible(arena: &TypeArena, id: TypeId) -> bool {
     matches!(arena.get(id), Type::Any | Type::Error)
 }
