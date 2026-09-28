@@ -4,6 +4,11 @@ use crate::types::{ObjectType, Type};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
 
+// How many slots new() reserves for the primitives (number() .. void()). Those ids
+// are shared by every use of the primitive and can never be renamed: see
+// set_display_name.
+const FIXED_SLOTS: u32 = 10;
+
 pub struct TypeArena {
     types: Vec<Type>,
 
@@ -62,6 +67,7 @@ impl TypeArena {
         arena.alloc(Type::Error);
         arena.alloc(Type::Never);
         arena.alloc(Type::Void);
+        debug_assert_eq!(arena.types.len() as u32, FIXED_SLOTS);
         arena
     }
 
@@ -182,7 +188,17 @@ impl TypeArena {
     // cached shape and a specific instantiation of it are sometimes the exact
     // same TypeId (see namespace::resolve's own comment on this) and the more
     // specific caller should win.
+    //
+    // A fixed primitive slot never takes a name. make_unique leaves those ids alone
+    // (they are not internable), so `type Age = number` or an empty enum collapsing
+    // to `never` would otherwise name the one slot every other `number` or `never`
+    // shares, and display_type consults names before the structural match. tsc
+    // prints such an alias as the primitive itself, so ignoring the name is also
+    // what a message should say.
     pub fn set_display_name(&mut self, type_id: TypeId, name: impl Into<String>) {
+        if type_id.0 < FIXED_SLOTS {
+            return;
+        }
         debug_assert!(
             !self.is_interned(type_id),
             "naming a shared (interned) TypeId would rename every identical type; \
@@ -245,14 +261,28 @@ impl TypeArena {
     // whose inner objects sit at different slots, compare as unequal even though
     // nothing distinguishes them. This follows TypeIds through the arena instead.
     //
-    // Terminates because a Type can only refer to slots allocated before it (the
-    // arena is append-only and a type is built from ids that already exist), so the
-    // graph of types is acyclic and every recursion below strictly descends.
+    // Terminates even on recursive types. The graph is acyclic except through a
+    // placeholder: alloc_object_placeholder hands out an id, the members are
+    // resolved against it, and set() then fills it in, so `interface N { next: N |
+    // null }` contains its own id. Comparing two such types (say two interfaces
+    // with the same recursive shape) would otherwise go N -> M -> N -> M forever.
+    // Only an Object can close a cycle, so an object pair already being compared
+    // further up the stack is assumed equal (the coinductive rule, the same one
+    // subtyping uses); any real difference elsewhere in the type still shows up.
     //
     // Identity is the one thing shape must not override. A GenericParameter is
     // equal only to the same declared parameter (its TypeParameterId), never to
     // another `T` that merely has the same name or bound.
     pub fn structurally_equal(&self, a: TypeId, b: TypeId) -> bool {
+        self.structurally_equal_inner(a, b, &mut Vec::new())
+    }
+
+    fn structurally_equal_inner(
+        &self,
+        a: TypeId,
+        b: TypeId,
+        seen: &mut Vec<(TypeId, TypeId)>,
+    ) -> bool {
         if a == b {
             return true;
         }
@@ -275,7 +305,7 @@ impl TypeArena {
             (Type::NumberLiteral(x), Type::NumberLiteral(y)) => x.to_bits() == y.to_bits(),
             (Type::BooleanLiteral(x), Type::BooleanLiteral(y)) => x == y,
 
-            (Type::Array(x), Type::Array(y)) => self.structurally_equal(*x, *y),
+            (Type::Array(x), Type::Array(y)) => self.structurally_equal_inner(*x, *y, seen),
 
             (Type::Function(f), Type::Function(g)) => {
                 f.is_untyped == g.is_untyped
@@ -283,20 +313,35 @@ impl TypeArena {
                     && f.params.iter().zip(&g.params).all(|(p, q)| {
                         p.optional == q.optional
                             && p.rest == q.rest
-                            && self.structurally_equal(p.type_id, q.type_id)
+                            && self.structurally_equal_inner(p.type_id, q.type_id, seen)
                     })
-                    && self.structurally_equal(f.return_type, g.return_type)
+                    && self.structurally_equal_inner(f.return_type, g.return_type, seen)
             }
 
             // Pairwise, which is only right because ObjectType keeps its
-            // properties sorted by name.
+            // properties sorted by name. is_method is part of the shape: it is in
+            // the intern key, and subtyping treats a method bivariantly but a
+            // function-valued property contravariantly, so merging the two in a
+            // union would change what the union accepts.
             (Type::Object(x), Type::Object(y)) => {
-                x.properties.len() == y.properties.len()
-                    && x.properties.iter().zip(&y.properties).all(|(p, q)| {
-                        p.name == q.name
-                            && p.optional == q.optional
-                            && self.structurally_equal(p.type_id, q.type_id)
-                    })
+                if x.properties.len() != y.properties.len() {
+                    return false;
+                }
+                // Re-entering a pair already being compared is the cycle a
+                // placeholder creates; see the note above the function.
+                let pair = (a, b);
+                if seen.contains(&pair) {
+                    return true;
+                }
+                seen.push(pair);
+                let equal = x.properties.iter().zip(&y.properties).all(|(p, q)| {
+                    p.name == q.name
+                        && p.optional == q.optional
+                        && p.is_method == q.is_method
+                        && self.structurally_equal_inner(p.type_id, q.type_id, seen)
+                });
+                seen.pop();
+                equal
             }
 
             // A union is a set: member order carries no meaning. Union members are
@@ -304,9 +349,10 @@ impl TypeArena {
             // member of one having a match in the other is set equality.
             (Type::Union(xs), Type::Union(ys)) => {
                 xs.len() == ys.len()
-                    && xs
-                        .iter()
-                        .all(|&x| ys.iter().any(|&y| self.structurally_equal(x, y)))
+                    && xs.iter().all(|&x| {
+                        ys.iter()
+                            .any(|&y| self.structurally_equal_inner(x, y, seen))
+                    })
             }
 
             (Type::GenericParameter(x, _, _), Type::GenericParameter(y, _, _)) => x == y,
@@ -820,5 +866,121 @@ mod tests {
         let number = arena.number();
         let shared = arena.alloc(Type::Array(number));
         arena.set(shared, Type::Array(arena.string()));
+    }
+
+    // `interface N { next: N | null }` built the way namespace::resolve builds
+    // it: placeholder first, members resolved against it, then set(). After set()
+    // the type refers to its own id, so the arena is no longer acyclic.
+    fn recursive_node(arena: &mut TypeArena, tail: TypeId) -> TypeId {
+        let placeholder = arena.alloc_object_placeholder();
+        let next = arena.alloc_union(vec![placeholder, tail]);
+        arena.set(
+            placeholder,
+            Type::Object(ObjectType::new(vec![property("next", next, false)])),
+        );
+        placeholder
+    }
+
+    // Two identical-shaped recursive types used to compare a -> b -> a -> b ...
+    // until the stack overflowed. Correct answer: equal (coinductively), and it
+    // must return.
+    #[test]
+    fn structurally_equal_terminates_on_identical_recursive_types() {
+        let mut arena = TypeArena::new();
+        let null = arena.null();
+        let a = recursive_node(&mut arena, null);
+        let b = recursive_node(&mut arena, null);
+
+        assert_ne!(a, b);
+        assert!(arena.structurally_equal(a, b));
+    }
+
+    // Same, but the shapes really differ (null vs undefined tail). Must
+    // terminate AND say not equal: assuming "equal" for a re-entered pair must
+    // not hide a difference elsewhere in the type.
+    #[test]
+    fn structurally_equal_terminates_on_different_recursive_types() {
+        let mut arena = TypeArena::new();
+        let (null, undefined) = (arena.null(), arena.undefined());
+        let a = recursive_node(&mut arena, null);
+        let c = recursive_node(&mut arena, undefined);
+
+        assert!(!arena.structurally_equal(a, c));
+    }
+
+    // The realistic way to reach it: `type Either = A | B` goes through
+    // alloc_union, whose dedup calls structurally_equal on the members.
+    #[test]
+    fn alloc_union_of_identical_recursive_types_terminates() {
+        let mut arena = TypeArena::new();
+        let null = arena.null();
+        let a = recursive_node(&mut arena, null);
+        let b = recursive_node(&mut arena, null);
+
+        let union = arena.alloc_union(vec![a, b]);
+
+        assert!(matches!(arena.get(union), Type::Object(_) | Type::Union(_)));
+    }
+
+    // The intern key already separates a method from a function-valued
+    // property (PropertyEntry derives Hash with is_method), and subtyping treats
+    // them differently (methods are bivariant). structurally_equal ignores
+    // is_method, so alloc_union would merge them. tsc keeps both members.
+    #[test]
+    fn a_method_and_a_function_valued_property_are_not_the_same_shape() {
+        let mut arena = TypeArena::new();
+        let void = arena.void();
+        let function = arena.alloc(Type::Function(FunctionType {
+            params: vec![],
+            return_type: void,
+            is_untyped: false,
+        }));
+        let entry = |is_method: bool| PropertyEntry {
+            name: "f".into(),
+            type_id: function,
+            optional: false,
+            is_method,
+        };
+
+        // The intern key agrees they differ (always held) ...
+        let interned_method = arena.alloc(Type::Object(ObjectType::new(vec![entry(true)])));
+        let interned_field = arena.alloc(Type::Object(ObjectType::new(vec![entry(false)])));
+        assert_ne!(interned_method, interned_field);
+
+        // ... structural equality must agree with it (used to fail: is_method was ignored).
+        let method = object(&mut arena, vec![entry(true)]);
+        let field = object(&mut arena, vec![entry(false)]);
+        assert!(!arena.structurally_equal(method, field));
+    }
+
+    // make_unique leaves the ten fixed slots alone (they are not internable), and
+    // namespace::resolve names whatever it gets back, so `type Age = number` used
+    // to name slot 0 and print every `number` as "Age". set_display_name now
+    // ignores the fixed slots.
+    #[test]
+    fn a_fixed_slot_never_takes_a_display_name() {
+        let mut arena = TypeArena::new();
+        let fixed = [
+            arena.number(),
+            arena.string(),
+            arena.boolean(),
+            arena.null(),
+            arena.undefined(),
+            arena.any(),
+            arena.unknown(),
+            arena.error(),
+            arena.never(),
+            arena.void(),
+        ];
+
+        for id in fixed {
+            let unique = arena.make_unique(id);
+            arena.set_display_name(unique, "Renamed");
+            assert_eq!(
+                arena.display_name(id),
+                None,
+                "fixed slot {id:?} was renamed"
+            );
+        }
     }
 }
