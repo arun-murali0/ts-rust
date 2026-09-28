@@ -12,6 +12,14 @@ use crate::type_annotation::{
 };
 use crate::types::{ObjectType, PropertyEntry, Type, TypeParameterId};
 
+// The arguments an instantiation was made with, one (parameter, argument) pair per
+// declared type parameter, in declaration order.
+type Bindings = Vec<(TypeParameterId, TypeId)>;
+
+// One memoized instantiation: the bindings it was built from, and the private
+// pristine slot that holds the result.
+type Instantiation = (Bindings, TypeId);
+
 // A type namespace is a single flat map from name to declaration, not a scope tree.
 // There is no block or module scoping for types in this checker; every top-level
 // interface, type alias, and class shares one namespace. Generic type parameters
@@ -114,7 +122,7 @@ pub struct TypeNamespace<'a> {
     // (TypeId, Vec): a lookup on a Vec key would have to allocate a Vec just to ask,
     // which is a good part of what the memo is meant to save. A generic declaration
     // rarely has more than a handful of distinct instantiations, so the scan is short.
-    instantiations: FxHashMap<TypeId, Vec<(Vec<(TypeParameterId, TypeId)>, TypeId)>>,
+    instantiations: FxHashMap<TypeId, Vec<Instantiation>>,
 }
 
 pub enum Resolution {
@@ -684,8 +692,7 @@ impl<'a> TypeNamespace<'a> {
                     // shape as-is -- the common, non-generic case.
                     let parent_type = match self.declared_type_param_decl(&parent_name.name) {
                         Some(decl) => {
-                            let mut bindings: Vec<(TypeParameterId, TypeId)> =
-                                Vec::with_capacity(decl.params.len());
+                            let mut bindings: Bindings = Vec::with_capacity(decl.params.len());
                             for (index, param) in decl.params.iter().enumerate() {
                                 let parameter_id =
                                     TypeParameterId::new(param.span().start, index as u32);
