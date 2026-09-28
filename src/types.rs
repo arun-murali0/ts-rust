@@ -135,9 +135,10 @@ impl Hash for Type {
             Type::Function(function) => function.hash(state),
             Type::Object(object) => object.hash(state),
             Type::Array(element) => element.hash(state),
-            // Order-sensitive, matching the derived Vec equality above. Unions
-            // never enter the arena's intern table (alloc_union owns their
-            // normalisation), so this exists only to keep Hash total.
+            // Order-sensitive, matching the derived Vec equality above. Unions are
+            // not keyed by Type in the arena's intern table (alloc_union interns
+            // them by their finished member list instead), so this exists only to
+            // keep Hash total.
             Type::Union(members) => members.hash(state),
             Type::StringLiteral(text) => text.hash(state),
             Type::NumberLiteral(value) => value.to_bits().hash(state),

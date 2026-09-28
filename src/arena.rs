@@ -42,6 +42,21 @@ pub struct TypeArena {
     // pushed. Keyed on Type itself, which is shallow-hashed (see types.rs), so a
     // lookup never walks the arena.
     interned: FxHashMap<Type, TypeId>,
+
+    // The same idea as `interned`, kept apart for unions. A union cannot go through
+    // alloc(): its members must be flattened and deduplicated first, and that is
+    // alloc_union's job, so the key here is the *finished* member list.
+    //
+    // The key is the members in the order alloc_union produced them, not sorted.
+    // Sorting would also merge `A | B` with `B | A`, but the survivor is whichever
+    // was built first, so a later diagnostic would print its members in a different
+    // order than before. That could not be checked against the fixtures without
+    // running them, so the cheaper, behavior-neutral key comes first. A repeated
+    // build of the same union (what narrowing does on every condition) still hits.
+    //
+    // A miss is always safe: two unions whose members are equal by shape but sit at
+    // different ids just get different keys and stay separate, as they did before.
+    interned_unions: FxHashMap<Vec<TypeId>, TypeId>,
 }
 
 impl TypeArena {
@@ -55,6 +70,7 @@ impl TypeArena {
             display_names: FxHashMap::default(),
             record_value_types: FxHashMap::default(),
             interned: FxHashMap::default(),
+            interned_unions: FxHashMap::default(),
         };
 
         arena.alloc(Type::Number);
@@ -76,7 +92,8 @@ impl TypeArena {
     // literals and generic parameters are reused; everything else always gets a
     // new slot:
     //   - the fixed primitives (numbered 0..=9 in new(), never allocated again),
-    //   - unions, whose flattening and dedup is alloc_union's job, and
+    //   - unions, which are interned by alloc_union itself after it has flattened
+    //     and deduplicated them (see interned_unions), and
     //   - object placeholders, which alloc_object_placeholder pushes directly.
     //
     // Because two calls can now return the same TypeId, a TypeId no longer means
@@ -146,6 +163,14 @@ impl TypeArena {
     // different id, so it correctly reports false.
     fn is_interned(&self, id: TypeId) -> bool {
         let ty = self.get(id);
+        // A union must be answered from its own table. If this fell through to the
+        // check below it would always say "not shared", make_unique would hand back
+        // the shared id, and `type Status = "a" | "b"` would rename every identical
+        // union in the file to "Status". Release builds would do it silently, since
+        // the guards that would catch it are debug_assert.
+        if let Type::Union(members) = ty {
+            return self.interned_unions.get(members) == Some(&id);
+        }
         Self::is_internable(ty) && self.interned.get(ty) == Some(&id)
     }
 
@@ -174,8 +199,18 @@ impl TypeArena {
         match flat.len() {
             0 => self.never(),
             1 => flat[0],
-            // push, not alloc: unions are deliberately kept out of the intern table.
-            _ => self.push(Type::Union(flat)),
+            // Not alloc(): the intern table for everything else is keyed on a Type,
+            // and a union's identity is its finished member list, which only exists
+            // here. Reusing the id is what lets the subtype cache, keyed on
+            // (TypeId, TypeId), hit when narrowing rebuilds the same union.
+            _ => {
+                if let Some(&existing) = self.interned_unions.get(&flat) {
+                    return existing;
+                }
+                let id = self.push(Type::Union(flat.clone()));
+                self.interned_unions.insert(flat, id);
+                id
+            }
         }
     }
 
@@ -470,6 +505,50 @@ mod tests {
         );
     }
 
+    // The point of interning unions: a repeated build must give back the same id, or
+    // the subtype cache keyed on (TypeId, TypeId) can never hit on it.
+    #[test]
+    fn building_the_same_union_twice_reuses_its_id() {
+        let mut arena = TypeArena::new();
+        let a = arena.alloc(Type::StringLiteral("a".to_string()));
+        let b = arena.alloc(Type::StringLiteral("b".to_string()));
+
+        let first = arena.alloc_union(vec![a, b]);
+        let second = arena.alloc_union(vec![a, b]);
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn unions_with_different_members_stay_separate() {
+        let mut arena = TypeArena::new();
+        let a = arena.alloc(Type::StringLiteral("a".to_string()));
+        let b = arena.alloc(Type::StringLiteral("b".to_string()));
+        let c = arena.alloc(Type::StringLiteral("c".to_string()));
+
+        assert_ne!(arena.alloc_union(vec![a, b]), arena.alloc_union(vec![a, c]));
+    }
+
+    // The regression this phase could most easily cause: naming a shared union must
+    // not rename every other identical union. Alias and enum resolution call
+    // make_unique before naming, so make_unique has to know a union can be shared.
+    #[test]
+    fn naming_a_union_through_make_unique_does_not_rename_the_shared_one() {
+        let mut arena = TypeArena::new();
+        let a = arena.alloc(Type::StringLiteral("a".to_string()));
+        let b = arena.alloc(Type::StringLiteral("b".to_string()));
+        let shared = arena.alloc_union(vec![a, b]);
+
+        let own = arena.make_unique(shared);
+        arena.set_display_name(own, "Status");
+
+        assert_ne!(own, shared);
+        assert_eq!(arena.display_name(own), Some("Status"));
+        assert_eq!(arena.display_name(shared), None);
+        // A later identical build still finds the shared one, not the named copy.
+        assert_eq!(arena.alloc_union(vec![a, b]), shared);
+    }
+
     #[test]
     fn union_keeps_composites_that_differ() {
         let mut arena = TypeArena::new();
@@ -733,15 +812,23 @@ mod tests {
         );
     }
 
+    // Replaces the old `unions_are_not_interned`, which pinned the behavior this
+    // phase deliberately changed. What is worth pinning now is the limit of the
+    // change: the key is order-sensitive, so a reordered union is a separate id.
+    // That is intentional (see interned_unions) and is the refinement to revisit
+    // once the fixtures can be run; structurally_equal still treats them as one type.
     #[test]
-    fn unions_are_not_interned() {
+    fn reordered_unions_are_equal_by_shape_but_keep_separate_ids() {
         let mut arena = TypeArena::new();
         let (number, string) = (arena.number(), arena.string());
 
         let one = arena.alloc_union(vec![number, string]);
-        let two = arena.alloc_union(vec![number, string]);
+        let two = arena.alloc_union(vec![string, number]);
 
-        assert_ne!(one, two, "alloc_union keeps its own path");
+        assert_ne!(
+            one, two,
+            "order-sensitive key: reordering is a different id"
+        );
         assert!(arena.structurally_equal(one, two));
     }
 
