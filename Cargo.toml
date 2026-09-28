@@ -18,7 +18,7 @@ exclude = [
 ]
 
 [lib]
-name = "ts-rust"
+name = "ts_rust"
 crate-type = ["cdylib", "rlib"]
 
 [lints.clippy]

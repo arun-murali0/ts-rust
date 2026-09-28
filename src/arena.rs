@@ -1,5 +1,6 @@
-use crate::fxhash::FxHashMap;
+use crate::fxhash::{FxHashMap, FxHasher};
 use crate::types::{ObjectType, Type};
+use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
@@ -8,6 +9,18 @@ pub struct TypeId(u32);
 // are shared by every use of the primitive and can never be renamed: see
 // set_display_name.
 const FIXED_SLOTS: u32 = 10;
+
+// The 64-bit digest the intern tables are keyed on, in place of the content itself.
+//
+// The tables used to own a second copy of every interned type as their key, so each
+// composite lived in memory twice: once in `types`, once in the map. Keying on a
+// digest and confirming a hit against the slot in `types` (the source of truth
+// anyway) removes the copy, and with it the clone on every miss.
+fn content_hash<T: Hash + ?Sized>(content: &T) -> u64 {
+    let mut hasher = FxHasher::default();
+    content.hash(&mut hasher);
+    hasher.finish()
+}
 
 pub struct TypeArena {
     types: Vec<Type>,
@@ -35,19 +48,26 @@ pub struct TypeArena {
     // TypeId-uniqueness requirement as display_names above.
     record_value_types: FxHashMap<TypeId, TypeId>,
 
-    // Auxiliary index behind alloc(): the content of every anonymous composite
-    // allocated so far -> the one TypeId that holds it. `types` stays the source
-    // of truth (a TypeId is still just an index into it); this map only answers
+    // Auxiliary index behind alloc(): a digest of the content of every anonymous
+    // composite allocated so far -> the one TypeId that holds it. `types` stays the
+    // source of truth (a TypeId is still just an index into it); this map only answers
     // "does a slot for exactly this content already exist?" before a new one is
-    // pushed. Keyed on Type itself, which is shallow-hashed (see types.rs), so a
-    // lookup never walks the arena.
-    interned: FxHashMap<Type, TypeId>,
+    // pushed. The digest comes from Type's shallow hash (see types.rs), so computing
+    // it never walks the arena.
+    //
+    // A digest match is never trusted on its own: alloc() compares the slot it points
+    // at with the incoming type. Two different types sharing a 64-bit digest is not
+    // expected, but if it happens the second one is simply left out of the table and
+    // gets a slot of its own. That costs one missed reuse and can never merge two
+    // types that differ, which is the only failure that would matter.
+    interned: FxHashMap<u64, TypeId>,
 
     // The same idea as `interned`, kept apart for unions. A union cannot go through
     // alloc(): its members must be flattened and deduplicated first, and that is
     // alloc_union's job, so the key here is the *finished* member list.
     //
-    // The key is the members in the order alloc_union produced them, not sorted.
+    // Keyed by a digest of the members in the order alloc_union produced them (checked
+    // against the slot on a hit, like `interned`), not of a sorted list.
     // Sorting would also merge `A | B` with `B | A`, but the survivor is whichever
     // was built first, so a later diagnostic would print its members in a different
     // order than before. That could not be checked against the fixtures without
@@ -56,7 +76,7 @@ pub struct TypeArena {
     //
     // A miss is always safe: two unions whose members are equal by shape but sit at
     // different ids just get different keys and stay separate, as they did before.
-    interned_unions: FxHashMap<Vec<TypeId>, TypeId>,
+    interned_unions: FxHashMap<u64, TypeId>,
 }
 
 impl TypeArena {
@@ -107,11 +127,17 @@ impl TypeArena {
         if !Self::is_internable(&ty) {
             return self.push(ty);
         }
-        if let Some(&existing) = self.interned.get(&ty) {
-            return existing;
+        let digest = content_hash(&ty);
+        if let Some(&existing) = self.interned.get(&digest) {
+            if self.types[existing.0 as usize] == ty {
+                return existing;
+            }
+            // Same digest, different content: keep it out of the table (see the
+            // note on `interned`) rather than displace the entry that is there.
+            return self.push(ty);
         }
-        let id = self.push(ty.clone());
-        self.interned.insert(ty, id);
+        let id = self.push(ty);
+        self.interned.insert(digest, id);
         id
     }
 
@@ -227,9 +253,9 @@ impl TypeArena {
         // union in the file to "Status". Release builds would do it silently, since
         // the guards that would catch it are debug_assert.
         if let Type::Union(members) = ty {
-            return self.interned_unions.get(members) == Some(&id);
+            return self.interned_unions.get(&content_hash(members)) == Some(&id);
         }
-        Self::is_internable(ty) && self.interned.get(ty) == Some(&id)
+        Self::is_internable(ty) && self.interned.get(&content_hash(ty)) == Some(&id)
     }
 
     // Flattens nested unions and drops never members, since never contributes
@@ -257,16 +283,20 @@ impl TypeArena {
         match flat.len() {
             0 => self.never(),
             1 => flat[0],
-            // Not alloc(): the intern table for everything else is keyed on a Type,
-            // and a union's identity is its finished member list, which only exists
-            // here. Reusing the id is what lets the subtype cache, keyed on
-            // (TypeId, TypeId), hit when narrowing rebuilds the same union.
+            // Not alloc(): that table is keyed on a digest of a Type, and a union's
+            // identity is its finished member list, which only exists here. Reusing
+            // the id is what lets the subtype cache, keyed on (TypeId, TypeId), hit
+            // when narrowing rebuilds the same union.
             _ => {
-                if let Some(&existing) = self.interned_unions.get(&flat) {
-                    return existing;
+                let digest = content_hash(&flat);
+                if let Some(&existing) = self.interned_unions.get(&digest) {
+                    if matches!(&self.types[existing.0 as usize], Type::Union(m) if *m == flat) {
+                        return existing;
+                    }
+                    return self.push(Type::Union(flat));
                 }
-                let id = self.push(Type::Union(flat.clone()));
-                self.interned_unions.insert(flat, id);
+                let id = self.push(Type::Union(flat));
+                self.interned_unions.insert(digest, id);
                 id
             }
         }
@@ -658,6 +688,50 @@ mod tests {
         assert!(!arena.has_settled_display(unsettled_union));
         assert!(arena.has_settled_display(settled_array));
         assert!(!arena.has_settled_display(unsettled_array));
+    }
+
+    // The digest is only a hint. If two different types ever share one, alloc() must
+    // fall back to a slot of its own instead of returning the other type's id: that
+    // would be a silent type confusion, the one failure this table must not have. A
+    // real 64-bit collision cannot be produced on demand, so the table is seeded with
+    // a wrong entry, which is exactly the state a collision would leave behind.
+    #[test]
+    fn a_digest_match_on_different_content_is_not_reused() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let wanted = Type::Array(number);
+        let unrelated = arena.alloc(Type::Array(string));
+        arena.interned.insert(content_hash(&wanted), unrelated);
+
+        let got = arena.alloc(wanted.clone());
+
+        assert_ne!(got, unrelated);
+        assert!(*arena.get(got) == wanted);
+        assert!(
+            !arena.is_interned(got),
+            "a collided type must stay unshared"
+        );
+    }
+
+    #[test]
+    fn a_digest_match_on_different_union_members_is_not_reused() {
+        let mut arena = TypeArena::new();
+        let a = arena.alloc(Type::StringLiteral("a".to_string()));
+        let b = arena.alloc(Type::StringLiteral("b".to_string()));
+        let c = arena.alloc(Type::StringLiteral("c".to_string()));
+        let unrelated = arena.alloc_union(vec![a, b]);
+        // What alloc_union will build for [a, c], seeded to point at the wrong slot.
+        let members = vec![c, a];
+        arena
+            .interned_unions
+            .insert(content_hash(&members), unrelated);
+
+        let got = arena.alloc_union(vec![a, c]);
+
+        let again = arena.alloc_union(vec![a, c]);
+
+        assert_ne!(got, unrelated);
+        assert!(arena.structurally_equal(got, again));
     }
 
     #[test]
