@@ -124,7 +124,9 @@ pub(super) fn infer_computed_member_access_type(
         // (like tsc under noUncheckedIndexedAccess) does not track array
         // lengths. `arr[0]` and `arr[i]` are both indexing past the end of a
         // real array at runtime if the array turns out to be empty.
-        return ctx.arena.alloc_union(vec![element_type, ctx.arena.undefined()]);
+        return ctx
+            .arena
+            .alloc_union(vec![element_type, ctx.arena.undefined()]);
     }
 
     let Expression::StringLiteral(key) = key_expr else {

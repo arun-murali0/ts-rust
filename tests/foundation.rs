@@ -85,10 +85,15 @@ fn binary_operator_mismatch_is_caught() {
     );
 }
 
+// A statement kind this checker doesn't handle must warn, not vanish. The
+// fixture is a do-while, which still goes to push_unsupported. It used to be a
+// for loop whose `i = i + 1` update happened to hit the "unimplemented
+// expression" warning, so the test passed only because assignments were
+// unchecked -- once they were checked it stopped testing anything real.
 #[test]
 fn unsupported_statement_degrades_honestly_not_silently() {
-    let source = include_str!("fixtures/foundation/unsupported_class.ts");
-    let diagnostics = check(source, "unsupported_class.ts");
+    let source = include_str!("fixtures/foundation/unsupported_statement.ts");
+    let diagnostics = check(source, "unsupported_statement.ts");
 
     assert!(
         diagnostics

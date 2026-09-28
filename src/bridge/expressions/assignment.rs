@@ -33,7 +33,9 @@ pub(super) fn infer_assignment_expression_type(
             if !ctx.semantic().is_assignable(right_type, target_type) {
                 ctx.error(
                     crate::diagnostic_messages::messages::declared_type_mismatch(
-                        &ctx.arena, right_type, target_type,
+                        &ctx.arena,
+                        right_type,
+                        target_type,
                     ),
                     assign.span(),
                 );

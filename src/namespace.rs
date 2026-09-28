@@ -6,11 +6,11 @@ use oxc_span::{GetSpan, Span};
 
 use crate::arena::{TypeArena, TypeId};
 use crate::fxhash::FxHashMap;
+use crate::semantic::substitute_type_params;
 use crate::type_annotation::{
     resolve_function_params, resolve_object_members, resolve_ts_type, resolve_type_annotation,
 };
 use crate::types::{ObjectType, PropertyEntry, Type, TypeParameterId};
-use crate::semantic::substitute_type_params;
 
 // A type namespace is a single flat map from name to declaration, not a scope tree.
 // There is no block or module scoping for types in this checker; every top-level

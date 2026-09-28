@@ -104,8 +104,7 @@ fn record_no_longer_blocks_resolution() {
 
 #[test]
 fn record_dot_access_returns_value_type() {
-    let source =
-        include_str!("fixtures/builtin-generics/record_dot_access_returns_value_type.ts");
+    let source = include_str!("fixtures/builtin-generics/record_dot_access_returns_value_type.ts");
     let diagnostics = check(source, "record_dot_access_returns_value_type.ts");
     assert!(errors(&diagnostics).is_empty(), "got: {diagnostics:?}");
 }
