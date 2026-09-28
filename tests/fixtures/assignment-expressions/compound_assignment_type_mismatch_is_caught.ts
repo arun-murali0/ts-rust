@@ -1,2 +1,2 @@
-let total: number = 0;
-total += "text";
+let total: number = 10;
+total -= "text";

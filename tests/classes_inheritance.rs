@@ -308,21 +308,68 @@ fn property_assigned_only_inside_a_callback_is_flagged() {
     );
 }
 
-#[test]
-fn conditional_constructor_assignment_is_a_known_gap() {
-    let source = include_str!(
-        "fixtures/classes-inheritance/constructor_conditional_assignment_known_gap.ts"
-    );
-    let diagnostics = check(source, "constructor_conditional_assignment_known_gap.ts");
-    let errors: Vec<_> = diagnostics
+fn errors_of(diagnostics: &[ts_rust::Diagnostic]) -> Vec<&ts_rust::Diagnostic> {
+    diagnostics
         .iter()
         .filter(|d| d.severity == Severity::Error)
-        .collect();
-    // tsc reports `value` here, because it is only assigned when `flag` is true.
-    // Any assignment in the constructor counts as assigning it, so this checker
-    // reports nothing: a gap, chosen over risking a false positive.
-    assert!(
-        errors.is_empty(),
-        "known-gap fixture behavior changed, got: {diagnostics:?}"
+        .collect()
+}
+
+// This used to be a documented gap: any `this.value = ...` anywhere in the
+// constructor counted as assigning it, even inside an `if`. The check now
+// follows branches (see definitely_assigned_names in statements/classes.rs), so
+// an assignment that only happens when `flag` is true is reported, as in tsc.
+#[test]
+fn conditional_constructor_assignment_is_now_caught() {
+    let source = include_str!(
+        "fixtures/classes-inheritance/constructor_conditional_assignment_is_now_caught.ts"
     );
+    let diagnostics = check(
+        source,
+        "constructor_conditional_assignment_is_now_caught.ts",
+    );
+    let errors = errors_of(&diagnostics);
+    assert_eq!(errors.len(), 1, "got: {diagnostics:?}");
+    assert!(
+        errors[0].message.contains("no initializer"),
+        "got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn assignment_in_only_one_if_else_branch_is_flagged() {
+    let source = include_str!(
+        "fixtures/classes-inheritance/constructor_assigned_in_only_one_branch_is_flagged.ts"
+    );
+    let diagnostics = check(
+        source,
+        "constructor_assigned_in_only_one_branch_is_flagged.ts",
+    );
+    assert_eq!(errors_of(&diagnostics).len(), 1, "got: {diagnostics:?}");
+}
+
+#[test]
+fn assignment_in_both_if_else_branches_is_satisfied() {
+    let source = include_str!(
+        "fixtures/classes-inheritance/constructor_assigned_in_both_branches_is_satisfied.ts"
+    );
+    let diagnostics = check(
+        source,
+        "constructor_assigned_in_both_branches_is_satisfied.ts",
+    );
+    assert!(errors_of(&diagnostics).is_empty(), "got: {diagnostics:?}");
+}
+
+// `if (!flag) throw ...;` then an unconditional assignment: the throwing path
+// never reaches the end of the constructor, so it does not need to assign.
+#[test]
+fn guard_clause_then_assignment_is_satisfied() {
+    let source = include_str!(
+        "fixtures/classes-inheritance/constructor_guard_clause_then_assignment_is_satisfied.ts"
+    );
+    let diagnostics = check(
+        source,
+        "constructor_guard_clause_then_assignment_is_satisfied.ts",
+    );
+    assert!(errors_of(&diagnostics).is_empty(), "got: {diagnostics:?}");
 }
