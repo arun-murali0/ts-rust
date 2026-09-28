@@ -173,6 +173,34 @@ pub fn generic_heavy_source(call_count: usize) -> String {
     src
 }
 
+// Generic *type* references (`Box<number>`), as opposed to generic function calls in
+// generic_heavy_source. The two take different paths: a call infers and substitutes
+// at the call site, a reference substitutes while its annotation is resolved. No
+// other fixture writes a generic reference, so without this one the instantiation
+// memo has nothing to be measured against.
+pub fn generic_type_reference_source(reference_count: usize) -> String {
+    let reference_count = reference_count.max(1);
+
+    let mut src = String::from(
+        "interface Box<T> { value: T; label: string; }\n\
+         interface Pair<A, B> { first: A; second: B; }\n\n",
+    );
+
+    for i in 0..reference_count {
+        if i % 2 == 0 {
+            src.push_str(&format!(
+                "const box{i}: Box<number> = {{ value: {i}, label: \"b{i}\" }};\n"
+            ));
+        } else {
+            src.push_str(&format!(
+                "const pair{i}: Pair<string, number> = {{ first: \"p{i}\", second: {i} }};\n"
+            ));
+        }
+    }
+
+    src
+}
+
 pub fn destructuring_heavy_source(binding_count: usize) -> String {
     let binding_count = binding_count.max(1);
 

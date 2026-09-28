@@ -104,6 +104,17 @@ pub struct TypeNamespace<'a> {
     // the argument's span. Collected here for the same reason as the issues
     // above and deduplicated the same way.
     constraint_violations: Vec<(String, TypeId, TypeId, Span)>,
+
+    // Finished generic instantiations, `Box<number>` and the like, by the generic
+    // shape they came from. Every reference used to redo the substitution and
+    // rebuild the display name, however many times the same instantiation was
+    // written. See cache_instantiation for what may go in and why.
+    //
+    // A list per shape, searched by comparing slices, rather than one map keyed on
+    // (TypeId, Vec): a lookup on a Vec key would have to allocate a Vec just to ask,
+    // which is a good part of what the memo is meant to save. A generic declaration
+    // rarely has more than a handful of distinct instantiations, so the scan is short.
+    instantiations: FxHashMap<TypeId, Vec<(Vec<(TypeParameterId, TypeId)>, TypeId)>>,
 }
 
 pub enum Resolution {
@@ -123,7 +134,40 @@ impl<'a> TypeNamespace<'a> {
             unresolved_constraints: Vec::new(),
             type_argument_issues: Vec::new(),
             constraint_violations: Vec::new(),
+            instantiations: FxHashMap::default(),
         }
+    }
+
+    // The private, never-handed-out copy stored for this instantiation, if any. The
+    // caller must take a duplicate_named of it rather than use it directly.
+    pub fn cached_instantiation(
+        &self,
+        base: TypeId,
+        bindings: &[(TypeParameterId, TypeId)],
+    ) -> Option<TypeId> {
+        self.instantiations
+            .get(&base)?
+            .iter()
+            .find(|(stored, _)| stored.as_slice() == bindings)
+            .map(|&(_, pristine)| pristine)
+    }
+
+    // Only a finished, named instantiation belongs here, and the caller owns that
+    // judgement: it must have come from a substitution that actually changed `base`
+    // (an unchanged result means the shape was still an empty placeholder, and
+    // remembering it would hand back the empty shape forever), and every argument's
+    // display must be settled (see TypeArena::has_settled_display). `pristine` must
+    // be a slot nobody else holds, or a later rename of it would rename the memo.
+    pub fn cache_instantiation(
+        &mut self,
+        base: TypeId,
+        bindings: Vec<(TypeParameterId, TypeId)>,
+        pristine: TypeId,
+    ) {
+        self.instantiations
+            .entry(base)
+            .or_default()
+            .push((bindings, pristine));
     }
 
     pub fn contains(&self, name: &str) -> bool {

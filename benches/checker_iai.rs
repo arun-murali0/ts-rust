@@ -7,8 +7,8 @@ mod complex_fixtures;
 
 use complex_fixtures::{
     class_hierarchy_source, complex_source, connected_application_source,
-    destructuring_heavy_source, generic_heavy_source, nested_object_source,
-    wide_discriminated_union_source,
+    destructuring_heavy_source, generic_heavy_source, generic_type_reference_source,
+    nested_object_source, wide_discriminated_union_source,
 };
 
 fn tiny_source() -> String {
@@ -52,6 +52,7 @@ fn large_source(function_count: usize) -> String {
 #[bench::nested_objects_depth_50(nested_object_source(50))]
 #[bench::class_hierarchy_depth_50(class_hierarchy_source(50))]
 #[bench::generic_calls_500(generic_heavy_source(500))]
+#[bench::generic_type_refs_500(generic_type_reference_source(500))]
 #[bench::destructuring_500_bindings(destructuring_heavy_source(500))]
 #[bench::complex_mixed_scale_50(complex_source(50))]
 #[bench::complex_mixed_scale_200(complex_source(200))]

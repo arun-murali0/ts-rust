@@ -95,15 +95,35 @@ fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
     use complex_fixtures::*;
 
     let cases: Vec<(&str, String, usize)> = vec![
-        ("wide_union_50_variants", wide_discriminated_union_source(50), 100),
+        (
+            "wide_union_50_variants",
+            wide_discriminated_union_source(50),
+            100,
+        ),
         ("nested_objects_depth_50", nested_object_source(50), 0),
         ("class_hierarchy_depth_50", class_hierarchy_source(50), 0),
         ("generic_calls_500", generic_heavy_source(500), 1),
-        ("destructuring_500_bindings", destructuring_heavy_source(500), 0),
+        (
+            "destructuring_500_bindings",
+            destructuring_heavy_source(500),
+            0,
+        ),
         ("complex_mixed_scale_200", complex_source(200), 401),
-        ("connected_application_scale_10", connected_application_source(10), 110),
-        ("connected_application_scale_50", connected_application_source(50), 510),
-        ("connected_application_scale_100", connected_application_source(100), 1010),
+        (
+            "connected_application_scale_10",
+            connected_application_source(10),
+            110,
+        ),
+        (
+            "connected_application_scale_50",
+            connected_application_source(50),
+            510,
+        ),
+        (
+            "connected_application_scale_100",
+            connected_application_source(100),
+            1010,
+        ),
     ];
 
     let mismatches: Vec<String> = cases

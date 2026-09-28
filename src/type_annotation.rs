@@ -170,6 +170,23 @@ pub fn resolve_ts_type(
                 bindings.push((parameter_id, bound));
             }
 
+            // Everything above is per reference and stays per reference: the arity
+            // and constraint checks report at this site's own span. Only the work
+            // below, which depends on nothing but the declaration and its resolved
+            // arguments, is reused.
+            //
+            // A hit is a duplicate of the stored copy, not the copy itself: callers
+            // rename what they are handed (`type Alias = Box<number>`), and that
+            // must not rename every other `Box<number>`.
+            let reusable = bindings
+                .iter()
+                .all(|&(_, bound)| arena.has_settled_display(bound));
+            if reusable {
+                if let Some(pristine) = namespace.cached_instantiation(base, &bindings) {
+                    return Some(arena.duplicate_named(pristine));
+                }
+            }
+
             // Only the declaration's own parameters are bound here, so a parameter
             // a member declares for itself (`map<U>(...)`) is kept for inference
             // at the call site instead of becoming unknown.
@@ -196,6 +213,17 @@ pub fn resolve_ts_type(
                 // Name a copy that is this instantiation's own.
                 result = arena.make_unique(result);
                 arena.set_display_name(result, format!("{}<{args}>", id.name));
+
+                // Stored only here, inside `result != base`: an unchanged result
+                // means `base` was still an empty placeholder (a reference from
+                // inside its own declaration), and remembering that would return the
+                // empty shape for every later reference, after it is filled in. The
+                // copy kept is a duplicate so that renaming `result`, which the
+                // caller may do, cannot rename the memo.
+                if reusable {
+                    let pristine = arena.duplicate_named(result);
+                    namespace.cache_instantiation(base, bindings, pristine);
+                }
             }
 
             Some(result)

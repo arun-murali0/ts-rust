@@ -138,6 +138,64 @@ impl TypeArena {
         }
     }
 
+    // A fresh, unshared copy of `id` that prints under the same name. The copy is
+    // never entered in either intern table, so it can be renamed or completed later
+    // without touching `id` or any other copy.
+    //
+    // Exists for the instantiation memo (see TypeNamespace::cache_instantiation).
+    // Every reference to `Box<number>` used to get a slot of its own, and callers
+    // depend on that: `type Alias = Box<number>` renames the slot it is handed. If
+    // a memo handed out one shared slot instead, an alias would rename every other
+    // `Box<number>` in the file. So the memo keeps a private pristine slot and every
+    // hit gets a duplicate of it.
+    pub fn duplicate_named(&mut self, id: TypeId) -> TypeId {
+        let copy = self.get(id).clone();
+        let duplicate = self.push(copy);
+        if let Some(name) = self.display_names.get(&id).cloned() {
+            self.display_names.insert(duplicate, name);
+        }
+        duplicate
+    }
+
+    // Whether the way `id` prints in a diagnostic can no longer change. A generic
+    // instantiation bakes its arguments' text into its own name once ("Box<Dog>"),
+    // so it may only be reused while every argument reads the same way it did when
+    // the name was made.
+    //
+    // The case this exists for: `interface Node { next: Box<Node> }`. While Node is
+    // still resolving, its id is an empty, unnamed placeholder that prints as an
+    // empty object. Reusing that spelling later, after Node has its name, would put
+    // "Box<{}>" in a message that used to say "Box<Node>".
+    //
+    // Deliberately narrow: a composite that is not named, an object or a function,
+    // answers false, which only costs a missed reuse. Recursion is safe because only
+    // an Object can close a cycle, and Object never recurses here.
+    pub fn has_settled_display(&self, id: TypeId) -> bool {
+        if self.display_names.contains_key(&id) {
+            return true;
+        }
+        match self.get(id) {
+            Type::Number
+            | Type::String
+            | Type::Boolean
+            | Type::Null
+            | Type::Undefined
+            | Type::Any
+            | Type::Unknown
+            | Type::Error
+            | Type::Never
+            | Type::Void
+            | Type::StringLiteral(_)
+            | Type::NumberLiteral(_)
+            | Type::BooleanLiteral(_)
+            // A type parameter always prints as its own name, so it never changes.
+            | Type::GenericParameter(..) => true,
+            Type::Array(element) => self.has_settled_display(*element),
+            Type::Union(members) => members.iter().all(|&m| self.has_settled_display(m)),
+            Type::Object(_) | Type::Function(_) => false,
+        }
+    }
+
     fn push(&mut self, ty: Type) -> TypeId {
         self.types.push(ty);
         TypeId((self.types.len() - 1) as u32)
@@ -547,6 +605,59 @@ mod tests {
         assert_eq!(arena.display_name(shared), None);
         // A later identical build still finds the shared one, not the named copy.
         assert_eq!(arena.alloc_union(vec![a, b]), shared);
+    }
+
+    // The property the instantiation memo depends on: renaming a duplicate must
+    // leave its source alone, because an alias does exactly that to what it is given.
+    #[test]
+    fn a_named_duplicate_can_be_renamed_without_touching_its_source() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let source = arena.alloc_fresh(Type::Object(ObjectType::new(vec![PropertyEntry {
+            name: "value".into(),
+            type_id: number,
+            optional: false,
+            is_method: false,
+        }])));
+        arena.set_display_name(source, "Box<number>");
+
+        let duplicate = arena.duplicate_named(source);
+        arena.set_display_name(duplicate, "Alias");
+
+        assert_ne!(duplicate, source);
+        assert_eq!(arena.display_name(source), Some("Box<number>"));
+        assert_eq!(arena.display_name(duplicate), Some("Alias"));
+        assert!(arena.structurally_equal(source, duplicate));
+    }
+
+    #[test]
+    fn an_unfinished_placeholder_does_not_have_a_settled_display() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let placeholder = arena.alloc_object_placeholder();
+
+        assert!(arena.has_settled_display(number));
+        assert!(!arena.has_settled_display(placeholder));
+
+        // Naming it is what settles it, which is when resolution completes.
+        arena.set_display_name(placeholder, "Node");
+        assert!(arena.has_settled_display(placeholder));
+    }
+
+    #[test]
+    fn settled_display_looks_through_arrays_and_unions() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let placeholder = arena.alloc_object_placeholder();
+        let settled_union = arena.alloc_union(vec![number, string]);
+        let unsettled_union = arena.alloc_union(vec![number, placeholder]);
+        let settled_array = arena.alloc(Type::Array(number));
+        let unsettled_array = arena.alloc(Type::Array(placeholder));
+
+        assert!(arena.has_settled_display(settled_union));
+        assert!(!arena.has_settled_display(unsettled_union));
+        assert!(arena.has_settled_display(settled_array));
+        assert!(!arena.has_settled_display(unsettled_array));
     }
 
     #[test]

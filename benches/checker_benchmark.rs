@@ -7,8 +7,8 @@ mod complex_fixtures;
 
 use complex_fixtures::{
     class_hierarchy_source, complex_source, connected_application_source,
-    destructuring_heavy_source, generic_heavy_source, nested_object_source,
-    wide_discriminated_union_source,
+    destructuring_heavy_source, generic_heavy_source, generic_type_reference_source,
+    nested_object_source, wide_discriminated_union_source,
 };
 
 fn tiny_source() -> String {
@@ -131,6 +131,11 @@ fn bench_check_source_complex(c: &mut Criterion) {
     );
 
     bench_named_source!("check_source/generic_calls_500", generic_heavy_source(500));
+
+    bench_named_source!(
+        "check_source/generic_type_refs_500",
+        generic_type_reference_source(500)
+    );
 
     bench_named_source!(
         "check_source/destructuring_500_bindings",
