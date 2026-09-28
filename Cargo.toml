@@ -2,7 +2,7 @@
 name = "ts-rust"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.98.1"
 description = "A Rust-based TypeScript type checker built on Oxc."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/arun-murali0/ts-rust"
@@ -18,7 +18,7 @@ exclude = [
 ]
 
 [lib]
-name = "ts_rust"
+name = "ts-rust"
 crate-type = ["cdylib", "rlib"]
 
 [lints.clippy]
