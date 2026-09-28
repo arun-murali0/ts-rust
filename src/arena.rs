@@ -1,5 +1,6 @@
 use crate::fxhash::{FxHashMap, FxHasher};
 use crate::types::{ObjectType, Type};
+use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -77,6 +78,20 @@ pub struct TypeArena {
     // A miss is always safe: two unions whose members are equal by shape but sit at
     // different ids just get different keys and stay separate, as they did before.
     interned_unions: FxHashMap<u64, TypeId>,
+
+    // Answers to "does this type mention a type parameter" (see
+    // semantic::generics::contains_type_param), one byte per TypeId: 0 not asked
+    // yet, 1 no, 2 yes. Every call expression asks this about its callee's
+    // parameter and return types, and nearly all of those are plain non-generic
+    // types, so remembering the answer across calls turns those walks into a
+    // single lookup. It sits behind a RefCell only because the question is asked
+    // through &TypeArena; no borrow is held across a call.
+    //
+    // Cleared by set(), the one place a slot's content changes. A placeholder
+    // that was still empty when it was scanned reads as "no parameter", and every
+    // type built on top of it inherited that answer, so any set() drops them all.
+    // New slots need no invalidation: an id nobody has asked about is just absent.
+    param_scan: RefCell<Vec<u8>>,
 }
 
 impl TypeArena {
@@ -91,6 +106,7 @@ impl TypeArena {
             record_value_types: FxHashMap::default(),
             interned: FxHashMap::default(),
             interned_unions: FxHashMap::default(),
+            param_scan: RefCell::new(Vec::new()),
         };
 
         arena.alloc(Type::Number);
@@ -375,6 +391,28 @@ impl TypeArena {
              the intern table pointing at the wrong type"
         );
         self.types[id.0 as usize] = ty;
+        self.param_scan.get_mut().clear();
+    }
+
+    // The remembered answer for `id`, if contains_type_param has settled it.
+    pub(crate) fn cached_mentions_type_param(&self, id: TypeId) -> Option<bool> {
+        match self.param_scan.borrow().get(id.0 as usize) {
+            Some(1) => Some(false),
+            Some(2) => Some(true),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn remember_mentions_type_param(&self, id: TypeId, found: bool) {
+        let mut cache = self.param_scan.borrow_mut();
+        let index = id.0 as usize;
+        if cache.len() <= index {
+            // Grow to the arena's current size in one step rather than one slot
+            // at a time as new ids get asked about.
+            let wanted = self.types.len().max(index + 1);
+            cache.resize(wanted, 0);
+        }
+        cache[index] = if found { 2 } else { 1 };
     }
 
     // Whether two types are the same type by shape, not by arena slot.

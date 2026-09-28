@@ -1,12 +1,14 @@
 use crate::arena::{TypeArena, TypeId};
-use crate::fxhash::{FxHashMap, FxHashSet};
+use crate::fxhash::FxHashMap;
 use crate::semantic::queries::{SemanticQueries, SubtypeCache};
 use crate::types::{FunctionType, ObjectType, PropertyEntry, Type};
 
 // Structural inference: walks a generic function's declared parameter type
 // alongside a call's actual argument type in lockstep, recording a binding the
-// first time it reaches a GenericParameter leaf. Only argument-driven inference
-// is supported; there is no explicit call-site syntax like identity<string>(x).
+// first time it reaches a GenericParameter leaf. This is only the argument-driven
+// part: an explicit call-site list like identity<string>(x) is applied by the
+// caller (calls.rs), which pre-binds those parameters and passes them in as
+// `locked` so nothing here can override them.
 //
 // A second argument resolving to an already-bound parameter does not start a
 // union (real TypeScript does not do this either: pair(1, "x") for
@@ -248,25 +250,26 @@ fn substitute_impl(
     if bindings.is_empty() {
         return type_id;
     }
+    let mut outermost_cut = usize::MAX;
     Substitution {
         bindings,
         keep_unbound,
         open: Vec::new(),
         rewritten: FxHashMap::default(),
-        scan: ParamScan::default(),
+        cyclic: Vec::new(),
     }
-    .rewrite(arena, type_id, &mut usize::MAX)
+    .rewrite(arena, type_id, &mut outermost_cut)
 }
 
 // Scratch state for one substitute_impl call, so that everything learned while
 // rewriting one part of a type is reused by the rest of it. The graph is a DAG
 // after interning: a subtype reachable along several paths used to be rewritten
 // once per path, and each level re-asked "does this contain a parameter" from
-// scratch. Now each node is rewritten once (`rewritten`) and the parameter
-// question is answered from a shared cache (`scan`).
+// scratch. Now each node is rewritten once (`rewritten`), and the parameter
+// question is answered from the arena's own cache (see contains_type_param).
 //
-// Nothing here outlives the call. A placeholder can be completed by
-// TypeArena::set between two calls, which would make a longer-lived answer stale.
+// `rewritten` does not outlive the call. A placeholder can be completed by
+// TypeArena::set between two calls, which would make a longer-lived rewrite stale.
 struct Substitution<'b> {
     bindings: &'b [(crate::types::TypeParameterId, TypeId)],
     keep_unbound: bool,
@@ -275,17 +278,26 @@ struct Substitution<'b> {
     open: Vec<TypeId>,
 
     rewritten: FxHashMap<TypeId, TypeId>,
-    scan: ParamScan,
+
+    // Ids the walk has found to reach themselves (see rewrite).
+    cyclic: Vec<TypeId>,
 }
 
 impl Substitution<'_> {
     // A recursive type (Node { next: Node }, or a recursive generic like
-    // `Box<T> { value: T, next: Box<T> }`) means substituting inside type_id's
-    // properties can lead back to substituting type_id itself before the first
-    // call returns. Re-entering an id already on the current path is exactly the
-    // self-referential edge -- leaving it as type_id unchanged is correct there,
-    // since that edge and the type being substituted share the same identity by
-    // construction (namespace::resolve's placeholder backpatch).
+    // `Box<T> { value: T, next: Box<T> | null }`) means substituting inside
+    // type_id's properties can lead back to substituting type_id itself before the
+    // first call returns. Re-entering an id already on the current path is exactly
+    // that self-referential edge, and it is what stops the walk from looping.
+    //
+    // Leaving the edge pointing at the original id is right for a type that has
+    // nothing to substitute, and wrong for one that does: `Box<number>.next` would
+    // still be the generic `Box<T> | null`, and `box.next.value` would read as T.
+    // So the cut only *finds* the cycle (`cyclic`); once the first pass over an
+    // object has finished and it turns out to reach itself, rewrite_recursive
+    // builds it again with a placeholder of its own, so that the edge closes on the
+    // new object instead. Only an Object can close a cycle (see TypeArena), which
+    // is why nothing else gets a second pass.
     //
     // `lowest_cut` is the index in `open` of the outermost id any cut below this
     // call pointed at (usize::MAX when none did). A result is memoised only when
@@ -301,25 +313,72 @@ impl Substitution<'_> {
         if let Some(&done) = self.rewritten.get(&type_id) {
             return done;
         }
-        if !self.scan.contains(arena, type_id) {
+        if !contains_type_param(arena, type_id) {
             return type_id;
         }
         if let Some(position) = self.open.iter().position(|&id| id == type_id) {
             *lowest_cut = (*lowest_cut).min(position);
+            if !self.cyclic.contains(&type_id) {
+                self.cyclic.push(type_id);
+            }
             return type_id;
         }
 
         let depth = self.open.len();
         self.open.push(type_id);
         let mut cut_below = usize::MAX;
-        let result = self.rewrite_uncached(arena, type_id, &mut cut_below);
+        let mut result = self.rewrite_uncached(arena, type_id, &mut cut_below);
         self.open.pop();
+
+        if self.cyclic.contains(&type_id) && matches!(arena.get(type_id), Type::Object(_)) {
+            // The first pass left the self-edge on the original id, so its result
+            // is discarded. Cuts to outer nodes are met again on this pass, so the
+            // count restarts rather than carrying the first pass's.
+            cut_below = usize::MAX;
+            result = self.rewrite_recursive(arena, type_id, &mut cut_below);
+        }
 
         if cut_below >= depth {
             self.rewritten.insert(type_id, result);
+        } else {
+            // rewrite_recursive registers its placeholder before descending; when
+            // the result turns out not to be reusable, that entry must go too.
+            self.rewritten.remove(&type_id);
         }
         *lowest_cut = (*lowest_cut).min(cut_below);
         result
+    }
+
+    // Rebuilds a self-referential object around a placeholder of its own. The
+    // placeholder is registered as type_id's rewrite *before* the properties are
+    // walked, so the walk finds it where it used to find the cut, and the edge
+    // that closed on type_id now closes on the copy. The placeholder is not
+    // interned (see TypeArena::alloc_object_placeholder), which is what a
+    // recursive shape needs anyway: other types hold its raw id, so it could not
+    // be merged with an identical shape afterwards.
+    fn rewrite_recursive(
+        &mut self,
+        arena: &mut TypeArena,
+        type_id: TypeId,
+        cut: &mut usize,
+    ) -> TypeId {
+        let Type::Object(object) = arena.get(type_id).clone() else {
+            return type_id;
+        };
+        let placeholder = arena.alloc_object_placeholder();
+        self.rewritten.insert(type_id, placeholder);
+
+        let mut properties = Vec::with_capacity(object.properties.len());
+        for p in object.properties.iter() {
+            properties.push(PropertyEntry {
+                name: p.name.clone(),
+                type_id: self.rewrite(arena, p.type_id, cut),
+                optional: p.optional,
+                is_method: p.is_method,
+            });
+        }
+        arena.set(placeholder, Type::Object(ObjectType::new(properties)));
+        placeholder
     }
 
     fn rewrite_uncached(
@@ -401,7 +460,13 @@ pub(crate) fn ordered_generic_param_ids(
     type_id: TypeId,
     out: &mut Vec<crate::types::TypeParameterId>,
 ) {
-    ordered_generic_param_ids_inner(arena, type_id, out, &mut FxHashSet::default());
+    // Most callees are not generic. The arena remembers that per type, so the
+    // common case costs one lookup instead of a walk (this runs for every call
+    // expression, on each parameter and the return type).
+    if !contains_type_param(arena, type_id) {
+        return;
+    }
+    ordered_generic_param_ids_inner(arena, type_id, out, &mut Vec::new());
     out.sort_by_key(|id| id.parameter_index());
 }
 
@@ -414,15 +479,21 @@ pub(crate) fn ordered_generic_param_ids(
 // is what fixes the final order anyway. The `out.contains` check below is a
 // separate thing (it dedupes which *parameters* get collected) and does not
 // bound the walk.
+//
+// `visited` is a plain Vec with a linear lookup, not a hash set. Only types that
+// really mention a parameter get this far (the check above), and those are
+// function signatures and small generic objects, where a handful of comparisons
+// is cheaper than hashing and allocating a table on every call.
 fn ordered_generic_param_ids_inner(
     arena: &TypeArena,
     type_id: TypeId,
     out: &mut Vec<crate::types::TypeParameterId>,
-    visited: &mut FxHashSet<TypeId>,
+    visited: &mut Vec<TypeId>,
 ) {
-    if !visited.insert(type_id) {
+    if visited.contains(&type_id) {
         return;
     }
+    visited.push(type_id);
     match arena.get(type_id) {
         Type::GenericParameter(id, _, _) => {
             if !out.contains(id) {
@@ -451,15 +522,16 @@ fn ordered_generic_param_ids_inner(
 }
 
 pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
-    ParamScan::default().contains(arena, type_id)
+    let mut outermost_cut = usize::MAX;
+    scan_for_type_param(arena, type_id, &mut Vec::new(), &mut outermost_cut)
 }
 
-// The "does this type mention a type parameter" question, with the answers kept
-// for the length of one scan. Interning turned the type graph into a DAG: the
-// same `number[]` or `{ id: number }` node hangs off many parents. The old
-// version kept only the ids on the current path, so a shared node was walked
-// again for every parent, and substitute_impl asked the question at every level
-// on the way down, which made a deep parameter-free type quadratic to skip.
+// The "does this type mention a type parameter" question. Answers are kept in
+// the arena (TypeArena::cached_mentions_type_param), not per call: the checker
+// asks it for every call expression, mostly about types that never change, and
+// interning has turned the type graph into a DAG, so the same `number[]` or
+// `{ id: number }` node hangs off many parents. The old version kept only the
+// ids on the current path, so a shared node was walked again for every parent.
 //
 // Caching needs care because of recursive types. A type reachable from itself
 // (Node { next: Node }, via namespace::resolve's placeholder backpatch) is cut
@@ -469,63 +541,51 @@ pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
 // through some other branch. So `true` is always kept (one parameter anywhere is
 // enough), while `false` is kept only when every cut in the walk pointed at the
 // node itself or below it, meaning its whole subtree was actually explored.
-#[derive(Default)]
-struct ParamScan {
-    known: FxHashMap<TypeId, bool>,
-}
-
-impl ParamScan {
-    fn contains(&mut self, arena: &TypeArena, type_id: TypeId) -> bool {
-        let mut outermost_cut = usize::MAX;
-        self.visit(arena, type_id, &mut Vec::new(), &mut outermost_cut)
+//
+// `open` is the current path, outermost first. `lowest_cut` collects the
+// smallest index in `open` that any cut below this call pointed at.
+fn scan_for_type_param(
+    arena: &TypeArena,
+    type_id: TypeId,
+    open: &mut Vec<TypeId>,
+    lowest_cut: &mut usize,
+) -> bool {
+    if let Some(known) = arena.cached_mentions_type_param(type_id) {
+        return known;
+    }
+    if let Some(position) = open.iter().position(|&id| id == type_id) {
+        *lowest_cut = (*lowest_cut).min(position);
+        return false;
     }
 
-    // `open` is the current path, outermost first. `lowest_cut` collects the
-    // smallest index in `open` that any cut below this call pointed at.
-    fn visit(
-        &mut self,
-        arena: &TypeArena,
-        type_id: TypeId,
-        open: &mut Vec<TypeId>,
-        lowest_cut: &mut usize,
-    ) -> bool {
-        if let Some(&known) = self.known.get(&type_id) {
-            return known;
-        }
-        if let Some(position) = open.iter().position(|&id| id == type_id) {
-            *lowest_cut = (*lowest_cut).min(position);
-            return false;
-        }
-
-        let depth = open.len();
-        open.push(type_id);
-        let mut cut_below = usize::MAX;
-        let found = match arena.get(type_id) {
-            Type::GenericParameter(_, _, _) => true,
-            Type::Array(element) => self.visit(arena, *element, open, &mut cut_below),
-            Type::Function(f) => {
-                f.params
-                    .iter()
-                    .any(|p| self.visit(arena, p.type_id, open, &mut cut_below))
-                    || self.visit(arena, f.return_type, open, &mut cut_below)
-            }
-            Type::Object(o) => o
-                .properties
+    let depth = open.len();
+    open.push(type_id);
+    let mut cut_below = usize::MAX;
+    let found = match arena.get(type_id) {
+        Type::GenericParameter(_, _, _) => true,
+        Type::Array(element) => scan_for_type_param(arena, *element, open, &mut cut_below),
+        Type::Function(f) => {
+            f.params
                 .iter()
-                .any(|p| self.visit(arena, p.type_id, open, &mut cut_below)),
-            Type::Union(members) => members
-                .iter()
-                .any(|&m| self.visit(arena, m, open, &mut cut_below)),
-            _ => false,
-        };
-        open.pop();
-
-        if found || cut_below >= depth {
-            self.known.insert(type_id, found);
+                .any(|p| scan_for_type_param(arena, p.type_id, open, &mut cut_below))
+                || scan_for_type_param(arena, f.return_type, open, &mut cut_below)
         }
-        *lowest_cut = (*lowest_cut).min(cut_below);
-        found
+        Type::Object(o) => o
+            .properties
+            .iter()
+            .any(|p| scan_for_type_param(arena, p.type_id, open, &mut cut_below)),
+        Type::Union(members) => members
+            .iter()
+            .any(|&m| scan_for_type_param(arena, m, open, &mut cut_below)),
+        _ => false,
+    };
+    open.pop();
+
+    if found || cut_below >= depth {
+        arena.remember_mentions_type_param(type_id, found);
     }
+    *lowest_cut = (*lowest_cut).min(cut_below);
+    found
 }
 
 // The type an argument at index is checked against. A rest parameter absorbs
@@ -565,7 +625,11 @@ pub(crate) fn collect_generic_param_constraints(
     type_id: TypeId,
     constraints: &mut Vec<(crate::types::TypeParameterId, String, TypeId)>,
 ) {
-    collect_generic_param_constraints_inner(arena, type_id, constraints, &mut FxHashSet::default());
+    // Same early exit as ordered_generic_param_ids: no parameter, no constraints.
+    if !contains_type_param(arena, type_id) {
+        return;
+    }
+    collect_generic_param_constraints_inner(arena, type_id, constraints, &mut Vec::new());
 }
 
 // Same walk as ordered_generic_param_ids_inner, and the same choice of guard: a
@@ -577,11 +641,12 @@ fn collect_generic_param_constraints_inner(
     arena: &TypeArena,
     type_id: TypeId,
     constraints: &mut Vec<(crate::types::TypeParameterId, String, TypeId)>,
-    visited: &mut FxHashSet<TypeId>,
+    visited: &mut Vec<TypeId>,
 ) {
-    if !visited.insert(type_id) {
+    if visited.contains(&type_id) {
         return;
     }
+    visited.push(type_id);
     match arena.get(type_id) {
         Type::GenericParameter(id, name, Some(constraint)) => {
             if !constraints.iter().any(|(existing, _, _)| existing == id) {
@@ -641,5 +706,124 @@ mod tests {
 
         assert_eq!(bindings, vec![(id, number)]);
         assert_eq!(cache.len(), 2);
+    }
+
+    fn property(name: &str, type_id: TypeId) -> PropertyEntry {
+        PropertyEntry {
+            name: name.into(),
+            type_id,
+            optional: false,
+            is_method: false,
+        }
+    }
+
+    fn property_type(arena: &TypeArena, object: TypeId, name: &str) -> TypeId {
+        let Type::Object(object) = arena.get(object) else {
+            panic!("expected an object");
+        };
+        object
+            .properties
+            .iter()
+            .find(|p| &*p.name == name)
+            .map(|p| p.type_id)
+            .unwrap_or_else(|| panic!("no property {name}"))
+    }
+
+    // `Box<T> { value: T; next: Box<T> | null }` bound at T = number. The self
+    // edge used to be cut and left on the generic original, so `next` still read
+    // as `Box<T> | null` and `box.next.value` was T. It has to close on the new
+    // object instead, and nothing generic may be reachable from the result.
+    #[test]
+    fn recursive_object_substitution_closes_on_the_copy() {
+        let mut arena = TypeArena::new();
+        let id = TypeParameterId::new(0, 0);
+        let t = arena.alloc(Type::GenericParameter(id, "T".to_string(), None));
+        let number = arena.number();
+        let null = arena.null();
+
+        let node = arena.alloc_object_placeholder();
+        let next = arena.alloc_union(vec![node, null]);
+        arena.set(
+            node,
+            Type::Object(ObjectType::new(vec![
+                property("value", t),
+                property("next", next),
+            ])),
+        );
+
+        let bound = substitute_bound_type_params(&mut arena, node, &[(id, number)]);
+
+        assert_ne!(bound, node);
+        assert!(!contains_type_param(&arena, bound));
+        assert_eq!(property_type(&arena, bound, "value"), number);
+
+        let next = property_type(&arena, bound, "next");
+        let Type::Union(members) = arena.get(next).clone() else {
+            panic!("expected a union");
+        };
+        assert!(members.contains(&bound), "the edge must close on the copy");
+        assert!(
+            !members.contains(&node),
+            "the generic original must not leak"
+        );
+    }
+
+    // A -> B -> A, both mentioning T. Each copy has to point at the other copy,
+    // not back at a generic original.
+    #[test]
+    fn mutually_recursive_substitution_stays_inside_the_copies() {
+        let mut arena = TypeArena::new();
+        let id = TypeParameterId::new(0, 0);
+        let t = arena.alloc(Type::GenericParameter(id, "T".to_string(), None));
+        let number = arena.number();
+
+        let a = arena.alloc_object_placeholder();
+        let b = arena.alloc_object_placeholder();
+        arena.set(
+            b,
+            Type::Object(ObjectType::new(vec![
+                property("item", t),
+                property("back", a),
+            ])),
+        );
+        arena.set(
+            a,
+            Type::Object(ObjectType::new(vec![
+                property("item", t),
+                property("other", b),
+            ])),
+        );
+
+        let bound = substitute_bound_type_params(&mut arena, a, &[(id, number)]);
+
+        assert!(!contains_type_param(&arena, bound));
+        let other = property_type(&arena, bound, "other");
+        assert_ne!(other, b);
+        assert_eq!(property_type(&arena, other, "item"), number);
+        assert_eq!(property_type(&arena, other, "back"), bound);
+    }
+
+    // A recursive type with nothing to substitute comes back untouched: no copy,
+    // no second pass.
+    #[test]
+    fn recursive_object_without_type_parameters_is_returned_as_is() {
+        let mut arena = TypeArena::new();
+        let id = TypeParameterId::new(0, 0);
+        let number = arena.number();
+        let null = arena.null();
+        let node = arena.alloc_object_placeholder();
+        let next = arena.alloc_union(vec![node, null]);
+        arena.set(
+            node,
+            Type::Object(ObjectType::new(vec![
+                property("value", number),
+                property("next", next),
+            ])),
+        );
+
+        assert_eq!(
+            substitute_bound_type_params(&mut arena, node, &[(id, number)]),
+            node
+        );
     }
 }
