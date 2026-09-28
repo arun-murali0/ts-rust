@@ -457,7 +457,7 @@ impl TypeArena {
                     return true;
                 }
                 seen.push(pair);
-                let equal = x.properties.iter().zip(&y.properties).all(|(p, q)| {
+                let equal = x.properties.iter().zip(y.properties.iter()).all(|(p, q)| {
                     p.name == q.name
                         && p.optional == q.optional
                         && p.is_method == q.is_method

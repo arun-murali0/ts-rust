@@ -178,7 +178,7 @@ fn object_is_subtype(
 
     let mut sub_properties = sub.properties.iter().peekable();
 
-    'sup_properties: for sup_property in &sup.properties {
+    'sup_properties: for sup_property in sup.properties.iter() {
         while let Some(sub_property) = sub_properties.peek() {
             match sub_property.name.cmp(&sup_property.name) {
                 Ordering::Less => {

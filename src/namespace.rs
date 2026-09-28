@@ -709,7 +709,7 @@ impl<'a> TypeNamespace<'a> {
                         None => parent_type,
                     };
                     if let Type::Object(parent_object) = arena.get(parent_type) {
-                        properties = parent_object.properties.clone();
+                        properties = parent_object.properties.to_vec();
                     }
                 }
             }

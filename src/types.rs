@@ -222,7 +222,16 @@ pub struct ObjectType {
     // step (a merge-join, not a lookup per property) and TypeArena::structurally_equal
     // compares them pairwise, and both are only correct on sorted input. Build one
     // with ObjectType::new, which sorts, and never assemble the struct by hand.
-    pub properties: Vec<PropertyEntry>,
+    //
+    // A shared slice rather than a Vec: the walkers in semantic::generics, the call
+    // checker and the class checker all take an owned copy of a Type out of the
+    // arena (they need it after they start allocating), and with a Vec that copy
+    // was a heap allocation plus one refcount bump per property, on every call
+    // expression and every substitution step. Cloning the Rc is a single bump.
+    // The list never changes after construction (a placeholder is finished by
+    // replacing the whole Type through TypeArena::set), so sharing is safe. Hash
+    // and equality see through the Rc, so the intern digests are unchanged.
+    pub properties: Rc<[PropertyEntry]>,
 }
 
 impl ObjectType {
@@ -231,7 +240,9 @@ impl ObjectType {
     // pay almost nothing for not having to know that.
     pub fn new(mut properties: Vec<PropertyEntry>) -> Self {
         properties.sort_by(|a, b| a.name.cmp(&b.name));
-        Self { properties }
+        Self {
+            properties: properties.into(),
+        }
     }
 }
 
