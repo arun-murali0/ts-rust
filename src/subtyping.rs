@@ -608,8 +608,10 @@ mod tests {
     #[test]
     fn union_dedupes_equal_literals_even_with_different_type_ids() {
         let mut arena = TypeArena::new();
-        let a1 = arena.alloc(Type::StringLiteral("a".to_string()));
-        let a2 = arena.alloc(Type::StringLiteral("a".to_string()));
+        // alloc_fresh, not alloc: alloc() reuses one id for identical literals, and
+        // this test is specifically about two equal literals in different slots.
+        let a1 = arena.alloc_fresh(Type::StringLiteral("a".to_string()));
+        let a2 = arena.alloc_fresh(Type::StringLiteral("a".to_string()));
         assert_ne!(
             a1, a2,
             "test setup: these must be genuinely different TypeIds"

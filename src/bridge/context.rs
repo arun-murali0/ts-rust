@@ -30,11 +30,12 @@ pub struct CheckContext<'ast, 'src> {
     // on the pair in order, never symmetrized: subtyping is not symmetric (see
     // subtyping.rs), so (a, b) and (b, a) are cached as independent entries.
     //
-    // This only catches repeats of the *same* TypeId pair -- it is not type
-    // canonicalization. Two structurally identical but separately allocated
-    // types (e.g. the same-shaped object literal checked at two different call
-    // sites) still get different TypeIds and therefore different, uncached
-    // entries here. Concrete case this does catch: repeated re-checks of the
+    // This only catches repeats of the *same* TypeId pair. alloc() now reuses one
+    // TypeId for identical anonymous composites (so the same-shaped object
+    // literal at two call sites shares an entry here), but a named type, a union,
+    // or a placeholder-originated type still has its own id and its own,
+    // uncached entries even when it matches another by shape. Concrete case this
+    // does catch: repeated re-checks of the
     // same subterm pair reached from different branches of one recursive
     // object/union comparison, which all go through ctx.semantic().
     //

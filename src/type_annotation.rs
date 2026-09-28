@@ -173,7 +173,7 @@ pub fn resolve_ts_type(
             // Only the declaration's own parameters are bound here, so a parameter
             // a member declares for itself (`map<U>(...)`) is kept for inference
             // at the call site instead of becoming unknown.
-            let result = crate::semantic::substitute_bound_type_params(arena, base, &bindings);
+            let mut result = crate::semantic::substitute_bound_type_params(arena, base, &bindings);
 
             // Prints as `Box<number>`, not Box's full member list, in a message.
             // Skipped when substitution left `result` identical to `base`: that
@@ -190,6 +190,11 @@ pub fn resolve_ts_type(
                     .map(|(_, bound)| crate::type_display::display_type(arena, *bound))
                     .collect::<Vec<_>>()
                     .join(", ");
+                // Substitution allocates through alloc(), so `result` may be the id
+                // every identical anonymous shape shares (a Box<number> and a
+                // Pair<number> with the same members, or a plain `{ value: number }`).
+                // Name a copy that is this instantiation's own.
+                result = arena.make_unique(result);
                 arena.set_display_name(result, format!("{}<{args}>", id.name));
             }
 
@@ -289,7 +294,10 @@ fn resolve_builtin_generic(
                 None => arena.void(),
             };
             let argument_text = crate::type_display::display_type(arena, argument);
-            let opaque = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+            // alloc_fresh, not alloc: every Promise<T> is the same empty object and
+            // is told apart only by the name below, so a reused id would give
+            // Promise<number> and Promise<string> one shared name.
+            let opaque = arena.alloc_fresh(Type::Object(ObjectType::new(Vec::new())));
             arena.set_display_name(opaque, format!("Promise<{argument_text}>"));
             Some(opaque)
         }
@@ -311,7 +319,10 @@ fn resolve_builtin_generic(
             };
             let key_text = crate::type_display::display_type(arena, key);
             let value_text = crate::type_display::display_type(arena, value);
-            let opaque = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+            // alloc_fresh for the same reason as Promise above, and more so:
+            // record_value_types is keyed by this id, so a shared id would give
+            // Record<string, number> and Record<string, string> one value type.
+            let opaque = arena.alloc_fresh(Type::Object(ObjectType::new(Vec::new())));
             arena.set_display_name(opaque, format!("Record<{key_text}, {value_text}>"));
             arena.set_record_value_type(opaque, value);
             Some(opaque)

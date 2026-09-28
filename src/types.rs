@@ -1,14 +1,22 @@
+use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
 use crate::arena::{TypeArena, TypeId};
 
-// The derived PartialEq compares every TypeId field by its raw arena slot, so two
-// composites (Object, Function, Array) that have the same shape but were allocated
-// at different times compare as unequal, and only literals and the fixed
-// primitives compare the way their content suggests. Do not use `==` on a Type to
-// ask "are these the same type"; use TypeArena::structurally_equal, which follows
-// TypeIds through the arena.
-#[derive(Clone, Debug, PartialEq)]
+// PartialEq, Eq and Hash on Type are written by hand (below the enum) rather than
+// derived, for one reason: NumberLiteral(f64). f64 has no total Eq or Hash (NaN is
+// not equal to itself), but TypeArena::alloc uses a Type as a hash-map key to
+// reuse the TypeId of an identical composite. NumberLiteral is therefore compared
+// and hashed by f64::to_bits(), so `==` and `hash` always agree with each other.
+//
+// Both are SHALLOW: a composite's TypeId fields are compared and hashed as opaque
+// ids, never followed through the arena. That is what makes the intern table safe
+// for self-referential types (two still-empty placeholders have different ids, so
+// they never look alike) and it is only sound because every child id was itself
+// obtained from the arena. A consequence: `==` on a Type still cannot answer "are
+// these the same type by shape" for composites whose children are different ids.
+// Use TypeArena::structurally_equal for that; it follows TypeIds through the arena.
+#[derive(Clone, Debug)]
 pub enum Type {
     Number,
     String,
@@ -51,6 +59,98 @@ pub enum Type {
     GenericParameter(TypeParameterId, String, Option<TypeId>),
 }
 
+impl PartialEq for Type {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Type::Number, Type::Number)
+            | (Type::String, Type::String)
+            | (Type::Boolean, Type::Boolean)
+            | (Type::Null, Type::Null)
+            | (Type::Undefined, Type::Undefined)
+            | (Type::Any, Type::Any)
+            | (Type::Unknown, Type::Unknown)
+            | (Type::Error, Type::Error)
+            | (Type::Never, Type::Never)
+            | (Type::Void, Type::Void) => true,
+
+            (Type::Function(a), Type::Function(b)) => a == b,
+            (Type::Object(a), Type::Object(b)) => a == b,
+            (Type::Array(a), Type::Array(b)) => a == b,
+            (Type::Union(a), Type::Union(b)) => a == b,
+            (Type::StringLiteral(a), Type::StringLiteral(b)) => a == b,
+            // Bit pattern, not IEEE ==: keeps this consistent with Hash below, and
+            // makes 0.0 and -0.0 distinct while a NaN literal equals itself.
+            (Type::NumberLiteral(a), Type::NumberLiteral(b)) => a.to_bits() == b.to_bits(),
+            (Type::BooleanLiteral(a), Type::BooleanLiteral(b)) => a == b,
+            (
+                Type::GenericParameter(id_a, name_a, bound_a),
+                Type::GenericParameter(id_b, name_b, bound_b),
+            ) => id_a == id_b && name_a == name_b && bound_a == bound_b,
+
+            // Different variants. Every variant is named here on purpose, with no
+            // wildcard, so adding a Type variant is a compile error until it is
+            // handled above instead of silently comparing unequal to itself.
+            (
+                Type::Number
+                | Type::String
+                | Type::Boolean
+                | Type::Null
+                | Type::Undefined
+                | Type::Any
+                | Type::Unknown
+                | Type::Error
+                | Type::Never
+                | Type::Void
+                | Type::Function(_)
+                | Type::Object(_)
+                | Type::Array(_)
+                | Type::Union(_)
+                | Type::StringLiteral(_)
+                | Type::NumberLiteral(_)
+                | Type::BooleanLiteral(_)
+                | Type::GenericParameter(..),
+                _,
+            ) => false,
+        }
+    }
+}
+
+impl Eq for Type {}
+
+impl Hash for Type {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Type::Number
+            | Type::String
+            | Type::Boolean
+            | Type::Null
+            | Type::Undefined
+            | Type::Any
+            | Type::Unknown
+            | Type::Error
+            | Type::Never
+            | Type::Void => {}
+
+            Type::Function(function) => function.hash(state),
+            Type::Object(object) => object.hash(state),
+            Type::Array(element) => element.hash(state),
+            // Order-sensitive, matching the derived Vec equality above. Unions
+            // never enter the arena's intern table (alloc_union owns their
+            // normalisation), so this exists only to keep Hash total.
+            Type::Union(members) => members.hash(state),
+            Type::StringLiteral(text) => text.hash(state),
+            Type::NumberLiteral(value) => value.to_bits().hash(state),
+            Type::BooleanLiteral(value) => value.hash(state),
+            Type::GenericParameter(id, name, bound) => {
+                id.hash(state);
+                name.hash(state);
+                bound.hash(state);
+            }
+        }
+    }
+}
+
 // Identifies a declared type parameter by where it is written in source, not by an
 // arena slot and not by an AST pointer. Two distinct resolutions of the same declared
 // `T` (once while resolving a function's signature, again while checking its body)
@@ -82,7 +182,7 @@ impl TypeParameterId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FunctionType {
     pub params: Vec<Param>,
     pub return_type: TypeId,
@@ -90,7 +190,7 @@ pub struct FunctionType {
     pub is_untyped: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Param {
     pub type_id: TypeId,
     pub optional: bool,
@@ -115,7 +215,7 @@ impl Param {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ObjectType {
     // Always sorted by name. subtyping::object_is_subtype walks two of these in
     // step (a merge-join, not a lookup per property) and TypeArena::structurally_equal
@@ -134,7 +234,7 @@ impl ObjectType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PropertyEntry {
     // `Rc<str>` rather than `String`: class inheritance resolution clones the whole
     // accumulated property list once per level of an inheritance chain (see

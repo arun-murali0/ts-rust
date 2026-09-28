@@ -576,8 +576,9 @@ impl<'a> TypeNamespace<'a> {
 
         match (placeholder, resolved) {
             (Some(placeholder_id), Some(final_id)) => {
-                // resolve_object_members and resolve_class always allocate
-                // their own fresh Object, so final_id is a different, now
+                // resolve_object_members and resolve_class allocate an Object
+                // (through alloc(), so it may be an id shared with an identical
+                // anonymous shape), so final_id is a different, now
                 // redundant TypeId holding the right content -- placeholder_id
                 // is the one a self-reference (and entry.resolved) actually
                 // points to, so that's what gets filled in and reported.
@@ -598,6 +599,15 @@ impl<'a> TypeNamespace<'a> {
                 Resolution::NotFound
             }
             (None, Some(type_id)) => {
+                // `type Scores = number[]` resolves to the id every `number[]`
+                // shares. Naming that would make every array of numbers print as
+                // "Scores", so an alias gets a copy that is its own. An id that is
+                // already unique (an interface's, a primitive) is left as it is.
+                let type_id = if is_non_generic {
+                    arena.make_unique(type_id)
+                } else {
+                    type_id
+                };
                 entry.resolved = Some(type_id);
                 if is_non_generic {
                     arena.set_display_name(type_id, name);

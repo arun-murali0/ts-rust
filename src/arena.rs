@@ -12,9 +12,13 @@ pub struct TypeArena {
     // ("Dog"), a generic instantiation with its arguments ("Box<number>"), an
     // enum by its name ("Weird"). Keyed by TypeId rather than carried on Type
     // itself, so display is a side concern display_type can consult, not
-    // something every match arm over Type has to thread through. Safe because
-    // alloc() never reuses a TypeId for a different value (see its own doc
-    // comment) -- one TypeId always means one thing for the life of this arena.
+    // something every match arm over Type has to thread through. Safe only for a
+    // TypeId that is unique to whatever it names: alloc() reuses one TypeId for
+    // every identical anonymous composite (see its doc comment), so a name given
+    // to such a shared id would show up on every other use of the same shape.
+    // Anything that gets a name must therefore come from alloc_fresh,
+    // alloc_object_placeholder or make_unique; set_display_name asserts this in
+    // debug builds.
     display_names: FxHashMap<TypeId, String>,
 
     // The value type of a `Record<K, V>`-shaped TypeId (see
@@ -23,8 +27,16 @@ pub struct TypeArena {
     // property access on a Record-tagged TypeId returns this value type for
     // *any* key, rather than modelling K at all (so a Record<"a" | "b",
     // number> does not reject an unrelated key the way tsc would). Same
-    // TypeId-uniqueness safety as display_names above.
+    // TypeId-uniqueness requirement as display_names above.
     record_value_types: FxHashMap<TypeId, TypeId>,
+
+    // Auxiliary index behind alloc(): the content of every anonymous composite
+    // allocated so far -> the one TypeId that holds it. `types` stays the source
+    // of truth (a TypeId is still just an index into it); this map only answers
+    // "does a slot for exactly this content already exist?" before a new one is
+    // pushed. Keyed on Type itself, which is shallow-hashed (see types.rs), so a
+    // lookup never walks the arena.
+    interned: FxHashMap<Type, TypeId>,
 }
 
 impl TypeArena {
@@ -37,6 +49,7 @@ impl TypeArena {
             types: Vec::new(),
             display_names: FxHashMap::default(),
             record_value_types: FxHashMap::default(),
+            interned: FxHashMap::default(),
         };
 
         arena.alloc(Type::Number);
@@ -52,13 +65,82 @@ impl TypeArena {
         arena
     }
 
-    // Always pushes a new slot, even for a Type value equal to one already stored.
-    // Two structurally identical Type values can still be semantically distinct
-    // (see TypeParameterId in types.rs, whose identity depends on exactly this), so
-    // the arena never tries to deduplicate types on the caller's behalf.
+    // Allocates `ty`, reusing the existing TypeId when an identical anonymous
+    // composite was allocated before (hash-consing). Objects, arrays, functions,
+    // literals and generic parameters are reused; everything else always gets a
+    // new slot:
+    //   - the fixed primitives (numbered 0..=9 in new(), never allocated again),
+    //   - unions, whose flattening and dedup is alloc_union's job, and
+    //   - object placeholders, which alloc_object_placeholder pushes directly.
+    //
+    // Because two calls can now return the same TypeId, a TypeId no longer means
+    // "this one allocation". Anything that needs an id that is uniquely its own
+    // (to attach a display name or a Record value type to it) must use
+    // alloc_fresh, or make_unique on an id it was handed.
+    //
+    // A GenericParameter is not at risk: its key includes its TypeParameterId,
+    // so a `T` from one declaration never matches a `T` from another.
     pub fn alloc(&mut self, ty: Type) -> TypeId {
+        if !Self::is_internable(&ty) {
+            return self.push(ty);
+        }
+        if let Some(&existing) = self.interned.get(&ty) {
+            return existing;
+        }
+        let id = self.push(ty.clone());
+        self.interned.insert(ty, id);
+        id
+    }
+
+    // Always pushes a new slot and never enters the intern table, so the id is
+    // guaranteed to be unique to this call. For the few types that carry an
+    // identity beyond their shape: an opaque `Promise<T>` or `Record<K, V>` (an
+    // empty object distinguished only by a display name or a side-table entry),
+    // and the named result of a generic instantiation.
+    pub fn alloc_fresh(&mut self, ty: Type) -> TypeId {
+        self.push(ty)
+    }
+
+    // Returns `id` itself when it is already unique to its holder, or a fresh copy
+    // of its content when it is a shared intern-table id. Call this before naming
+    // a type that came out of resolution (`type Scores = number[]`, an enum whose
+    // one member collapsed to a literal): the resolved id may be the very same id
+    // every other `number[]` uses, and naming it would rename all of them.
+    pub fn make_unique(&mut self, id: TypeId) -> TypeId {
+        if self.is_interned(id) {
+            let copy = self.get(id).clone();
+            self.push(copy)
+        } else {
+            id
+        }
+    }
+
+    fn push(&mut self, ty: Type) -> TypeId {
         self.types.push(ty);
         TypeId((self.types.len() - 1) as u32)
+    }
+
+    fn is_internable(ty: &Type) -> bool {
+        matches!(
+            ty,
+            Type::Object(_)
+                | Type::Array(_)
+                | Type::Function(_)
+                | Type::StringLiteral(_)
+                | Type::NumberLiteral(_)
+                | Type::BooleanLiteral(_)
+                | Type::GenericParameter(..)
+        )
+    }
+
+    // Whether `id` is the shared slot the intern table hands out for its content.
+    // Checked by looking the content up rather than tracking a flag per slot: a
+    // placeholder, an alloc_fresh id, or a slot rewritten by `set` can hold
+    // content identical to an interned one, but the table maps that content to a
+    // different id, so it correctly reports false.
+    fn is_interned(&self, id: TypeId) -> bool {
+        let ty = self.get(id);
+        Self::is_internable(ty) && self.interned.get(ty) == Some(&id)
     }
 
     // Flattens nested unions and drops never members, since never contributes
@@ -86,7 +168,8 @@ impl TypeArena {
         match flat.len() {
             0 => self.never(),
             1 => flat[0],
-            _ => self.alloc(Type::Union(flat)),
+            // push, not alloc: unions are deliberately kept out of the intern table.
+            _ => self.push(Type::Union(flat)),
         }
     }
 
@@ -100,6 +183,11 @@ impl TypeArena {
     // same TypeId (see namespace::resolve's own comment on this) and the more
     // specific caller should win.
     pub fn set_display_name(&mut self, type_id: TypeId, name: impl Into<String>) {
+        debug_assert!(
+            !self.is_interned(type_id),
+            "naming a shared (interned) TypeId would rename every identical type; \
+             use alloc_fresh or make_unique first"
+        );
         self.display_names.insert(type_id, name.into());
     }
 
@@ -108,6 +196,10 @@ impl TypeArena {
     }
 
     pub fn set_record_value_type(&mut self, record_type: TypeId, value_type: TypeId) {
+        debug_assert!(
+            !self.is_interned(record_type),
+            "a Record's value type must hang off a TypeId unique to it; use alloc_fresh"
+        );
         self.record_value_types.insert(record_type, value_type);
     }
 
@@ -122,8 +214,15 @@ impl TypeArena {
     // is finished: the self-reference resolves to this placeholder's TypeId by
     // identity, and `set` completes that same id afterward (see
     // namespace::resolve for how it's used).
+    //
+    // Pushed directly, never through alloc(): an empty object would otherwise be
+    // reused for every other empty object (and every other placeholder), and
+    // `set` would then overwrite all of them at once. A placeholder also stays
+    // out of the intern table after `set` completes it, because other types
+    // already hold its raw TypeId and it could never be merged with an identical
+    // shape retroactively.
     pub fn alloc_object_placeholder(&mut self) -> TypeId {
-        self.alloc(Type::Object(ObjectType::new(Vec::new())))
+        self.push(Type::Object(ObjectType::new(Vec::new())))
     }
 
     // Overwrites whatever is already at id. Only meant for finishing a
@@ -131,6 +230,11 @@ impl TypeArena {
     // stores a TypeId, never a cloned Type, so nothing can be holding a stale
     // copy of the placeholder's old (empty) content by the time this runs.
     pub fn set(&mut self, id: TypeId, ty: Type) {
+        debug_assert!(
+            !self.is_interned(id),
+            "set() would change the content of a shared (interned) slot and leave \
+             the intern table pointing at the wrong type"
+        );
         self.types[id.0 as usize] = ty;
     }
 
@@ -166,7 +270,9 @@ impl TypeArena {
             | (Type::Void, Type::Void) => true,
 
             (Type::StringLiteral(x), Type::StringLiteral(y)) => x == y,
-            (Type::NumberLiteral(x), Type::NumberLiteral(y)) => x == y,
+            // Bit pattern, the same rule Type's own Eq/Hash use, so an interned
+            // literal and this comparison never disagree about 0.0 and -0.0.
+            (Type::NumberLiteral(x), Type::NumberLiteral(y)) => x.to_bits() == y.to_bits(),
             (Type::BooleanLiteral(x), Type::BooleanLiteral(y)) => x == y,
 
             (Type::Array(x), Type::Array(y)) => self.structurally_equal(*x, *y),
@@ -265,8 +371,20 @@ mod tests {
         }
     }
 
+    // Built with alloc_fresh, not alloc: these tests exercise structurally_equal on
+    // identical shapes that sit in *different* slots, which alloc's hash-consing
+    // would otherwise collapse into one before the comparison could matter. The
+    // consing behavior itself is covered by the alloc_* tests further down.
     fn object(arena: &mut TypeArena, properties: Vec<PropertyEntry>) -> TypeId {
-        arena.alloc(Type::Object(ObjectType::new(properties)))
+        arena.alloc_fresh(Type::Object(ObjectType::new(properties)))
+    }
+
+    // `{ <name>: <type_id> }` through the consing alloc(), for the tests that are
+    // about alloc() itself rather than about structurally_equal.
+    fn shared_object(arena: &mut TypeArena, name: &str, type_id: TypeId, optional: bool) -> TypeId {
+        arena.alloc(Type::Object(ObjectType::new(vec![property(
+            name, type_id, optional,
+        )])))
     }
 
     // `{ a: { b: number } }`, built from scratch each call so every call lands in
@@ -351,8 +469,8 @@ mod tests {
         let mut arena = TypeArena::new();
         let first_element = nested(&mut arena);
         let second_element = nested(&mut arena);
-        let first = arena.alloc(Type::Array(first_element));
-        let second = arena.alloc(Type::Array(second_element));
+        let first = arena.alloc_fresh(Type::Array(first_element));
+        let second = arena.alloc_fresh(Type::Array(second_element));
         let numbers = arena.alloc(Type::Array(arena.number()));
 
         assert!(arena.structurally_equal(first, second));
@@ -364,7 +482,7 @@ mod tests {
         let mut arena = TypeArena::new();
         let (number, string) = (arena.number(), arena.string());
         let make = |arena: &mut TypeArena, param: TypeId, ret: TypeId, optional: bool| {
-            arena.alloc(Type::Function(FunctionType {
+            arena.alloc_fresh(Type::Function(FunctionType {
                 params: vec![Param {
                     type_id: param,
                     optional,
@@ -403,9 +521,10 @@ mod tests {
         let same_declaration = TypeParameterId::new(10, 0);
         let other_declaration = TypeParameterId::new(50, 0);
 
-        let first = arena.alloc(Type::GenericParameter(same_declaration, "T".into(), None));
-        let again = arena.alloc(Type::GenericParameter(same_declaration, "T".into(), None));
-        let lookalike = arena.alloc(Type::GenericParameter(other_declaration, "T".into(), None));
+        let first = arena.alloc_fresh(Type::GenericParameter(same_declaration, "T".into(), None));
+        let again = arena.alloc_fresh(Type::GenericParameter(same_declaration, "T".into(), None));
+        let lookalike =
+            arena.alloc_fresh(Type::GenericParameter(other_declaration, "T".into(), None));
 
         assert!(arena.structurally_equal(first, again));
         assert!(
@@ -426,5 +545,280 @@ mod tests {
 
         let names: Vec<&str> = built.properties.iter().map(|p| &*p.name).collect();
         assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    // ---- hash-consing (alloc) ----
+
+    #[test]
+    fn alloc_reuses_the_id_for_identical_anonymous_composites() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+
+        let array_a = arena.alloc(Type::Array(number));
+        let array_b = arena.alloc(Type::Array(number));
+        assert_eq!(array_a, array_b);
+
+        let object_a = shared_object(&mut arena, "a", number, false);
+        let object_b = shared_object(&mut arena, "a", number, false);
+        assert_eq!(object_a, object_b);
+
+        let literal_a = arena.alloc(Type::StringLiteral("x".into()));
+        let literal_b = arena.alloc(Type::StringLiteral("x".into()));
+        assert_eq!(literal_a, literal_b);
+
+        let function = |arena: &mut TypeArena| {
+            arena.alloc(Type::Function(FunctionType {
+                params: vec![Param::required(number)],
+                return_type: string,
+                is_untyped: false,
+            }))
+        };
+        assert_eq!(function(&mut arena), function(&mut arena));
+    }
+
+    #[test]
+    fn alloc_keeps_different_content_apart() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+
+        let numbers = arena.alloc(Type::Array(number));
+        let strings = arena.alloc(Type::Array(string));
+        assert_ne!(numbers, strings);
+
+        let literal_a = arena.alloc(Type::StringLiteral("a".into()));
+        let literal_b = arena.alloc(Type::StringLiteral("b".into()));
+        assert_ne!(literal_a, literal_b);
+
+        let yes = arena.alloc(Type::BooleanLiteral(true));
+        let no = arena.alloc(Type::BooleanLiteral(false));
+        assert_ne!(yes, no);
+
+        let required = shared_object(&mut arena, "a", number, false);
+        let optional = shared_object(&mut arena, "a", number, true);
+        assert_ne!(required, optional);
+    }
+
+    #[test]
+    fn object_property_order_does_not_stop_two_objects_sharing_an_id() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let one = arena.alloc(Type::Object(ObjectType::new(vec![
+            property("z", string, false),
+            property("a", number, false),
+        ])));
+        let two = arena.alloc(Type::Object(ObjectType::new(vec![
+            property("a", number, false),
+            property("z", string, false),
+        ])));
+
+        assert_eq!(one, two, "ObjectType::new sorts, so the keys are identical");
+    }
+
+    #[test]
+    fn number_literals_are_keyed_on_their_bits() {
+        let mut arena = TypeArena::new();
+
+        let positive_zero = arena.alloc(Type::NumberLiteral(0.0));
+        let negative_zero = arena.alloc(Type::NumberLiteral(-0.0));
+        assert_ne!(
+            positive_zero, negative_zero,
+            "0.0 and -0.0 have different bit patterns, so they are different keys"
+        );
+        assert!(
+            !arena.structurally_equal(positive_zero, negative_zero),
+            "structurally_equal must agree with the intern key about signed zero"
+        );
+
+        let nan_a = arena.alloc(Type::NumberLiteral(f64::NAN));
+        let nan_b = arena.alloc(Type::NumberLiteral(f64::NAN));
+        assert_eq!(
+            nan_a, nan_b,
+            "a NaN literal is reused, not allocated forever"
+        );
+
+        let one_a = arena.alloc(Type::NumberLiteral(1.0));
+        let one_b = arena.alloc(Type::NumberLiteral(1.0));
+        assert_eq!(one_a, one_b);
+    }
+
+    #[test]
+    fn generic_parameters_collapse_only_within_one_declaration() {
+        let mut arena = TypeArena::new();
+        let declaration = TypeParameterId::new(10, 0);
+        let other_declaration = TypeParameterId::new(50, 0);
+
+        let first = arena.alloc(Type::GenericParameter(declaration, "T".into(), None));
+        let again = arena.alloc(Type::GenericParameter(declaration, "T".into(), None));
+        let lookalike = arena.alloc(Type::GenericParameter(other_declaration, "T".into(), None));
+
+        assert_eq!(first, again);
+        assert_ne!(
+            first, lookalike,
+            "another `T` with the same name stays distinct"
+        );
+    }
+
+    #[test]
+    fn parameter_names_keep_otherwise_identical_functions_apart() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let named = |arena: &mut TypeArena, name: &str| {
+            arena.alloc(Type::Function(FunctionType {
+                params: vec![Param {
+                    type_id: number,
+                    optional: false,
+                    rest: false,
+                    name: Some(name.into()),
+                }],
+                return_type: string,
+                is_untyped: false,
+            }))
+        };
+
+        let x = named(&mut arena, "x");
+        let y = named(&mut arena, "y");
+
+        // A "missing argument" diagnostic names the parameter, so merging these
+        // would let one function report the other's parameter name.
+        assert_ne!(x, y);
+        assert!(
+            arena.structurally_equal(x, y),
+            "still the same type by shape; only the ids differ"
+        );
+    }
+
+    #[test]
+    fn unions_are_not_interned() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+
+        let one = arena.alloc_union(vec![number, string]);
+        let two = arena.alloc_union(vec![number, string]);
+
+        assert_ne!(one, two, "alloc_union keeps its own path");
+        assert!(arena.structurally_equal(one, two));
+    }
+
+    #[test]
+    fn primitives_keep_their_fixed_slots() {
+        let arena = TypeArena::new();
+        assert_eq!(arena.number(), TypeId(0));
+        assert_eq!(arena.void(), TypeId(9));
+    }
+
+    // ---- carve-outs: types that must keep an id of their own ----
+
+    #[test]
+    fn placeholders_are_never_shared_with_each_other_or_with_an_empty_object() {
+        let mut arena = TypeArena::new();
+
+        let first = arena.alloc_object_placeholder();
+        let second = arena.alloc_object_placeholder();
+        let empty = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+
+        assert_ne!(first, second);
+        assert_ne!(first, empty);
+        assert_ne!(second, empty);
+    }
+
+    #[test]
+    fn a_completed_placeholder_never_joins_the_intern_table() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let placeholder = arena.alloc_object_placeholder();
+        arena.set(
+            placeholder,
+            Type::Object(ObjectType::new(vec![property("a", number, false)])),
+        );
+
+        let same_shape = shared_object(&mut arena, "a", number, false);
+
+        assert_ne!(
+            placeholder, same_shape,
+            "other types already hold the placeholder's raw id, so it is never merged"
+        );
+        assert!(arena.structurally_equal(placeholder, same_shape));
+    }
+
+    #[test]
+    fn two_open_placeholders_never_merge_through_a_shape_that_mentions_them() {
+        let mut arena = TypeArena::new();
+        let first = arena.alloc_object_placeholder();
+        let second = arena.alloc_object_placeholder();
+
+        // Both are still the same empty `{}` here. The key hashes the ids, not
+        // what they point at, so these must stay two different arrays.
+        let first_list = arena.alloc(Type::Array(first));
+        let second_list = arena.alloc(Type::Array(second));
+
+        assert_ne!(first_list, second_list);
+    }
+
+    #[test]
+    fn alloc_fresh_never_reuses_an_id_even_for_identical_content() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+
+        let shared = arena.alloc(Type::Array(number));
+        let fresh_a = arena.alloc_fresh(Type::Array(number));
+        let fresh_b = arena.alloc_fresh(Type::Array(number));
+        let after = arena.alloc(Type::Array(number));
+
+        assert_ne!(fresh_a, shared);
+        assert_ne!(fresh_a, fresh_b);
+        assert_eq!(
+            after, shared,
+            "alloc_fresh does not disturb the intern table"
+        );
+    }
+
+    #[test]
+    fn make_unique_copies_a_shared_id_and_leaves_an_owned_one_alone() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+
+        let shared = arena.alloc(Type::Array(number));
+        let copy = arena.make_unique(shared);
+        assert_ne!(copy, shared);
+        assert!(arena.structurally_equal(copy, shared));
+        let again = arena.alloc(Type::Array(number));
+        assert_eq!(again, shared, "the table still points at the original");
+
+        let fresh = arena.alloc_fresh(Type::Array(number));
+        assert_eq!(arena.make_unique(fresh), fresh);
+        assert_eq!(arena.make_unique(arena.number()), arena.number());
+    }
+
+    #[test]
+    fn naming_a_unique_copy_does_not_rename_the_shared_type() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+
+        let shared = arena.alloc(Type::Array(number));
+        let scores = arena.make_unique(shared);
+        arena.set_display_name(scores, "Scores");
+
+        assert_eq!(arena.display_name(scores), Some("Scores"));
+        assert_eq!(arena.display_name(shared), None);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "interned")]
+    fn naming_a_shared_id_is_caught_in_debug_builds() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let shared = arena.alloc(Type::Array(number));
+        arena.set_display_name(shared, "Oops");
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "interned")]
+    fn rewriting_a_shared_slot_with_set_is_caught_in_debug_builds() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let shared = arena.alloc(Type::Array(number));
+        arena.set(shared, Type::Array(arena.string()));
     }
 }

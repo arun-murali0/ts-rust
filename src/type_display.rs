@@ -346,7 +346,7 @@ mod tests {
     fn a_named_type_prints_its_name_instead_of_its_shape() {
         let mut arena = TypeArena::new();
         let string = arena.string();
-        let dog = arena.alloc(Type::Object(ObjectType::new(vec![PropertyEntry {
+        let dog = arena.alloc_fresh(Type::Object(ObjectType::new(vec![PropertyEntry {
             name: "name".into(),
             type_id: string,
             optional: false,
@@ -360,7 +360,7 @@ mod tests {
     fn a_named_type_nested_in_another_type_still_prints_its_name() {
         let mut arena = TypeArena::new();
         let string = arena.string();
-        let dog = arena.alloc(Type::Object(ObjectType::new(vec![PropertyEntry {
+        let dog = arena.alloc_fresh(Type::Object(ObjectType::new(vec![PropertyEntry {
             name: "name".into(),
             type_id: string,
             optional: false,
