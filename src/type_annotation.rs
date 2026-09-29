@@ -238,11 +238,14 @@ pub fn resolve_ts_type(
 // bridge::check_program to report. The bound may mention earlier parameters
 // (`<T, U extends T>`), so it is substituted with the arguments bound so far.
 //
-// Skipped when either side still contains a type parameter: this checker's
-// subtyping does not look through a parameter's own bound, so comparing them here
-// could report an error tsc would not. Such an argument is checked where the
-// enclosing generic is instantiated instead. An argument that failed to resolve
-// is the error type, which is compatible with everything.
+// Skipped when the bound itself still mentions a type parameter that has no
+// binding yet (a bound written in terms of a parameter that was not supplied):
+// there is nothing concrete to compare against. An argument that is a type
+// parameter of the enclosing declaration is compared normally, through its own
+// bound (see the GenericParameter arm in subtyping.rs), so
+// `function f<T extends string>(b: Box<T>)` passes for `Box<U extends string>`
+// while an unconstrained T does not, as in tsc. An argument that failed to
+// resolve is the error type, which is compatible with everything.
 fn check_type_argument_constraint(
     namespace: &mut TypeNamespace,
     arena: &mut TypeArena,
@@ -256,9 +259,7 @@ fn check_type_argument_constraint(
         return;
     };
     let constraint = crate::semantic::substitute_type_params(arena, constraint, bindings);
-    if crate::semantic::contains_type_param(arena, argument)
-        || crate::semantic::contains_type_param(arena, constraint)
-    {
+    if crate::semantic::contains_type_param(arena, constraint) {
         return;
     }
     if !crate::subtyping::is_subtype(arena, argument, constraint) {

@@ -49,6 +49,18 @@ fn is_subtype_uncached(
     match (arena.get(sub), arena.get(sup)) {
         (_, Type::Unknown) => true,
 
+        // A type parameter stands for some type that satisfies its `extends`
+        // bound, so whatever the bound is assignable to, the parameter is too:
+        // `T extends string` can be returned as a string, passed where a string is
+        // expected, or supplied as the argument for another `extends string`
+        // parameter. Only this direction holds. An unconstrained parameter has
+        // nothing to offer here and falls through to false, and nothing but
+        // itself (identity, checked before we get here) or never/any is a
+        // subtype *of* a parameter, since it could be instantiated as anything.
+        (Type::GenericParameter(_, _, Some(bound)), _) => {
+            is_subtype_inner(arena, *bound, sup, seen)
+        }
+
         (Type::StringLiteral(a), Type::StringLiteral(b)) => a == b,
         (Type::NumberLiteral(a), Type::NumberLiteral(b)) => a == b,
         (Type::BooleanLiteral(a), Type::BooleanLiteral(b)) => a == b,
@@ -650,5 +662,30 @@ mod tests {
         let mut arena = TypeArena::new();
         let result = arena.alloc_union(vec![arena.never()]);
         assert_eq!(result, arena.never());
+    }
+
+    #[test]
+    fn constrained_type_parameter_is_a_subtype_of_its_bound() {
+        use crate::types::TypeParameterId;
+
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let bounded = arena.alloc(Type::GenericParameter(
+            TypeParameterId::new(0, 0),
+            "T".to_string(),
+            Some(string),
+        ));
+        let unbounded = arena.alloc(Type::GenericParameter(
+            TypeParameterId::new(1, 0),
+            "U".to_string(),
+            None,
+        ));
+        let string_or_number = arena.alloc_union(vec![string, number]);
+
+        assert!(is_subtype(&arena, bounded, string));
+        assert!(is_subtype(&arena, bounded, string_or_number));
+        assert!(!is_subtype(&arena, bounded, number));
+        assert!(!is_subtype(&arena, string, bounded));
+        assert!(!is_subtype(&arena, unbounded, string));
     }
 }
