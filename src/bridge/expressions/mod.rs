@@ -153,6 +153,24 @@ pub fn infer_expression_type(
             ctx.arena.string()
         }
 
+        // Same shape as typeof just above: check the operand for its own errors,
+        // but !'s result is always boolean regardless of what the operand is, so
+        // its inferred type is discarded rather than reused.
+        Expression::UnaryExpression(unary)
+            if unary.operator == oxc_ast::ast::UnaryOperator::LogicalNot =>
+        {
+            infer_expression_type(&unary.argument, scoping, ctx);
+            ctx.arena.boolean()
+        }
+
+        // oxc keeps parens as their own node instead of discarding them, so without
+        // this a parenthesized condition (`!(typeof x === "number")`) would hit the
+        // catch-all below purely because of the parens, on top of narrow_condition
+        // needing the same unwrap for narrowing to see through it.
+        Expression::ParenthesizedExpression(inner) => {
+            infer_expression_type(&inner.expression, scoping, ctx)
+        }
+
         _ => {
             ctx.warning(
                 crate::diagnostic_messages::messages::unimplemented_expression_kind(),
