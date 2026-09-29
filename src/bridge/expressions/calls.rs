@@ -8,9 +8,10 @@ use crate::types::Type;
 use super::super::context::CheckContext;
 use super::infer_expression_type;
 use super::{
-    check_excess_properties, collect_generic_param_constraints, expected_param_type,
-    infer_member_access_type, infer_type_param_bindings, ordered_generic_param_ids,
-    resolve_identifier_type, substitute_type_params,
+    check_excess_properties, collect_generic_param_constraints, contains_type_param,
+    expected_param_type, infer_member_access_type, infer_type_param_bindings,
+    ordered_generic_param_ids, resolve_identifier_type, substitute_bound_type_params,
+    substitute_type_params,
 };
 
 // Resolves an explicit call-site type argument list, e.g. the <string> in
@@ -298,16 +299,25 @@ fn check_callable(
     collect_generic_param_constraints(&ctx.arena, function_type.return_type, &mut constraints);
 
     for (id, name, constraint) in &constraints {
-        let Some((_, bound)) = bindings.iter().find(|(bound_id, _)| bound_id == id) else {
+        let Some(&(_, bound)) = bindings.iter().find(|(bound_id, _)| bound_id == id) else {
             continue;
         };
-        if !ctx.semantic().is_assignable(*bound, *constraint) {
+
+        // A bound can be written in terms of the other parameters
+        // (`U extends T[]`, `T extends Comparable<T>`), so it has to see their
+        // inferred types before the comparison; checked raw, `number[]` would be
+        // compared against the generic `T[]` and rejected. Parameters with no
+        // binding are kept as they are, and a bound that still mentions one has
+        // nothing concrete to compare against, so it is left alone (the same
+        // "uninferred is not an error" stance as the skip above).
+        let constraint = substitute_bound_type_params(&mut ctx.arena, *constraint, &bindings);
+        if contains_type_param(&ctx.arena, constraint) {
+            continue;
+        }
+        if !ctx.semantic().is_assignable(bound, constraint) {
             ctx.error(
                 crate::diagnostic_messages::messages::type_argument_constraint_violation(
-                    &ctx.arena,
-                    name,
-                    *bound,
-                    *constraint,
+                    &ctx.arena, name, bound, constraint,
                 ),
                 span,
             );

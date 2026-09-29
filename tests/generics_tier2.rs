@@ -288,3 +288,56 @@ fn count_range_message_names_the_range_when_defaults_exist() {
         "got: {diagnostics:?}"
     );
 }
+
+// `U extends T[]` is written in terms of another parameter, so it has to be
+// compared after T is known. Compared raw, `number[]` was tested against the
+// generic `T[]` and even the correct call was rejected. With T inferred as string
+// from the second argument the bound becomes `string[]`, which `numbers` does not
+// satisfy: one error, on the second call only.
+#[test]
+fn constraint_is_checked_with_the_other_parameters_substituted() {
+    let source =
+        include_str!("fixtures/generics-tier2/constraint_written_in_terms_of_another_parameter.ts");
+    let diagnostics = check(
+        source,
+        "constraint_written_in_terms_of_another_parameter.ts",
+    );
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "got: {diagnostics:?}");
+    assert!(
+        errors[0]
+            .message
+            .contains("does not satisfy the constraint of type parameter 'U'"),
+        "got: {diagnostics:?}"
+    );
+}
+
+// A type parameter used as a type argument is compared through its own bound: U
+// extends string satisfies Box's `T extends string`, an unconstrained V does not.
+// Previously both were skipped.
+#[test]
+fn type_parameter_argument_is_checked_through_its_bound() {
+    let source = include_str!(
+        "fixtures/generics-tier2/type_parameter_argument_is_checked_through_its_bound.ts"
+    );
+    let diagnostics = check(
+        source,
+        "type_parameter_argument_is_checked_through_its_bound.ts",
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert!(
+        diagnostics[0].message.contains("Type 'V'")
+            && diagnostics[0]
+                .message
+                .contains("does not satisfy the constraint of type parameter 'T'"),
+        "got: {diagnostics:?}"
+    );
+}
