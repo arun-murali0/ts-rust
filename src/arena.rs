@@ -310,12 +310,15 @@ impl TypeArena {
                 Type::Never => continue,
                 _ => {}
             }
-            // The cached form, because this loop compares every new member against
-            // every kept one, so n members cost n squared comparisons, and a union
-            // rebuilt from the same members repeats all of them.
+            // Not the cached form: this loop is the only production call site for
+            // structurally_equal_cached, and a diagnostic-count regression showed up
+            // here that could not be confirmed safe without a compiler in the
+            // environment that made the change. Reverted to the plain, proven form
+            // until it can actually be run. structurally_equal_cached itself is kept,
+            // tested, and ready to reconnect once that verification happens.
             let already_present = flat
                 .iter()
-                .any(|&existing| self.structurally_equal_cached(existing, id));
+                .any(|&existing| self.structurally_equal(existing, id));
             if !already_present {
                 flat.push(id);
             }
