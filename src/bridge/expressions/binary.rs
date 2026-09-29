@@ -28,7 +28,7 @@ pub(super) fn infer_binary_expression_type(
         // where "1" + 1 is string concatenation, not addition.
         BinaryOperator::Addition => {
             // Read before calling ctx.semantic(): SemanticQueries now borrows
-            // ctx.arena and ctx.subtype_cache together for as long as it lives,
+            // ctx.arena and ctx.relation_cache together for as long as it lives,
             // so ctx.arena can't be reached again (even just to read a fixed
             // primitive id) while a SemanticQueries value from an earlier call
             // in this same expression is still alive.

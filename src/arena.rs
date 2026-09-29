@@ -6,6 +6,16 @@ use std::hash::{Hash, Hasher};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
 
+impl TypeId {
+    // The slot number, for a caller that needs to put two ids in a fixed order, for
+    // example to store a symmetric answer once instead of once per direction. TypeId is
+    // deliberately not Ord: nothing should sort or rank types by where they sit in the
+    // arena, so the ordering is opt-in and named for what it is.
+    pub(crate) fn index(self) -> u32 {
+        self.0
+    }
+}
+
 // How many slots new() reserves for the primitives (number() .. void()). Those ids
 // are shared by every use of the primitive and can never be renamed: see
 // set_display_name.
@@ -92,6 +102,15 @@ pub struct TypeArena {
     // type built on top of it inherited that answer, so any set() drops them all.
     // New slots need no invalidation: an id nobody has asked about is just absent.
     param_scan: RefCell<Vec<u8>>,
+
+    // Answers already given by structurally_equal_cached, one entry per unordered
+    // pair (equality is symmetric, so (a, b) and (b, a) share a slot).
+    //
+    // Only alloc_union asks, and it asks the same questions again whenever narrowing
+    // rebuilds a union from the same members. Every answer stays valid until a
+    // placeholder is completed: set() is the one operation that changes what an
+    // existing id means, so it empties this table, same as param_scan above.
+    equality_cache: FxHashMap<(TypeId, TypeId), bool>,
 }
 
 impl TypeArena {
@@ -107,6 +126,7 @@ impl TypeArena {
             interned: FxHashMap::default(),
             interned_unions: FxHashMap::default(),
             param_scan: RefCell::new(Vec::new()),
+            equality_cache: FxHashMap::default(),
         };
 
         arena.alloc(Type::Number);
@@ -283,16 +303,21 @@ impl TypeArena {
         let mut queue = members;
         while let Some(id) = queue.pop() {
             match self.get(id) {
-                Type::Union(nested) => queue.extend(nested.iter().copied()),
-                Type::Never => {}
-                _ => {
-                    let already_present = flat
-                        .iter()
-                        .any(|&existing| self.structurally_equal(existing, id));
-                    if !already_present {
-                        flat.push(id);
-                    }
+                Type::Union(nested) => {
+                    queue.extend(nested.iter().copied());
+                    continue;
                 }
+                Type::Never => continue,
+                _ => {}
+            }
+            // The cached form, because this loop compares every new member against
+            // every kept one, so n members cost n squared comparisons, and a union
+            // rebuilt from the same members repeats all of them.
+            let already_present = flat
+                .iter()
+                .any(|&existing| self.structurally_equal_cached(existing, id));
+            if !already_present {
+                flat.push(id);
             }
         }
 
@@ -392,6 +417,9 @@ impl TypeArena {
         );
         self.types[id.0 as usize] = ty;
         self.param_scan.get_mut().clear();
+        // Two unfinished placeholders compare equal (both are empty objects), and that
+        // answer stops being true the moment either one is filled in.
+        self.equality_cache.clear();
     }
 
     // The remembered answer for `id`, if contains_type_param has settled it.
@@ -413,6 +441,26 @@ impl TypeArena {
             cache.resize(wanted, 0);
         }
         cache[index] = if found { 2 } else { 1 };
+    }
+
+    // structurally_equal with a memo, for callers that already hold `&mut self` and ask
+    // the same pair more than once.
+    //
+    // Each answer is computed by a fresh top-level structurally_equal, never taken from
+    // inside a walk. Answers reached mid-walk rest on the assumption that a pair
+    // already being compared is equal, which only holds for that one comparison, so
+    // storing them would be wrong for the next caller.
+    pub fn structurally_equal_cached(&mut self, a: TypeId, b: TypeId) -> bool {
+        if a == b {
+            return true;
+        }
+        let key = if a.0 <= b.0 { (a, b) } else { (b, a) };
+        if let Some(&known) = self.equality_cache.get(&key) {
+            return known;
+        }
+        let equal = self.structurally_equal(a, b);
+        self.equality_cache.insert(key, equal);
+        equal
     }
 
     // Whether two types are the same type by shape, not by arena slot.
@@ -770,6 +818,35 @@ mod tests {
 
         assert_ne!(got, unrelated);
         assert!(arena.structurally_equal(got, again));
+    }
+
+    #[test]
+    fn a_repeated_equality_question_is_answered_from_the_memo_in_either_order() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let one = object(&mut arena, vec![property("x", number, false)]);
+        let two = object(&mut arena, vec![property("x", number, false)]);
+
+        assert!(arena.structurally_equal_cached(one, two));
+        assert!(arena.structurally_equal_cached(two, one));
+
+        assert_eq!(arena.equality_cache.len(), 1, "(a, b) and (b, a) share one entry");
+    }
+
+    #[test]
+    fn completing_a_placeholder_drops_equality_answers_given_while_it_was_empty() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let a = arena.alloc_object_placeholder();
+        let b = arena.alloc_object_placeholder();
+        assert!(arena.structurally_equal_cached(a, b));
+
+        arena.set(
+            a,
+            Type::Object(ObjectType::new(vec![property("x", number, false)])),
+        );
+
+        assert!(!arena.structurally_equal_cached(a, b));
     }
 
     #[test]

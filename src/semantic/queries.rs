@@ -15,23 +15,28 @@ use crate::subtyping;
 /// re-walking the type structure.
 // Named once so the places that thread the cache by hand (generic inference, which
 // cannot hold a SemanticQueries across its arena mutations) spell the type the same
-// way the owner does.
-pub(crate) type SubtypeCache = FxHashMap<(TypeId, TypeId), bool>;
+// way the owner does. One map serves every relation, with the relation in the key,
+// so adding is_disjoint did not mean threading a second map through every place
+// that already carries this one.
+pub type RelationCache = FxHashMap<(Relation, TypeId, TypeId), bool>;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Relation {
+    Subtype,
+    Disjoint,
+}
 
 pub struct SemanticQueries<'a> {
     arena: &'a TypeArena,
 
-    // Memoizes is_subtype by the exact (source, target) TypeId pair. See the
-    // doc comment on CheckContext::subtype_cache, which owns this map for the
-    // lifetime of one file's check, for what this does and does not cover.
-    cache: &'a mut FxHashMap<(TypeId, TypeId), bool>,
+    // Memoizes relation answers by relation and TypeId pair. See the doc comment
+    // on CheckContext::relation_cache, which owns this map for the lifetime of
+    // one file's check, for what this does and does not cover.
+    cache: &'a mut RelationCache,
 }
 
 impl<'a> SemanticQueries<'a> {
-    pub(crate) fn new(
-        arena: &'a TypeArena,
-        cache: &'a mut FxHashMap<(TypeId, TypeId), bool>,
-    ) -> Self {
+    pub(crate) fn new(arena: &'a TypeArena, cache: &'a mut RelationCache) -> Self {
         Self { arena, cache }
     }
 
@@ -67,12 +72,32 @@ impl<'a> SemanticQueries<'a> {
             return true;
         }
 
-        let key = (source, target);
+        let key = (Relation::Subtype, source, target);
         if let Some(&cached) = self.cache.get(&key) {
             return cached;
         }
 
         let result = subtyping::is_subtype(self.arena, source, target);
+        self.cache.insert(key, result);
+        result
+    }
+
+    /// Whether no value can belong to both types. True only when that is certain; see
+    /// subtyping::is_disjoint for why an undecidable pair answers false.
+    ///
+    /// Symmetric, so the key stores the two ids in a fixed order and (a, b) shares
+    /// its entry with (b, a). Nothing calls this yet outside tests -- it is the
+    /// relation switch/if narrowing will use next to drop union members that
+    /// cannot equal a literal -- so the allow keeps the build quiet until then.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_disjoint(&mut self, a: TypeId, b: TypeId) -> bool {
+        let (first, second) = if a.index() <= b.index() { (a, b) } else { (b, a) };
+        let key = (Relation::Disjoint, first, second);
+        if let Some(&cached) = self.cache.get(&key) {
+            return cached;
+        }
+
+        let result = subtyping::is_disjoint(self.arena, a, b);
         self.cache.insert(key, result);
         result
     }
@@ -93,6 +118,31 @@ mod tests {
 
         assert!(queries.is_assignable(arena.string(), arena.unknown()));
         assert!(!queries.is_assignable(arena.number(), arena.string()));
+    }
+
+    #[test]
+    fn disjointness_is_symmetric_and_shares_one_cache_entry() {
+        let arena = TypeArena::new();
+        let mut cache = FxHashMap::default();
+        let mut queries = SemanticQueries::new(&arena, &mut cache);
+
+        assert!(queries.is_disjoint(arena.string(), arena.number()));
+        assert!(queries.is_disjoint(arena.number(), arena.string()));
+
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn disjointness_and_subtyping_do_not_share_answers() {
+        let arena = TypeArena::new();
+        let mut cache = FxHashMap::default();
+        let mut queries = SemanticQueries::new(&arena, &mut cache);
+
+        assert!(!queries.is_subtype(arena.number(), arena.string()));
+        assert!(queries.is_disjoint(arena.number(), arena.string()));
+        assert!(!queries.is_subtype(arena.number(), arena.string()));
+
+        assert_eq!(cache.len(), 2);
     }
 
     #[test]

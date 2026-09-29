@@ -280,7 +280,7 @@ fn check_callable(
                 *arg_type,
                 &mut bindings,
                 &locked,
-                &mut ctx.subtype_cache,
+                &mut ctx.relation_cache,
             );
         }
     }

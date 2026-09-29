@@ -268,6 +268,22 @@ fn logical_not_composes_with_typeof() {
     );
 }
 
+// Isolates the parenthesized-condition fix from logical_not_composes_with_typeof:
+// that test also calls .toUpperCase()/.toFixed(), which this checker does not model
+// on any type yet, so it would fail regardless of narrowing. .length is modeled on
+// both string and array, so this checks only the thing being fixed here: `!(...)`
+// narrowing its wrapped condition.
+#[test]
+fn not_parenthesized_typeof_narrows() {
+    let source =
+        include_str!("fixtures/control-flow-narrowing/not_parenthesized_typeof_narrows.ts");
+    let diagnostics = check(source, "not_parenthesized_typeof_narrows.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
+    );
+}
+
 #[test]
 fn equality_against_string_literal_narrows_both_branches() {
     let source = include_str!(

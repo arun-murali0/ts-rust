@@ -3,7 +3,10 @@ use oxc_semantic::Scoping;
 
 use super::super::context::CheckContext;
 use super::super::expressions::infer_expression_type;
-use super::super::narrow::{narrow_by_identifier_equals, narrow_condition};
+use super::super::narrow::{
+    narrow_by_identifier_equals, narrow_by_identifier_excluding, narrow_condition,
+    resolve_case_literal,
+};
 use super::{check_statement, check_variable_declaration, statement_always_exits};
 
 pub(super) fn check_if_statement(
@@ -93,15 +96,33 @@ pub(super) fn check_switch_statement(
     // is possible, but by far the common shape is a property, `switch
     // (shape.kind)`, which narrow_condition cannot resolve today -- it only ever
     // matches a bare Identifier (see resolve_symbol_id's caller there). So this
-    // narrows only the identifier-discriminant case for now; a property
-    // discriminant still infers its type normally but no case body sees it
-    // narrowed. That is exactly the identifier-only gap narrow_condition already
-    // has for `if`, just inherited here rather than newly introduced.
+    // narrows only the identifier-discriminant case (every explicit case, and
+    // default by elimination below); a property discriminant still infers its
+    // type normally but no case body sees it narrowed. That is exactly the
+    // identifier-only gap narrow_condition already has for `if`, just inherited
+    // here rather than newly introduced.
     let symbol = match &switch_stmt.discriminant {
         oxc_ast::ast::Expression::Identifier(ident) => {
             super::super::narrow::resolve_symbol_id(ident, scoping)
         }
         _ => None,
+    };
+
+    // Every literal a sibling case matches on, gathered once so default can
+    // exclude all of them: it has no test of its own to narrow by, only the
+    // complement of what the other cases already claimed. A case whose test this
+    // checker cannot resolve to a literal (a computed test, say) contributes
+    // nothing here, so default just keeps whatever member it could not rule out
+    // instead of narrowing incorrectly.
+    let excluded_literals: Vec<_> = if symbol.is_some() {
+        switch_stmt
+            .cases
+            .iter()
+            .filter_map(|case| case.test.as_ref())
+            .filter_map(|test| resolve_case_literal(test, &mut ctx.arena))
+            .collect()
+    } else {
+        Vec::new()
     };
 
     // Each case starts from the same narrowing the switch itself started with,
@@ -119,11 +140,20 @@ pub(super) fn check_switch_statement(
     let outer_narrow = ctx.narrow.clone();
     for case in &switch_stmt.cases {
         ctx.narrow = outer_narrow.clone();
-        if let Some(test) = &case.test {
-            infer_expression_type(test, scoping, ctx);
-            if let Some(symbol_id) = symbol {
-                let overlay = narrow_by_identifier_equals(symbol_id, test, ctx);
-                ctx.narrow.extend(overlay);
+        match &case.test {
+            Some(test) => {
+                infer_expression_type(test, scoping, ctx);
+                if let Some(symbol_id) = symbol {
+                    let overlay = narrow_by_identifier_equals(symbol_id, test, ctx);
+                    ctx.narrow.extend(overlay);
+                }
+            }
+            None => {
+                if let Some(symbol_id) = symbol {
+                    let overlay =
+                        narrow_by_identifier_excluding(symbol_id, &excluded_literals, ctx);
+                    ctx.narrow.extend(overlay);
+                }
             }
         }
         for stmt in &case.consequent {

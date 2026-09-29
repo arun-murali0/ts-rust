@@ -6,6 +6,7 @@ use crate::diagnostics::{Diagnostic, Severity};
 use crate::fxhash::FxHashMap;
 use crate::namespace::TypeNamespace;
 use crate::semantic::SemanticQueries;
+use crate::semantic::queries::RelationCache;
 use crate::symbol_map::SymbolTypeMap;
 
 use super::narrow::NarrowState;
@@ -46,7 +47,7 @@ pub struct CheckContext<'ast, 'src> {
     // it. Generic inference does go through this cache now (it runs after every
     // declaration is complete), so a call like `allSame(1, 2, ..., 8)` no longer
     // recomputes each (candidate, existing) pair.
-    pub subtype_cache: FxHashMap<(TypeId, TypeId), bool>,
+    pub relation_cache: RelationCache,
 
     pub current_return_type: Option<TypeId>,
 
@@ -75,7 +76,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             diagnostics: Vec::new(),
             file_name,
             narrow: NarrowState::new(),
-            subtype_cache: FxHashMap::default(),
+            relation_cache: RelationCache::default(),
             current_return_type: None,
             current_class_instance: None,
             implicit_this: false,
@@ -101,16 +102,16 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
     // const assertions, have one place to live later without changing call sites.
     //
     // Takes &mut self (not &self) because SemanticQueries now carries a mutable
-    // handle to subtype_cache alongside the arena. Field-level destructuring
+    // handle to relation_cache alongside the arena. Field-level destructuring
     // here borrows the two fields disjointly, but that disjointness is only
     // visible inside this function body -- past this call boundary the returned
     // SemanticQueries opaquely holds part of `self`, so callers cannot access
-    // ctx.arena or ctx.subtype_cache directly while a SemanticQueries from this
+    // ctx.arena or ctx.relation_cache directly while a SemanticQueries from this
     // call is still alive. In practice this means any TypeId needed as an
     // argument (e.g. ctx.arena.number()) must be read into a local *before*
     // calling ctx.semantic(), not inline as part of the same expression.
     pub fn semantic(&mut self) -> SemanticQueries<'_> {
-        SemanticQueries::new(&self.arena, &mut self.subtype_cache)
+        SemanticQueries::new(&self.arena, &mut self.relation_cache)
     }
 
     pub fn warning(&mut self, message: DiagnosticMessage, span: Span) {

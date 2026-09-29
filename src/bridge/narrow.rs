@@ -46,15 +46,24 @@ impl NarrowState {
 // Given a condition expression, returns the type overlay that should apply in the
 // true branch and the one that should apply in the false branch. Recognizes a
 // handful of specific shapes (typeof checks, equality against null, undefined, or
-// a literal value, a bare identifier's own truthiness, and `!` on any of those);
-// anything else narrows nothing in either branch, which is always safe, just less
-// precise.
+// a literal value, a bare identifier's own truthiness, and `!` or parentheses
+// wrapping any of those); anything else narrows nothing in either branch, which
+// is always safe, just less precise.
 pub fn narrow_condition(
     test: &Expression,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> (NarrowState, NarrowState) {
     match test {
+        // oxc keeps parentheses as their own node instead of discarding them, so
+        // `!(typeof x === "number")`'s inner expression is a ParenthesizedExpression
+        // wrapping the BinaryExpression, not the BinaryExpression itself. Without
+        // this arm that inner shape never matches anything below and the whole
+        // condition narrows nothing, in either branch, silently.
+        Expression::ParenthesizedExpression(inner) => {
+            narrow_condition(&inner.expression, scoping, ctx)
+        }
+
         Expression::BinaryExpression(bin) => {
             // Treats == and != identically to === and !==, just flipping which
             // computed branch (true_type vs false_type) ends up where, so the
@@ -191,6 +200,36 @@ pub fn narrow_by_identifier_equals(
         return NarrowState::new();
     };
     let narrowed = narrow_by_literal(&mut ctx.arena, current, literal, true);
+    NarrowState::from_single(symbol_id, narrowed)
+}
+
+// Resolves a switch case's own test the same way narrow_by_identifier_equals
+// does, exposed so check_switch_statement can build up the set every sibling
+// case excludes before default gets its turn (see narrow_by_identifier_excluding).
+pub fn resolve_case_literal(test: &Expression, arena: &mut TypeArena) -> Option<TypeId> {
+    resolve_literal(test, arena)
+}
+
+// A switch's default case: the discriminant is narrowed to whatever remains once
+// every literal a sibling case matched on is excluded. `excluded` is built by the
+// caller from every sibling case's own test via resolve_case_literal; a case this
+// checker cannot resolve a literal from (a computed test, say) is simply absent
+// from that list rather than aborting the whole exclusion -- default still
+// narrows out what it can prove, which is always safe, and keeps whatever member
+// it could not rule out.
+pub fn narrow_by_identifier_excluding(
+    symbol_id: SymbolId,
+    excluded: &[TypeId],
+    ctx: &mut CheckContext<'_, '_>,
+) -> NarrowState {
+    let Some(current) = ctx
+        .narrow
+        .get(symbol_id)
+        .or_else(|| ctx.symbols.get(symbol_id))
+    else {
+        return NarrowState::new();
+    };
+    let narrowed = narrow_by_literals(&mut ctx.arena, current, excluded, false);
     NarrowState::from_single(symbol_id, narrowed)
 }
 
@@ -349,6 +388,35 @@ fn narrow_by_literal(
         }
         None => {
             if (id == literal) == want_match {
+                id
+            } else {
+                arena.never()
+            }
+        }
+    }
+}
+
+// Same shape as narrow_by_literal, generalized to a set: keeps every union member
+// that does (or, with want_match false, does not) match one of `literals`. An
+// empty slice narrows nothing -- want_match false against no literals keeps every
+// member, which is the correct answer for a default case with no siblings to
+// exclude, not an accidental never.
+fn narrow_by_literals(
+    arena: &mut TypeArena,
+    id: TypeId,
+    literals: &[TypeId],
+    want_match: bool,
+) -> TypeId {
+    match union_members(arena, id) {
+        Some(members) => {
+            let filtered = members
+                .into_iter()
+                .filter(|m| literals.contains(m) == want_match)
+                .collect();
+            arena.alloc_union(filtered)
+        }
+        None => {
+            if literals.contains(&id) == want_match {
                 id
             } else {
                 arena.never()

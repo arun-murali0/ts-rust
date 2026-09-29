@@ -263,8 +263,163 @@ fn is_universally_compatible(arena: &TypeArena, id: TypeId) -> bool {
     matches!(arena.get(id), Type::Any | Type::Error)
 }
 
+// Whether no value can belong to both types. It answers true only when that is certain
+// and false whenever it is not.
+//
+// The bias is deliberate. The reason to ask is narrowing: `x === "a"` may discard the
+// union members that cannot equal "a". Wrongly saying "disjoint" throws away a member
+// that could still be present and produces a false error later, while wrongly saying
+// "overlapping" only keeps a member a smarter check would have dropped. So every case
+// this cannot decide, objects, arrays, functions, type parameters, `unknown`, says false.
+// `{ length: number }` overlaps `string`, and an empty object overlaps everything that
+// is not null, so a shape alone never proves two object-like types disjoint.
+pub(crate) fn is_disjoint(arena: &TypeArena, a: TypeId, b: TypeId) -> bool {
+    // A type with no values shares none with anything, itself included.
+    if a == b {
+        return matches!(arena.get(a), Type::Never);
+    }
+    match (arena.get(a), arena.get(b)) {
+        (Type::Never, _) | (_, Type::Never) => return true,
+        (Type::Any | Type::Unknown | Type::Error | Type::GenericParameter(..), _)
+        | (_, Type::Any | Type::Unknown | Type::Error | Type::GenericParameter(..)) => {
+            return false;
+        }
+        _ => {}
+    }
+
+    // A union is disjoint from something only if every member is. Members are never
+    // unions themselves (alloc_union flattens), so this recursion is shallow.
+    if let Type::Union(members) = arena.get(a) {
+        return members.iter().all(|&member| is_disjoint(arena, member, b));
+    }
+    if let Type::Union(members) = arena.get(b) {
+        return members.iter().all(|&member| is_disjoint(arena, a, member));
+    }
+
+    let (left, right) = (arena.get(a), arena.get(b));
+    match (primitive_domain(left), primitive_domain(right)) {
+        (Some(l), Some(r)) if l != r => true,
+        // Same domain: only two literals with different values exclude each other.
+        // `string` and "a" overlap, and so do `number` and 1.
+        (Some(_), Some(_)) => match (left, right) {
+            (Type::StringLiteral(x), Type::StringLiteral(y)) => x != y,
+            (Type::NumberLiteral(x), Type::NumberLiteral(y)) => x != y,
+            (Type::BooleanLiteral(x), Type::BooleanLiteral(y)) => x != y,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[derive(PartialEq)]
+enum PrimitiveDomain {
+    String,
+    Number,
+    Boolean,
+    Null,
+    Undefined,
+}
+
+// Which kind of primitive value a type holds, when it holds only one kind. `void` shares
+// a domain with `undefined` because undefined is assignable to void, so the two overlap.
+fn primitive_domain(ty: &Type) -> Option<PrimitiveDomain> {
+    match ty {
+        Type::String | Type::StringLiteral(_) => Some(PrimitiveDomain::String),
+        Type::Number | Type::NumberLiteral(_) => Some(PrimitiveDomain::Number),
+        Type::Boolean | Type::BooleanLiteral(_) => Some(PrimitiveDomain::Boolean),
+        Type::Null => Some(PrimitiveDomain::Null),
+        Type::Undefined | Type::Void => Some(PrimitiveDomain::Undefined),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    fn literal(arena: &mut TypeArena, value: &str) -> TypeId {
+        arena.alloc(Type::StringLiteral(value.to_string()))
+    }
+
+    #[test]
+    fn different_primitive_kinds_are_disjoint() {
+        let arena = TypeArena::new();
+        assert!(is_disjoint(&arena, arena.string(), arena.number()));
+        assert!(is_disjoint(&arena, arena.number(), arena.null()));
+        assert!(is_disjoint(&arena, arena.boolean(), arena.undefined()));
+        assert!(is_disjoint(&arena, arena.null(), arena.undefined()));
+    }
+
+    #[test]
+    fn a_type_overlaps_itself_and_its_own_literals() {
+        let mut arena = TypeArena::new();
+        let a = literal(&mut arena, "a");
+        assert!(!is_disjoint(&arena, arena.string(), arena.string()));
+        assert!(!is_disjoint(&arena, arena.string(), a));
+        assert!(!is_disjoint(&arena, a, arena.string()));
+    }
+
+    #[test]
+    fn literals_with_different_values_are_disjoint_and_equal_ones_are_not() {
+        let mut arena = TypeArena::new();
+        let a = literal(&mut arena, "a");
+        let b = literal(&mut arena, "b");
+        assert!(is_disjoint(&arena, a, b));
+        assert!(!is_disjoint(&arena, a, a));
+    }
+
+    #[test]
+    fn undefined_and_void_overlap() {
+        let arena = TypeArena::new();
+        assert!(!is_disjoint(&arena, arena.undefined(), arena.void()));
+    }
+
+    #[test]
+    fn escape_hatches_and_unknown_are_never_disjoint() {
+        let arena = TypeArena::new();
+        for open in [arena.any(), arena.unknown(), arena.error()] {
+            assert!(!is_disjoint(&arena, open, arena.number()));
+            assert!(!is_disjoint(&arena, arena.string(), open));
+        }
+    }
+
+    #[test]
+    fn object_like_types_are_not_proven_disjoint_from_primitives() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let object = arena.alloc(Type::Object(ObjectType::new(vec![
+            crate::types::PropertyEntry {
+                name: "length".into(),
+                type_id: number,
+                optional: false,
+                is_method: false,
+            },
+        ])));
+        let array = arena.alloc(Type::Array(number));
+
+        assert!(!is_disjoint(&arena, object, arena.string()));
+        assert!(!is_disjoint(&arena, array, arena.string()));
+        assert!(!is_disjoint(&arena, object, array));
+    }
+
+    #[test]
+    fn never_is_disjoint_from_everything() {
+        let arena = TypeArena::new();
+        assert!(is_disjoint(&arena, arena.never(), arena.number()));
+        assert!(is_disjoint(&arena, arena.string(), arena.never()));
+        assert!(is_disjoint(&arena, arena.never(), arena.never()));
+    }
+
+    #[test]
+    fn a_union_is_disjoint_only_when_every_member_is() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let both = arena.alloc_union(vec![number, string]);
+        let a = literal(&mut arena, "a");
+
+        assert!(is_disjoint(&arena, both, arena.null()));
+        assert!(!is_disjoint(&arena, both, a));
+        assert!(!is_disjoint(&arena, arena.string(), both));
+    }
+
     use super::*;
 
     #[test]

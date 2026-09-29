@@ -1,5 +1,5 @@
 // Stress and repeatability coverage for the (source, target) subtype cache
-// added to CheckContext::subtype_cache / SemanticQueries. These tests don't
+// added to CheckContext::relation_cache / SemanticQueries. These tests don't
 // touch the cache's internals directly (it is private, reached only through
 // ctx.semantic()) -- they go through the public TypeChecker API and try to
 // break the cache the way an internal implementation bug would actually

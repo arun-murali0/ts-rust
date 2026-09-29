@@ -72,6 +72,12 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
         Statement::TSTypeAliasDeclaration(_)
         | Statement::TSInterfaceDeclaration(_)
         | Statement::TSEnumDeclaration(_) => {}
+        // Neither has a type of its own to check; the type-level work already
+        // happened at whatever they jump out of or back to (the enclosing
+        // switch/loop, or check_switch_statement's own per-case narrowing). A
+        // labelled break/continue (`break outer;`) is still just this variant
+        // with a label attached, so it needs nothing extra here either.
+        Statement::BreakStatement(_) | Statement::ContinueStatement(_) => {}
         Statement::BlockStatement(block) => {
             // Deliberately no save/restore of ctx.narrow here, despite variable
             // declarations genuinely being block-scoped: TypeScript's narrowing
