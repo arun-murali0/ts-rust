@@ -3,7 +3,6 @@ use oxc_span::Span;
 use crate::arena::{TypeArena, TypeId};
 use crate::diagnostic_messages::DiagnosticMessage;
 use crate::diagnostics::{Diagnostic, Severity};
-use crate::fxhash::FxHashMap;
 use crate::namespace::TypeNamespace;
 use crate::semantic::SemanticQueries;
 use crate::semantic::queries::RelationCache;
