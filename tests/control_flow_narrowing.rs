@@ -1,3 +1,4 @@
+
 use ts_rust::{DiagnosticCode, TypeChecker};
 
 fn init_tracing() {
@@ -236,4 +237,93 @@ fn guard_clause_still_narrows_within_the_same_function() {
         diagnostics.is_empty(),
         "expected no false positives, got: {diagnostics:?}"
     );
+}
+
+// `!x` swaps narrow_condition's own pair for its argument: whatever the true
+// branch would be for `x`, that's the false branch for `!x`, and vice versa. No
+// false positive on `x.toUpperCase()` means the true branch of `!x` correctly
+// narrowed out null.
+#[test]
+fn logical_not_narrows_the_true_branch() {
+    let source =
+        include_str!("fixtures/control-flow-narrowing/logical_not_narrows_the_true_branch.ts");
+    let diagnostics = check(source, "logical_not_narrows_the_true_branch.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
+    );
+}
+
+// `!` composes with an arbitrary inner condition, not just a bare identifier:
+// `!(typeof x === "number")` narrows x to string in its true branch the same way
+// `typeof x === "string"` would directly.
+#[test]
+fn logical_not_composes_with_typeof() {
+    let source =
+        include_str!("fixtures/control-flow-narrowing/logical_not_composes_with_typeof.ts");
+    let diagnostics = check(source, "logical_not_composes_with_typeof.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn equality_against_string_literal_narrows_both_branches() {
+    let source = include_str!(
+        "fixtures/control-flow-narrowing/equality_against_string_literal_narrows.ts"
+    );
+    let diagnostics = check(source, "equality_against_string_literal_narrows.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn equality_against_literal_else_branch_mismatch_is_caught() {
+    let source = include_str!(
+        "fixtures/control-flow-narrowing/equality_against_literal_else_branch_mismatch.ts"
+    );
+    let diagnostics = check(source, "equality_against_literal_else_branch_mismatch.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+}
+
+// Every case narrows the discriminant to its own literal, including the default
+// case, which narrows to whatever the other cases' literals leave out.
+#[test]
+fn switch_case_narrows_string_discriminant() {
+    let source = include_str!(
+        "fixtures/control-flow-narrowing/switch_case_narrows_string_discriminant.ts"
+    );
+    let diagnostics = check(source, "switch_case_narrows_string_discriminant.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
+    );
+}
+
+// Each case starts from the switch's own outer state, not from what an earlier
+// case narrowed to -- this checker does not model real fallthrough (see the
+// comment in check_switch_statement), so the "square" case must not still think
+// shape could be "circle".
+#[test]
+fn switch_case_narrowing_does_not_leak_to_the_next_case() {
+    let source = include_str!(
+        "fixtures/control-flow-narrowing/switch_case_narrowing_does_not_leak_to_the_next_case.ts"
+    );
+    let diagnostics = check(
+        source,
+        "switch_case_narrowing_does_not_leak_to_the_next_case.ts",
+    );
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
 }

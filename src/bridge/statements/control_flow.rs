@@ -3,7 +3,7 @@ use oxc_semantic::Scoping;
 
 use super::super::context::CheckContext;
 use super::super::expressions::infer_expression_type;
-use super::super::narrow::narrow_condition;
+use super::super::narrow::{narrow_by_identifier_equals, narrow_condition};
 use super::{check_statement, check_variable_declaration, statement_always_exits};
 
 pub(super) fn check_if_statement(
@@ -87,22 +87,44 @@ pub(super) fn check_switch_statement(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) {
-    // Each case is checked independently with no narrowing applied from the
-    // discriminant or the case's own test value; switch-based discriminated
-    // union narrowing (`switch (shape.kind) { case "circle": ... }`) is not
-    // implemented yet, unlike the if-statement narrowing above.
     infer_expression_type(&switch_stmt.discriminant, scoping, ctx);
+
+    // A bare identifier discriminant (`switch (shape) { case circleValue: ... }`
+    // is possible, but by far the common shape is a property, `switch
+    // (shape.kind)`, which narrow_condition cannot resolve today -- it only ever
+    // matches a bare Identifier (see resolve_symbol_id's caller there). So this
+    // narrows only the identifier-discriminant case for now; a property
+    // discriminant still infers its type normally but no case body sees it
+    // narrowed. That is exactly the identifier-only gap narrow_condition already
+    // has for `if`, just inherited here rather than newly introduced.
+    let symbol = match &switch_stmt.discriminant {
+        oxc_ast::ast::Expression::Identifier(ident) => {
+            super::super::narrow::resolve_symbol_id(ident, scoping)
+        }
+        _ => None,
+    };
 
     // Each case starts from the same narrowing the switch itself started with,
     // not from whatever the previous case left behind: cases are checked in
     // textual order here regardless of fallthrough, so without this a guard
     // clause in one case would narrow the next case's code too, and every case's
     // narrowing would otherwise leak past the switch's closing brace.
+    //
+    // Deliberately not narrower than that: real fallthrough (a case with no
+    // break/return that falls into the next) would let that next case's code
+    // observe a value equal to either label, not just its own, which this does
+    // not model -- each case is narrowed as if it were reached directly, matching
+    // tsc for the common non-fallthrough style this checker otherwise assumes
+    // (see statement_always_exits).
     let outer_narrow = ctx.narrow.clone();
     for case in &switch_stmt.cases {
         ctx.narrow = outer_narrow.clone();
         if let Some(test) = &case.test {
             infer_expression_type(test, scoping, ctx);
+            if let Some(symbol_id) = symbol {
+                let overlay = narrow_by_identifier_equals(symbol_id, test, ctx);
+                ctx.narrow.extend(overlay);
+            }
         }
         for stmt in &case.consequent {
             check_statement(stmt, scoping, ctx);

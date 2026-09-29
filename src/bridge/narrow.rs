@@ -45,9 +45,10 @@ impl NarrowState {
 
 // Given a condition expression, returns the type overlay that should apply in the
 // true branch and the one that should apply in the false branch. Recognizes a
-// handful of specific shapes (typeof checks, equality against null or undefined,
-// and a bare identifier's own truthiness); anything else narrows nothing in
-// either branch, which is always safe, just less precise.
+// handful of specific shapes (typeof checks, equality against null, undefined, or
+// a literal value, a bare identifier's own truthiness, and `!` on any of those);
+// anything else narrows nothing in either branch, which is always safe, just less
+// precise.
 pub fn narrow_condition(
     test: &Expression,
     scoping: &Scoping,
@@ -102,7 +103,31 @@ pub fn narrow_condition(
                 });
             }
 
+            // Loose equality against a literal (x == "a") is left alone: unlike
+            // null/undefined, JavaScript's abstract-equality coercions for other
+            // literals (0 == "0", "" == false) mean a matching member of x's own
+            // union is not the only way this can pass, so narrowing to it could
+            // remove a value the true branch can still actually hold.
+            if !is_loose {
+                if let Some((symbol_id, literal)) =
+                    literal_check(&bin.left, &bin.right, scoping, &mut ctx.arena)
+                        .or_else(|| literal_check(&bin.right, &bin.left, scoping, &mut ctx.arena))
+                {
+                    return by_symbol(ctx, symbol_id, move |arena, current, want_true| {
+                        narrow_by_literal(arena, current, literal, want_true != negated)
+                    });
+                }
+            }
+
             empty_pair()
+        }
+
+        // `!x`, `!(x === null)`, `!(typeof x === "string")`: whatever the inner
+        // expression's own pair would be, just with the two branches swapped, so
+        // this composes with every condition shape above and below for free.
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::LogicalNot => {
+            let (true_overrides, false_overrides) = narrow_condition(&unary.argument, scoping, ctx);
+            (false_overrides, true_overrides)
         }
 
         Expression::Identifier(ident) => {
@@ -141,6 +166,48 @@ fn by_symbol(
         NarrowState::from_single(symbol_id, true_type),
         NarrowState::from_single(symbol_id, false_type),
     )
+}
+
+// A switch case's own narrowing: `case <test>:` behaves like `if (discriminant
+// === test)` for the statements in that case, but only the true side is ever
+// needed here -- check_switch_statement (control_flow.rs) already resets to the
+// outer state before each case, so there is no false branch to compute the way
+// an if/else needs one. `symbol_id` is the discriminant's own symbol, already
+// resolved by the caller (only a bare identifier discriminant is handled -- see
+// the comment above this function's call site).
+pub fn narrow_by_identifier_equals(
+    symbol_id: SymbolId,
+    test: &Expression,
+    ctx: &mut CheckContext<'_, '_>,
+) -> NarrowState {
+    let Some(current) = ctx
+        .narrow
+        .get(symbol_id)
+        .or_else(|| ctx.symbols.get(symbol_id))
+    else {
+        return NarrowState::new();
+    };
+    let Some(literal) = resolve_literal(test, &mut ctx.arena) else {
+        return NarrowState::new();
+    };
+    let narrowed = narrow_by_literal(&mut ctx.arena, current, literal, true);
+    NarrowState::from_single(symbol_id, narrowed)
+}
+
+// The literal-resolution half of literal_check, split out so
+// narrow_by_identifier_equals above can reuse it without needing a second
+// identifier to match against -- a case's test is compared to a discriminant
+// already known by symbol_id, not discovered from an ident/other pair the way a
+// binary expression's two operands are.
+fn resolve_literal(expr: &Expression, arena: &mut TypeArena) -> Option<TypeId> {
+    match expr {
+        Expression::StringLiteral(lit) => {
+            Some(arena.alloc(Type::StringLiteral(lit.value.to_string())))
+        }
+        Expression::NumericLiteral(lit) => Some(arena.alloc(Type::NumberLiteral(lit.value))),
+        Expression::BooleanLiteral(lit) => Some(arena.alloc(Type::BooleanLiteral(lit.value))),
+        _ => None,
+    }
 }
 
 pub fn resolve_symbol_id(ident: &IdentifierReference, scoping: &Scoping) -> Option<SymbolId> {
@@ -188,6 +255,31 @@ fn nullish_check(
     }
 }
 
+// Recognizes `ident === <literal>`, where the literal is a value this checker's
+// type model already represents as its own TypeId (a string, number, or boolean
+// literal), matching how a discriminant property or a narrowed union is typically
+// spelled: "circle", 0, true. Anything else on the literal side (an identifier, a
+// computed expression) is not something narrow_by_literal has a TypeId to compare
+// union members against, so it returns None and the caller falls through to
+// empty_pair the same way an unrecognized shape always has. Takes the arena
+// directly, unlike nullish_check and typeof_check, since allocating the literal's
+// TypeId (interned, so a repeated "circle" always resolves to the same id -- see
+// narrow_by_literal) needs a mutable arena, not just the shared Scoping the other
+// *_check helpers read from.
+fn literal_check(
+    maybe_ident: &Expression,
+    maybe_literal: &Expression,
+    scoping: &Scoping,
+    arena: &mut TypeArena,
+) -> Option<(SymbolId, TypeId)> {
+    let Expression::Identifier(ident) = maybe_ident else {
+        return None;
+    };
+    let symbol_id = resolve_symbol_id(ident, scoping)?;
+    let literal = resolve_literal(maybe_literal, arena)?;
+    Some((symbol_id, literal))
+}
+
 fn is_known_typeof_tag(tag: &str) -> bool {
     matches!(
         tag,
@@ -226,6 +318,37 @@ fn narrow_by_typeof(arena: &mut TypeArena, id: TypeId, tag: &str, want_match: bo
         }
         None => {
             if matches_typeof_tag(arena, id, tag) == want_match {
+                id
+            } else {
+                arena.never()
+            }
+        }
+    }
+}
+
+// Same shared shape as narrow_by_typeof: keeps union members equal to `literal`
+// (or every member but that one, in the false-branch/negated case), collapses a
+// non-union type to itself or never. `literal` is compared by TypeId, not by
+// value, which is safe here because every literal Type is interned (see
+// TypeArena::alloc_string_literal and friends): two occurrences of the string
+// literal "circle" always resolve to the same TypeId, so this is exactly the
+// same identity a `structurally_equal` comparison would reach for a leaf type.
+fn narrow_by_literal(
+    arena: &mut TypeArena,
+    id: TypeId,
+    literal: TypeId,
+    want_match: bool,
+) -> TypeId {
+    match union_members(arena, id) {
+        Some(members) => {
+            let filtered = members
+                .into_iter()
+                .filter(|&m| (m == literal) == want_match)
+                .collect();
+            arena.alloc_union(filtered)
+        }
+        None => {
+            if (id == literal) == want_match {
                 id
             } else {
                 arena.never()
