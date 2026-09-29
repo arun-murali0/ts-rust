@@ -95,3 +95,17 @@ fn generic_recursive_interface_with_same_type_param_resolves() {
     assert_eq!(errors.len(), 1, "got: {diagnostics:?}");
     assert_eq!(errors[0].code, DiagnosticCode::ReturnTypeMismatch);
 }
+
+// `box.next` is `Box<number> | null`, so `.value` read through it is a number.
+// Substitution used to cut the self-reference and leave `next` pointing at the
+// generic `Box<T>`, which made `rest.value` read as T; T is not assignable to
+// number, so the clean function below was reported as well. The cycle now closes
+// on the substituted copy, leaving only the genuine mismatch in wrongNextValue.
+#[test]
+fn generic_recursive_property_is_substituted_through_the_cycle() {
+    let source = include_str!("fixtures/recursive-types/generic_recursive_next_is_substituted.ts");
+    let diagnostics = check(source, "generic_recursive_next_is_substituted.ts");
+    let errors = errors(&diagnostics);
+    assert_eq!(errors.len(), 1, "got: {diagnostics:?}");
+    assert_eq!(errors[0].code, DiagnosticCode::ReturnTypeMismatch);
+}
