@@ -1,4 +1,3 @@
-
 use ts_rust::{DiagnosticCode, TypeChecker};
 
 fn init_tracing() {
@@ -241,8 +240,8 @@ fn guard_clause_still_narrows_within_the_same_function() {
 
 // `!x` swaps narrow_condition's own pair for its argument: whatever the true
 // branch would be for `x`, that's the false branch for `!x`, and vice versa. No
-// false positive on `x.toUpperCase()` means the true branch of `!x` correctly
-// narrowed out null.
+// false positive on `x.length` after the guard means the false branch of `!x`
+// correctly narrowed out null (an un-narrowed `string | null` has no `.length`).
 #[test]
 fn logical_not_narrows_the_true_branch() {
     let source =
@@ -269,10 +268,11 @@ fn logical_not_composes_with_typeof() {
 }
 
 // Isolates the parenthesized-condition fix from logical_not_composes_with_typeof:
-// that test also calls .toUpperCase()/.toFixed(), which this checker does not model
-// on any type yet, so it would fail regardless of narrowing. .length is modeled on
-// both string and array, so this checks only the thing being fixed here: `!(...)`
-// narrowing its wrapped condition.
+// that test is written with `.length` and `+` only, because this checker does not
+// model string/number methods like .toUpperCase()/.toFixed() on any type yet, so a
+// fixture calling them would fail regardless of narrowing. This one uses an array
+// on the other side of the union, so it checks only `!(...)` narrowing its wrapped
+// condition.
 #[test]
 fn not_parenthesized_typeof_narrows() {
     let source =
@@ -286,9 +286,8 @@ fn not_parenthesized_typeof_narrows() {
 
 #[test]
 fn equality_against_string_literal_narrows_both_branches() {
-    let source = include_str!(
-        "fixtures/control-flow-narrowing/equality_against_string_literal_narrows.ts"
-    );
+    let source =
+        include_str!("fixtures/control-flow-narrowing/equality_against_string_literal_narrows.ts");
     let diagnostics = check(source, "equality_against_string_literal_narrows.ts");
     assert!(
         diagnostics.is_empty(),
@@ -313,9 +312,8 @@ fn equality_against_literal_else_branch_mismatch_is_caught() {
 // case, which narrows to whatever the other cases' literals leave out.
 #[test]
 fn switch_case_narrows_string_discriminant() {
-    let source = include_str!(
-        "fixtures/control-flow-narrowing/switch_case_narrows_string_discriminant.ts"
-    );
+    let source =
+        include_str!("fixtures/control-flow-narrowing/switch_case_narrows_string_discriminant.ts");
     let diagnostics = check(source, "switch_case_narrows_string_discriminant.ts");
     assert!(
         diagnostics.is_empty(),

@@ -1,6 +1,6 @@
-function describe(x: string | null): string {
-    if (!x) {
-        return "empty";
-    }
-    return x.toUpperCase();
+function describe(x: string | null): number {
+  if (!x) {
+    return 0;
+  }
+  return x.length;
 }
