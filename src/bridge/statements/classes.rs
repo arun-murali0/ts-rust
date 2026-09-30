@@ -60,23 +60,17 @@ pub(super) fn check_class_declaration(
 
     let outer_class_instance = ctx.current_class_instance.replace(instance_type);
 
-    // Mirrors check_function_declaration's push_type_params for a plain
-    // generic function, and push_decl_type_params's existing use for generic
-    // interfaces/aliases -- this was the missing piece the comment above
-    // used to describe as "no type-parameter scope to push here" (stale:
-    // generic classes are now resolved at declare time via resolve_class,
-    // but nothing pushed T into scope for THIS, separate check-time pass
-    // over the body). Without it: the constructor's own resolve_function_params
-    // call below re-resolves T fresh against ctx.namespace and finds nothing,
-    // typically making that resolution fail outright (silently skipping the
-    // constructor body); an instance method's params come pre-resolved from
-    // instance_object instead, so its body still gets checked, but any
-    // expression inside it that needs to resolve T standalone hits the same
-    // missing-name case and falls back to an unimplemented/unresolved path.
-    // Using push_decl_type_params (the declaration-shaped variant), not
-    // push_type_params (which wants an oxc Function node): a class's own
-    // `<T, ...>` list is a TSTypeParameterDeclaration, the same shape an
-    // interface's or alias's is, not a function's.
+    // Pushes the class's own `<T, ...>` scope for the check-time pass over the body.
+    // resolve_class resolved the class at declare time, but that scope is gone by
+    // the time bodies are checked, so T has to be pushed again here.
+    // Without it the constructor's params, re-resolved below against ctx.namespace,
+    // fail to find T and the constructor body is silently skipped. Instance method
+    // params come pre-resolved from instance_object, so those bodies are still
+    // checked, but any expression in them that resolves T standalone falls back to
+    // the unresolved path.
+    // push_decl_type_params, not push_type_params: a class's `<T, ...>` list is a
+    // TSTypeParameterDeclaration (the same shape as an interface's or alias's),
+    // while push_type_params takes an oxc Function node.
     let type_param_scope = ctx
         .namespace
         .push_decl_type_params(&mut ctx.arena, class.type_parameters.as_deref());

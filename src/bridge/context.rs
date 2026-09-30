@@ -30,7 +30,7 @@ pub struct CheckContext<'ast, 'src> {
     // on the pair in order, never symmetrized: subtyping is not symmetric (see
     // subtyping.rs), so (a, b) and (b, a) are cached as independent entries.
     //
-    // This only catches repeats of the *same* TypeId pair. alloc() now reuses one
+    // This only catches repeats of the *same* TypeId pair. alloc() reuses one
     // TypeId for identical anonymous composites (so the same-shaped object
     // literal at two call sites shares an entry here), but a named type, a union,
     // or a placeholder-originated type still has its own id and its own,
@@ -43,9 +43,9 @@ pub struct CheckContext<'ast, 'src> {
     // runs while a declaration is still being resolved, when a placeholder can still
     // be empty, and this cache is keyed on TypeId alone. A result stored against an
     // empty placeholder would stay after set() fills it in, and nothing invalidates
-    // it. Generic inference does go through this cache now (it runs after every
-    // declaration is complete), so a call like `allSame(1, 2, ..., 8)` no longer
-    // recomputes each (candidate, existing) pair.
+    // it. Generic inference does go through this cache (it runs after every
+    // declaration is complete), so a call like `allSame(1, 2, ..., 8)` computes each
+    // (candidate, existing) pair once.
     pub relation_cache: RelationCache,
 
     pub current_return_type: Option<TypeId>,
@@ -100,7 +100,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
     // structural subtyping, such as excess property checks on object literals or
     // const assertions, have one place to live later without changing call sites.
     //
-    // Takes &mut self (not &self) because SemanticQueries now carries a mutable
+    // Takes &mut self (not &self) because SemanticQueries carries a mutable
     // handle to relation_cache alongside the arena. Field-level destructuring
     // here borrows the two fields disjointly, but that disjointness is only
     // visible inside this function body -- past this call boundary the returned

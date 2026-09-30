@@ -29,8 +29,8 @@ pub(super) fn infer_object_expression_type(
         // all three as string-keyed properties, so a numeric key is formatted the
         // same way its runtime string form would be. Anything else -- a computed
         // key (`{ [expr]: 1 }`) or a private name -- has no static name to give
-        // this property, so it is skipped rather than guessed at, same as a
-        // spread property already was before this fix.
+        // this property, so it is skipped rather than guessed at, as a
+        // spread property is.
         let name = match &property.key {
             PropertyKey::StaticIdentifier(key) => key.name.to_string(),
             PropertyKey::StringLiteral(key) => key.value.to_string(),
