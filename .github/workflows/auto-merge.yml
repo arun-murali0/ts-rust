@@ -1,0 +1,91 @@
+name: Auto-merge features into main
+
+# Promotes `features` to `main` a few times a day, not on every push, so main stays
+# one clean commit per batch of work. A run merges only when ALL of these hold:
+#   1. features is ahead of main
+#   2. every commit in the batch is authored by the repository owner
+#   3. CI completed successfully on the exact head commit of features
+# Otherwise it does nothing and tries again at the next slot.
+
+on:
+  schedule:
+    # ~3x/day (UTC), offset from ci.yml's own schedule. Scheduled workflows never
+    # run on forks, so this is effectively owner-only.
+    - cron: "30 3,11,19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: auto-merge
+  cancel-in-progress: false
+
+env:
+  SOURCE: features
+  TARGET: main
+  GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
+
+jobs:
+  merge:
+    name: Merge features into main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
+
+      - name: Merge if ready
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          OWNER="${{ github.repository_owner }}"
+
+          git fetch origin "$SOURCE" "$TARGET" || { echo "No $SOURCE branch yet; nothing to do."; exit 0; }
+
+          AHEAD="$(git rev-list --count "origin/$TARGET..origin/$SOURCE")"
+          if [ "$AHEAD" = "0" ]; then
+            echo "$SOURCE has nothing new for $TARGET."
+            exit 0
+          fi
+          SHA="$(git rev-parse "origin/$SOURCE")"
+          echo "$AHEAD commit(s) to merge, head $SHA"
+
+          # 1. Only the owner's commits are auto-merged.
+          for c in $(git rev-list "origin/$TARGET..origin/$SOURCE"); do
+            login="$(gh api "repos/$REPO/commits/$c" --jq '.author.login // ""')"
+            if [ "${login,,}" != "${OWNER,,}" ]; then
+              echo "Commit $c is authored by '${login:-unlinked email}', not $OWNER. Not auto-merging."
+              exit 0
+            fi
+          done
+
+          # 2. CI must have finished green on this exact commit.
+          STATE="$(gh run list --workflow ci.yml --branch "$SOURCE" --commit "$SHA" \
+            --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' || true)"
+          if [ "$STATE" != "completed/success" ]; then
+            echo "CI on $SHA is '${STATE:-not found}', not completed/success. Will retry next slot."
+            exit 0
+          fi
+
+          # 3. One PR, squash-merged: one clean commit on main per batch.
+          TITLE="Merge $SOURCE: $AHEAD change(s) on $(date -u +'%Y-%m-%d %H:%M UTC')"
+          BODY="$(git log --format='- %s' "origin/$TARGET..origin/$SOURCE")"
+
+          PR="$(gh pr list --base "$TARGET" --head "$SOURCE" --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$PR" ]; then
+            PR="$(gh pr create --base "$TARGET" --head "$SOURCE" --title "$TITLE" --body "$BODY")"
+          fi
+          # --match-head-commit: abort if something was pushed after CI was checked.
+          gh pr merge "$PR" --squash --subject "$TITLE" --body "$BODY" --match-head-commit "$SHA"
+
+          # 4. A squash leaves features with different history than main, which
+          # would cause conflicts next time. Realign it to main, but only if nobody
+          # pushed to features since $SHA (force-with-lease).
+          git fetch origin "$TARGET" "$SOURCE" || true
+          git push --force-with-lease="$SOURCE:$SHA" origin "origin/$TARGET:refs/heads/$SOURCE" \
+            || echo "features moved since the merge; left as is. Run: git fetch && rebase onto origin/main."

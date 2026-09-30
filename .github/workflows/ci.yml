@@ -3,7 +3,9 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # `features` is where day-to-day work lands; auto-merge.yml only promotes a
+    # features commit to main after CI has passed on that exact commit.
+    branches: [main, features]
   schedule:
     # Safety net independent of push/PR frequency — fires ~3x/day on main only.
     # Scheduled workflows never run on forks, so this is effectively owner-only.
