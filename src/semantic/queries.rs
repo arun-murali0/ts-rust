@@ -91,7 +91,11 @@ impl<'a> SemanticQueries<'a> {
     /// cannot equal a literal -- so the allow keeps the build quiet until then.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_disjoint(&mut self, a: TypeId, b: TypeId) -> bool {
-        let (first, second) = if a.index() <= b.index() { (a, b) } else { (b, a) };
+        let (first, second) = if a.index() <= b.index() {
+            (a, b)
+        } else {
+            (b, a)
+        };
         let key = (Relation::Disjoint, first, second);
         if let Some(&cached) = self.cache.get(&key) {
             return cached;
