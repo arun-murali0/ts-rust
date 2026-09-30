@@ -90,6 +90,13 @@ function f(x: Either): number { return 0; }
 // variant; `first<T>` returning `items[0]`: 1; connected app: about 10 per unit),
 // so the counts pin behavior. If one changes after an arena edit, look at the
 // messages before looking at the timings.
+//
+// The connected_application counts were lowered by exactly one per unit (10 -> 9)
+// when parenthesized expressions started being looked through (350d5b5). Each
+// unit's `runBatch` ends in `return ( ... );`, which used to hit the catch-all in
+// infer_expression_type and report one "unimplemented expression kind" warning.
+// That warning is gone on purpose; the remaining 9 per unit plus the 10 from the
+// shared prelude are all real errors.
 #[test]
 fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
     use complex_fixtures::*;
@@ -112,17 +119,17 @@ fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
         (
             "connected_application_scale_10",
             connected_application_source(10),
-            110,
+            100,
         ),
         (
             "connected_application_scale_50",
             connected_application_source(50),
-            510,
+            460,
         ),
         (
             "connected_application_scale_100",
             connected_application_source(100),
-            1010,
+            910,
         ),
     ];
 
