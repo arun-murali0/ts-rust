@@ -453,6 +453,11 @@ impl TypeArena {
     // inside a walk. Answers reached mid-walk rest on the assumption that a pair
     // already being compared is equal, which only holds for that one comparison, so
     // storing them would be wrong for the next caller.
+    //
+    // Not called from production code right now: alloc_union went back to the plain
+    // structurally_equal (see the note there). Kept and tested so it can be reconnected,
+    // so dead_code is allowed outside test builds instead of deleting it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn structurally_equal_cached(&mut self, a: TypeId, b: TypeId) -> bool {
         if a == b {
             return true;
@@ -833,7 +838,11 @@ mod tests {
         assert!(arena.structurally_equal_cached(one, two));
         assert!(arena.structurally_equal_cached(two, one));
 
-        assert_eq!(arena.equality_cache.len(), 1, "(a, b) and (b, a) share one entry");
+        assert_eq!(
+            arena.equality_cache.len(),
+            1,
+            "(a, b) and (b, a) share one entry"
+        );
     }
 
     #[test]
