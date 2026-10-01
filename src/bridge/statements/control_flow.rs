@@ -98,9 +98,8 @@ pub(super) fn check_switch_statement(
     // matches a bare Identifier (see resolve_symbol_id's caller there). So this
     // narrows only the identifier-discriminant case (every explicit case, and
     // default by elimination below); a property discriminant still infers its
-    // type normally but no case body sees it narrowed. That is exactly the
-    // identifier-only gap narrow_condition already has for `if`, just inherited
-    // here rather than newly introduced.
+    // type normally but no case body sees it narrowed. That is the same
+    // identifier-only gap narrow_condition has for `if`, inherited here.
     let symbol = match &switch_stmt.discriminant {
         oxc_ast::ast::Expression::Identifier(ident) => {
             super::super::narrow::resolve_symbol_id(ident, scoping)

@@ -263,10 +263,10 @@ fn substitute_impl(
 
 // Scratch state for one substitute_impl call, so that everything learned while
 // rewriting one part of a type is reused by the rest of it. The graph is a DAG
-// after interning: a subtype reachable along several paths used to be rewritten
-// once per path, and each level re-asked "does this contain a parameter" from
-// scratch. Now each node is rewritten once (`rewritten`), and the parameter
-// question is answered from the arena's own cache (see contains_type_param).
+// after interning, so a subtype reachable along several paths is rewritten once
+// (`rewritten`) instead of once per path, and "does this contain a parameter" is
+// answered from the arena's own cache (see contains_type_param) instead of a fresh
+// walk at every level.
 //
 // `rewritten` does not outlive the call. A placeholder can be completed by
 // TypeArena::set between two calls, which would make a longer-lived rewrite stale.
@@ -351,8 +351,8 @@ impl Substitution<'_> {
 
     // Rebuilds a self-referential object around a placeholder of its own. The
     // placeholder is registered as type_id's rewrite *before* the properties are
-    // walked, so the walk finds it where it used to find the cut, and the edge
-    // that closed on type_id now closes on the copy. The placeholder is not
+    // walked, so the walk finds it where the first pass found the cut, and the edge
+    // that closed on type_id closes on the copy. The placeholder is not
     // interned (see TypeArena::alloc_object_placeholder), which is what a
     // recursive shape needs anyway: other types hold its raw id, so it could not
     // be merged with an identical shape afterwards.
@@ -730,9 +730,9 @@ mod tests {
     }
 
     // `Box<T> { value: T; next: Box<T> | null }` bound at T = number. The self
-    // edge used to be cut and left on the generic original, so `next` still read
-    // as `Box<T> | null` and `box.next.value` was T. It has to close on the new
-    // object instead, and nothing generic may be reachable from the result.
+    // edge must close on the new object, not stay on the generic original:
+    // otherwise `next` would still read as `Box<T> | null` and `box.next.value`
+    // would be T. Nothing generic may be reachable from the result.
     #[test]
     fn recursive_object_substitution_closes_on_the_copy() {
         let mut arena = TypeArena::new();

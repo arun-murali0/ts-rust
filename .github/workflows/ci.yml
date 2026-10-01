@@ -3,7 +3,9 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    # `features` is where day-to-day work lands; auto-merge.yml only promotes a
+    # features commit to main after CI has passed on that exact commit.
+    branches: [main, features]
   schedule:
     # Safety net independent of push/PR frequency — fires ~3x/day on main only.
     # Scheduled workflows never run on forks, so this is effectively owner-only.
@@ -99,3 +101,35 @@ jobs:
             > /tmp/tsc-drift-result.json || true
       - name: Enforce false-positive baseline
         run: node scripts/ts-diag-tool/check-baseline.js < /tmp/tsc-drift-result.json
+
+      # Same-as-main gate: build main's checker, run it over THIS commit's
+      # fixtures, and require that this commit's checker agrees with real tsc
+      # at least as well as main's does. Both binaries see identical fixtures, so
+      # any difference comes from the checker code, not from the fixtures.
+      - name: Check out main for comparison
+        if: github.ref != 'refs/heads/main'
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main-src
+      - name: Build main's ts-rust (release)
+        if: github.ref != 'refs/heads/main'
+        run: cargo build --release --bin ts-rust --manifest-path main-src/Cargo.toml
+      - name: Compare main's ts-rust against real tsc over the same fixtures
+        if: github.ref != 'refs/heads/main'
+        run: |
+          node scripts/ts-diag-tool/compare.js tests/fixtures main-src/target/release/ts-rust --json \
+            > /tmp/tsc-drift-main.json || true
+      - name: Fail if this commit is worse than main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          node -e '
+            const fs = require("fs");
+            const here = JSON.parse(fs.readFileSync("/tmp/tsc-drift-result.json", "utf8")).summary;
+            const main = JSON.parse(fs.readFileSync("/tmp/tsc-drift-main.json", "utf8")).summary;
+            console.log("false positives  main:", main.falsePositive, " this commit:", here.falsePositive);
+            if (here.falsePositive > main.falsePositive) {
+              console.error("FAIL: this commit has more false positives than main.");
+              process.exit(1);
+            }
+          '

@@ -23,10 +23,12 @@ const FIXED_SLOTS: u32 = 10;
 
 // The 64-bit digest the intern tables are keyed on, in place of the content itself.
 //
-// The tables used to own a second copy of every interned type as their key, so each
-// composite lived in memory twice: once in `types`, once in the map. Keying on a
-// digest and confirming a hit against the slot in `types` (the source of truth
-// anyway) removes the copy, and with it the clone on every miss.
+// Decision: key the tables on a digest and confirm every hit against the slot in
+// `types`, which is the source of truth anyway.
+// Why: keying on the content would store each interned composite twice (once in
+// `types`, once as the map key) and clone it on every miss.
+// Cost: a digest collision costs one missed reuse and can never merge two different
+// types, because a hit is compared with the slot before it is trusted.
 fn content_hash<T: Hash + ?Sized>(content: &T) -> u64 {
     let mut hasher = FxHasher::default();
     content.hash(&mut hasher);
@@ -77,16 +79,17 @@ pub struct TypeArena {
     // alloc(): its members must be flattened and deduplicated first, and that is
     // alloc_union's job, so the key here is the *finished* member list.
     //
-    // Keyed by a digest of the members in the order alloc_union produced them (checked
-    // against the slot on a hit, like `interned`), not of a sorted list.
-    // Sorting would also merge `A | B` with `B | A`, but the survivor is whichever
-    // was built first, so a later diagnostic would print its members in a different
-    // order than before. That could not be checked against the fixtures without
-    // running them, so the cheaper, behavior-neutral key comes first. A repeated
-    // build of the same union (what narrowing does on every condition) still hits.
+    // Decision: the key is a digest of the members in the order alloc_union produced
+    // them (checked against the slot on a hit, like `interned`), not of a sorted list.
+    // Why: sorting would merge `A | B` with `B | A`, but the survivor would be
+    // whichever was built first, so the member order printed in a diagnostic would
+    // depend on build order instead of source order.
+    // Cost: reordered unions get separate ids and miss the relation cache;
+    // structurally_equal still treats them as one type. A repeated build of the same
+    // union (what narrowing does on every condition) still hits.
     //
-    // A miss is always safe: two unions whose members are equal by shape but sit at
-    // different ids just get different keys and stay separate, as they did before.
+    // A miss is always safe: two unions that are equal by shape but sit at different
+    // ids just get different keys and stay separate.
     interned_unions: FxHashMap<u64, TypeId>,
 
     // Answers to "does this type mention a type parameter" (see
@@ -152,8 +155,8 @@ impl TypeArena {
     //     and deduplicated them (see interned_unions), and
     //   - object placeholders, which alloc_object_placeholder pushes directly.
     //
-    // Because two calls can now return the same TypeId, a TypeId no longer means
-    // "this one allocation". Anything that needs an id that is uniquely its own
+    // Because two calls can return the same TypeId, a TypeId does not identify one
+    // allocation. Anything that needs an id that is uniquely its own
     // (to attach a display name or a Record value type to it) must use
     // alloc_fresh, or make_unique on an id it was handed.
     //
@@ -205,11 +208,11 @@ impl TypeArena {
     // without touching `id` or any other copy.
     //
     // Exists for the instantiation memo (see TypeNamespace::cache_instantiation).
-    // Every reference to `Box<number>` used to get a slot of its own, and callers
-    // depend on that: `type Alias = Box<number>` renames the slot it is handed. If
-    // a memo handed out one shared slot instead, an alias would rename every other
-    // `Box<number>` in the file. So the memo keeps a private pristine slot and every
-    // hit gets a duplicate of it.
+    // Callers depend on every reference to `Box<number>` having a slot of its own:
+    // `type Alias = Box<number>` renames the slot it is handed, so if the memo handed
+    // out one shared slot an alias would rename every other `Box<number>` in the
+    // file. So the memo keeps a private pristine slot and every hit gets a duplicate
+    // of it.
     pub fn duplicate_named(&mut self, id: TypeId) -> TypeId {
         let copy = self.get(id).clone();
         let duplicate = self.push(copy);
@@ -227,7 +230,7 @@ impl TypeArena {
     // The case this exists for: `interface Node { next: Box<Node> }`. While Node is
     // still resolving, its id is an empty, unnamed placeholder that prints as an
     // empty object. Reusing that spelling later, after Node has its name, would put
-    // "Box<{}>" in a message that used to say "Box<Node>".
+    // "Box<{}>" in a message that should say "Box<Node>".
     //
     // Deliberately narrow: a composite that is not named, an object or a function,
     // answers false, which only costs a missed reuse. Recursion is safe because only
@@ -310,12 +313,12 @@ impl TypeArena {
                 Type::Never => continue,
                 _ => {}
             }
-            // Not the cached form: this loop is the only production call site for
-            // structurally_equal_cached, and a diagnostic-count regression showed up
-            // here that could not be confirmed safe without a compiler in the
-            // environment that made the change. Reverted to the plain, proven form
-            // until it can actually be run. structurally_equal_cached itself is kept,
-            // tested, and ready to reconnect once that verification happens.
+            // Plain structurally_equal, not structurally_equal_cached. This loop is
+            // the only place the cached form was tried, and a diagnostic-count
+            // regression appeared there; the root cause was not established. The
+            // uncached form is the one known to keep the counts stable, so it stays
+            // until the cause is found. structurally_equal_cached is kept and tested
+            // for reconnecting.
             let already_present = flat
                 .iter()
                 .any(|&existing| self.structurally_equal(existing, id));
@@ -453,6 +456,11 @@ impl TypeArena {
     // inside a walk. Answers reached mid-walk rest on the assumption that a pair
     // already being compared is equal, which only holds for that one comparison, so
     // storing them would be wrong for the next caller.
+    //
+    // Not called from production code: alloc_union uses the plain structurally_equal
+    // (see the note there). Kept and tested so it can be reconnected, so dead_code is
+    // allowed outside test builds instead of deleting it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn structurally_equal_cached(&mut self, a: TypeId, b: TypeId) -> bool {
         if a == b {
             return true;
@@ -706,8 +714,7 @@ mod tests {
         assert_ne!(arena.alloc_union(vec![a, b]), arena.alloc_union(vec![a, c]));
     }
 
-    // The regression this phase could most easily cause: naming a shared union must
-    // not rename every other identical union. Alias and enum resolution call
+    // Naming a shared union must not rename every other identical union. Alias and enum resolution call
     // make_unique before naming, so make_unique has to know a union can be shared.
     #[test]
     fn naming_a_union_through_make_unique_does_not_rename_the_shared_one() {
@@ -833,7 +840,11 @@ mod tests {
         assert!(arena.structurally_equal_cached(one, two));
         assert!(arena.structurally_equal_cached(two, one));
 
-        assert_eq!(arena.equality_cache.len(), 1, "(a, b) and (b, a) share one entry");
+        assert_eq!(
+            arena.equality_cache.len(),
+            1,
+            "(a, b) and (b, a) share one entry"
+        );
     }
 
     #[test]
@@ -1115,11 +1126,9 @@ mod tests {
         );
     }
 
-    // Replaces the old `unions_are_not_interned`, which pinned the behavior this
-    // phase deliberately changed. What is worth pinning now is the limit of the
-    // change: the key is order-sensitive, so a reordered union is a separate id.
-    // That is intentional (see interned_unions) and is the refinement to revisit
-    // once the fixtures can be run; structurally_equal still treats them as one type.
+    // Pins the limit of union interning: the key is order-sensitive, so a reordered
+    // union is a separate id (see interned_unions for why the key is not sorted).
+    // structurally_equal still treats the two as one type.
     #[test]
     fn reordered_unions_are_equal_by_shape_but_keep_separate_ids() {
         let mut arena = TypeArena::new();
@@ -1271,9 +1280,9 @@ mod tests {
         placeholder
     }
 
-    // Two identical-shaped recursive types used to compare a -> b -> a -> b ...
-    // until the stack overflowed. Correct answer: equal (coinductively), and it
-    // must return.
+    // Comparing two identically shaped recursive types goes a -> b -> a -> b ... and
+    // only terminates because a pair already on the stack is assumed equal
+    // (coinduction). The answer must be equal, and the call must return.
     #[test]
     fn structurally_equal_terminates_on_identical_recursive_types() {
         let mut arena = TypeArena::new();
@@ -1312,10 +1321,11 @@ mod tests {
         assert!(matches!(arena.get(union), Type::Object(_) | Type::Union(_)));
     }
 
-    // The intern key already separates a method from a function-valued
-    // property (PropertyEntry derives Hash with is_method), and subtyping treats
-    // them differently (methods are bivariant). structurally_equal ignores
-    // is_method, so alloc_union would merge them. tsc keeps both members.
+    // A method and a function-valued property must stay distinct types. The intern
+    // key separates them (PropertyEntry hashes is_method) and subtyping treats them
+    // differently (method parameters are bivariant), so structurally_equal has to
+    // compare is_method too: otherwise alloc_union would merge the two into one
+    // union member, while tsc keeps both.
     #[test]
     fn a_method_and_a_function_valued_property_are_not_the_same_shape() {
         let mut arena = TypeArena::new();
@@ -1337,16 +1347,16 @@ mod tests {
         let interned_field = arena.alloc(Type::Object(ObjectType::new(vec![entry(false)])));
         assert_ne!(interned_method, interned_field);
 
-        // ... structural equality must agree with it (used to fail: is_method was ignored).
+        // ... and structural equality must agree with it: is_method is part of the shape.
         let method = object(&mut arena, vec![entry(true)]);
         let field = object(&mut arena, vec![entry(false)]);
         assert!(!arena.structurally_equal(method, field));
     }
 
     // make_unique leaves the ten fixed slots alone (they are not internable), and
-    // namespace::resolve names whatever it gets back, so `type Age = number` used
-    // to name slot 0 and print every `number` as "Age". set_display_name now
-    // ignores the fixed slots.
+    // namespace::resolve names whatever it gets back, so without a guard
+    // `type Age = number` would name slot 0 and print every `number` as "Age".
+    // set_display_name ignores the fixed slots.
     #[test]
     fn a_fixed_slot_never_takes_a_display_name() {
         let mut arena = TypeArena::new();

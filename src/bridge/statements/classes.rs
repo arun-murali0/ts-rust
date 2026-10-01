@@ -91,9 +91,13 @@ pub(super) fn check_class_declaration(
                 resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena)
             {
                 bind_params(&ctor.params, &params, scoping, ctx);
+                // Like a function declaration, a constructor body starts with no
+                // narrowing and leaves none behind.
+                let outer_narrow = std::mem::take(&mut ctx.narrow);
                 for body_stmt in &ctor_body.statements {
                     check_statement(body_stmt, scoping, ctx);
                 }
+                ctx.narrow = outer_narrow;
             }
         }
     }
@@ -126,9 +130,11 @@ pub(super) fn check_class_declaration(
 
                 bind_params(&method.value.params, &method_type.params, scoping, ctx);
                 let outer_return_type = ctx.current_return_type.replace(method_type.return_type);
+                let outer_narrow = std::mem::take(&mut ctx.narrow);
                 for body_stmt in &method_body.statements {
                     check_statement(body_stmt, scoping, ctx);
                 }
+                ctx.narrow = outer_narrow;
                 ctx.current_return_type = outer_return_type;
             }
 
@@ -168,9 +174,11 @@ pub(super) fn check_class_declaration(
                 // already gets (see the doc comment on Expression::ThisExpression
                 // in expressions/mod.rs), rather than being silently wrong.
                 let outer_class_instance_for_this = ctx.current_class_instance.take();
+                let outer_narrow = std::mem::take(&mut ctx.narrow);
                 for body_stmt in &method_body.statements {
                     check_statement(body_stmt, scoping, ctx);
                 }
+                ctx.narrow = outer_narrow;
                 ctx.current_class_instance = outer_class_instance_for_this;
                 ctx.current_return_type = outer_return_type;
             }

@@ -60,7 +60,8 @@ impl<'a> SemanticQueries<'a> {
     // exception is type_annotation::check_type_argument_constraint: it runs while
     // a declaration is still being resolved, when a placeholder can be empty, and a
     // result cached against an empty placeholder would outlive it. Generic
-    // inference used to be an exception too and now comes through here.
+    // inference is not an exception: it runs after every declaration is complete
+    // and goes through here.
     pub fn is_subtype(&mut self, source: TypeId, target: TypeId) -> bool {
         // Answered before the map is touched. Recomputing these costs a couple of
         // integer compares, less than hashing a (TypeId, TypeId) key, and storing
@@ -91,7 +92,11 @@ impl<'a> SemanticQueries<'a> {
     /// cannot equal a literal -- so the allow keeps the build quiet until then.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_disjoint(&mut self, a: TypeId, b: TypeId) -> bool {
-        let (first, second) = if a.index() <= b.index() { (a, b) } else { (b, a) };
+        let (first, second) = if a.index() <= b.index() {
+            (a, b)
+        } else {
+            (b, a)
+        };
         let key = (Relation::Disjoint, first, second);
         if let Some(&cached) = self.cache.get(&key) {
             return cached;
@@ -245,7 +250,7 @@ mod tests {
             }
         }
 
-        // Round 2: same pairs again, now every one is a cache hit.
+        // Round 2: same pairs again, so every one is a cache hit.
         for &a in &ids {
             for &b in &ids {
                 let cached = queries.is_subtype(a, b);

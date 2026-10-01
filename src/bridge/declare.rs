@@ -8,7 +8,7 @@ use super::context::CheckContext;
 // Two passes over the same statement list. The first registers every named type
 // (interfaces, aliases, classes, enums) before anything is resolved, so a
 // function declared earlier in the file can reference a type declared later. The
-// second pass resolves function and variable signatures, which can now look up
+// second pass resolves function and variable signatures, which can look up
 // any of those names regardless of source order.
 pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckContext<'ast, '_>) {
     for stmt in &program.body {

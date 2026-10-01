@@ -18,6 +18,21 @@ pub(super) fn infer_arrow_function_type(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
+    // Narrowing a guard clause establishes inside the body must not survive past
+    // the function expression, and there is more than one exit path below, so
+    // the save and restore wrap the whole body rather than each return. Cloned,
+    // not cleared: an arrow still sees what the enclosing scope had narrowed.
+    let outer_narrow = ctx.narrow.clone();
+    let result = infer_arrow_function_type_inner(arrow, scoping, ctx);
+    ctx.narrow = outer_narrow;
+    result
+}
+
+fn infer_arrow_function_type_inner(
+    arrow: &oxc_ast::ast::ArrowFunctionExpression,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> TypeId {
     let param_types =
         resolve_params_with_any_fallback(&arrow.params, &mut ctx.namespace, &mut ctx.arena);
     bind_params(&arrow.params, &param_types, scoping, ctx);
@@ -64,6 +79,18 @@ pub(super) fn infer_arrow_function_type(
 }
 
 pub(super) fn infer_function_expression_type(
+    func: &Function,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> TypeId {
+    // Same reasoning as infer_arrow_function_type: body narrowing stays inside.
+    let outer_narrow = ctx.narrow.clone();
+    let result = infer_function_expression_type_inner(func, scoping, ctx);
+    ctx.narrow = outer_narrow;
+    result
+}
+
+fn infer_function_expression_type_inner(
     func: &Function,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,

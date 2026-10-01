@@ -1,6 +1,6 @@
-function stringify(x: string | number): string {
-    if (!(typeof x === "number")) {
-        return x.toUpperCase();
-    }
-    return x.toFixed(2);
+function measure(x: string | number): number {
+  if (!(typeof x === "number")) {
+    return x.length;
+  }
+  return x + 1;
 }
