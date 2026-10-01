@@ -4,7 +4,7 @@ set -euo pipefail
 cargo fmt --all
 cargo check --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+cargo test
 
 # Same false-positive gate CI enforces (tsc-drift job), so a regression is caught
 # before the push instead of after. Skipped, with a notice, if Node is missing.

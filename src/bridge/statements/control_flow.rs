@@ -1,14 +1,23 @@
-use oxc_ast::ast::{ForStatement, IfStatement, SwitchStatement, WhileStatement};
+use oxc_ast::ast::{Expression, ForStatement, IfStatement, SwitchStatement, WhileStatement};
 use oxc_semantic::Scoping;
 
 use super::super::context::CheckContext;
 use super::super::expressions::infer_expression_type;
 use super::super::narrow::{
-    narrow_by_identifier_equals, narrow_by_identifier_excluding, narrow_condition,
-    resolve_case_literal,
+    NarrowState, join_states, narrow_condition, narrow_switch_case, narrow_switch_default,
+    switch_discriminant,
 };
 use super::{check_statement, check_variable_declaration, statement_always_exits};
 
+// Where control flow joins after an `if`. What the code after the statement sees
+// depends on which branches can fall out the bottom, because a branch that always
+// exits contributes nothing to it; that is why the guard clause
+// `if (x === null) return;` narrows everything that follows. When both branches
+// can fall through their end states are joined, so a variable narrowed or assigned
+// on both keeps the union of the two, while one narrowed on only one branch
+// reverts to its earlier type (`if (x === null) { x = "d"; }` leaves x a string).
+// When neither can, the code after is unreachable and the earlier state is kept.
+// With no else branch the missing alternate is the condition's false side alone.
 pub(super) fn check_if_statement(
     if_stmt: &IfStatement,
     scoping: &Scoping,
@@ -22,28 +31,34 @@ pub(super) fn check_if_statement(
     ctx.narrow.extend(true_overrides);
     check_statement(&if_stmt.consequent, scoping, ctx);
     let consequent_always_exits = statement_always_exits(&if_stmt.consequent);
+    let consequent_end = std::mem::replace(&mut ctx.narrow, outer_narrow.clone());
 
-    match &if_stmt.alternate {
+    let (alternate_always_exits, alternate_end) = match &if_stmt.alternate {
         Some(alternate) => {
-            ctx.narrow = outer_narrow.clone();
             ctx.narrow.extend(false_overrides);
             check_statement(alternate, scoping, ctx);
-            ctx.narrow = outer_narrow;
+            (statement_always_exits(alternate), ctx.narrow.clone())
         }
         None => {
-            ctx.narrow = outer_narrow;
-            // The guard-clause pattern: `if (x === null) return; ... x.prop`. With
-            // no else branch, there is nothing after the if statement that ran
-            // under true_overrides, since the consequent always exits before
-            // reaching it. So the false branch's narrowing (x is non-null) is
-            // exactly what should carry into the code that follows.
-            if consequent_always_exits {
-                ctx.narrow.extend(false_overrides);
-            }
+            let mut implicit_else = outer_narrow.clone();
+            implicit_else.extend(false_overrides);
+            (false, implicit_else)
         }
-    }
+    };
+
+    ctx.narrow = match (consequent_always_exits, alternate_always_exits) {
+        (true, false) => alternate_end,
+        (false, true) => consequent_end,
+        (false, false) => join_states(&consequent_end, &alternate_end, &mut ctx.arena),
+        (true, true) => outer_narrow,
+    };
 }
 
+// The loop's own test narrows the body (`while (x !== null) { x.length }`), since
+// the test runs before every pass. The body is walked once, so narrowing it
+// establishes does not carry into the next pass; what the code after the loop
+// sees is the join of the state from before (the body may not run at all) and the
+// state the body ended in.
 pub(super) fn check_while_statement(
     while_stmt: &WhileStatement,
     scoping: &Scoping,
@@ -51,15 +66,11 @@ pub(super) fn check_while_statement(
 ) {
     infer_expression_type(&while_stmt.test, scoping, ctx);
 
-    // Not narrowed against the loop's own test (`while (x !== null)`), unlike an
-    // `if`'s condition -- a gap, not a leak, and left for later. What is fixed
-    // here is the leak: the body is only walked once, not once per iteration, so
-    // whatever a guard clause inside it narrows must not survive past the loop's
-    // closing brace, the same way an if-branch's narrowing does not survive past
-    // its own.
+    let (true_overrides, _) = narrow_condition(&while_stmt.test, scoping, ctx);
     let outer_narrow = ctx.narrow.clone();
+    ctx.narrow.extend(true_overrides);
     check_statement(&while_stmt.body, scoping, ctx);
-    ctx.narrow = outer_narrow;
+    ctx.narrow = join_states(&outer_narrow, &ctx.narrow.clone(), &mut ctx.arena);
 }
 
 pub(super) fn check_for_statement(
@@ -78,11 +89,16 @@ pub(super) fn check_for_statement(
         infer_expression_type(update, scoping, ctx);
     }
 
-    // Same reasoning as check_while_statement: the body is walked once, so any
-    // narrowing a guard clause inside it establishes must stay inside the loop.
+    // A `for` test narrows its body for the same reason a `while` test does: it
+    // runs before every pass.
+    let test_overrides = match &for_stmt.test {
+        Some(test) => narrow_condition(test, scoping, ctx).0,
+        None => NarrowState::new(),
+    };
     let outer_narrow = ctx.narrow.clone();
+    ctx.narrow.extend(test_overrides);
     check_statement(&for_stmt.body, scoping, ctx);
-    ctx.narrow = outer_narrow;
+    ctx.narrow = join_states(&outer_narrow, &ctx.narrow.clone(), &mut ctx.arena);
 }
 
 pub(super) fn check_switch_statement(
@@ -92,69 +108,59 @@ pub(super) fn check_switch_statement(
 ) {
     infer_expression_type(&switch_stmt.discriminant, scoping, ctx);
 
-    // A bare identifier discriminant (`switch (shape) { case circleValue: ... }`
-    // is possible, but by far the common shape is a property, `switch
-    // (shape.kind)`, which narrow_condition cannot resolve today -- it only ever
-    // matches a bare Identifier (see resolve_symbol_id's caller there). So this
-    // narrows only the identifier-discriminant case (every explicit case, and
-    // default by elimination below); a property discriminant still infers its
-    // type normally but no case body sees it narrowed. That is the same
-    // identifier-only gap narrow_condition has for `if`, inherited here.
-    let symbol = match &switch_stmt.discriminant {
-        oxc_ast::ast::Expression::Identifier(ident) => {
-            super::super::narrow::resolve_symbol_id(ident, scoping)
-        }
-        _ => None,
-    };
+    // `switch (kind)`, `switch (shape.kind)` and `switch (typeof x)` narrow the
+    // discriminant's variable in each case body. Any other discriminant is
+    // inferred normally and narrows nothing.
+    let discriminant = switch_discriminant(&switch_stmt.discriminant, scoping);
 
-    // Every literal a sibling case matches on, gathered once so default can
-    // exclude all of them: it has no test of its own to narrow by, only the
-    // complement of what the other cases already claimed. A case whose test this
-    // checker cannot resolve to a literal (a computed test, say) contributes
-    // nothing here, so default just keeps whatever member it could not rule out
-    // instead of narrowing incorrectly.
-    let excluded_literals: Vec<_> = if symbol.is_some() {
-        switch_stmt
-            .cases
-            .iter()
-            .filter_map(|case| case.test.as_ref())
-            .filter_map(|test| resolve_case_literal(test, &mut ctx.arena))
-            .collect()
-    } else {
-        Vec::new()
-    };
+    // Every case test, gathered once so default can exclude all of them: it has no
+    // test of its own, only the complement of what the other cases claimed.
+    let all_tests: Vec<&Expression> = switch_stmt
+        .cases
+        .iter()
+        .filter_map(|case| case.test.as_ref())
+        .collect();
 
-    // Each case starts from the same narrowing the switch itself started with,
-    // not from whatever the previous case left behind: cases are checked in
-    // textual order here regardless of fallthrough, so without this a guard
-    // clause in one case would narrow the next case's code too, and every case's
-    // narrowing would otherwise leak past the switch's closing brace.
+    // Each case body starts from the narrowing the switch itself started with, not
+    // from whatever the previous case left behind: cases are checked in textual
+    // order regardless of fallthrough, so without this a guard clause in one case
+    // would narrow the next case's code too, and every case's narrowing would
+    // otherwise leak past the switch's closing brace.
     //
-    // Deliberately not narrower than that: real fallthrough (a case with no
-    // break/return that falls into the next) would let that next case's code
-    // observe a value equal to either label, not just its own, which this does
-    // not model -- each case is narrowed as if it were reached directly, matching
-    // tsc for the common non-fallthrough style this checker otherwise assumes
-    // (see statement_always_exits).
+    // Case labels with an empty body fall into the next case (`case "a": case "b":
+    // body`), so the body is narrowed to any of the labels it is reached through,
+    // not just the last. Real fallthrough out of a non-empty body is not modeled:
+    // each such case is narrowed as if reached directly, matching tsc for the
+    // usual break/return style (see statement_always_exits).
     let outer_narrow = ctx.narrow.clone();
+    let mut pending_tests: Vec<&Expression> = Vec::new();
+    let mut pending_default = false;
     for case in &switch_stmt.cases {
         ctx.narrow = outer_narrow.clone();
         match &case.test {
             Some(test) => {
                 infer_expression_type(test, scoping, ctx);
-                if let Some(symbol_id) = symbol {
-                    let overlay = narrow_by_identifier_equals(symbol_id, test, ctx);
-                    ctx.narrow.extend(overlay);
-                }
+                pending_tests.push(test);
             }
-            None => {
-                if let Some(symbol_id) = symbol {
-                    let overlay =
-                        narrow_by_identifier_excluding(symbol_id, &excluded_literals, ctx);
-                    ctx.narrow.extend(overlay);
-                }
-            }
+            None => pending_default = true,
         }
+        if case.consequent.is_empty() {
+            continue;
+        }
+
+        if let Some(discriminant) = &discriminant {
+            // A default grouped with other labels can be reached with any value,
+            // so only a lone default or a set of plain case labels narrows.
+            let overlay = match (pending_default, pending_tests.is_empty()) {
+                (false, false) => narrow_switch_case(discriminant, &pending_tests, ctx),
+                (true, true) => narrow_switch_default(discriminant, &all_tests, ctx),
+                _ => NarrowState::new(),
+            };
+            ctx.narrow.extend(overlay);
+        }
+        pending_tests.clear();
+        pending_default = false;
+
         for stmt in &case.consequent {
             check_statement(stmt, scoping, ctx);
         }

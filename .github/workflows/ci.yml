@@ -7,54 +7,42 @@ on:
     # features commit to main after CI has passed on that exact commit.
     branches: [main, features]
   schedule:
-    # Safety net independent of push/PR frequency — fires ~3x/day on main only.
-    # Scheduled workflows never run on forks, so this is effectively owner-only.
-    - cron: "0 2,10,18 * * *"
+    # Once a day on main. It catches what a push never would: a new advisory in an
+    # unchanged lockfile. Scheduled workflows never run on forks.
+    - cron: "0 2 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-\({{ github.workflow }}-\){{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned, not `stable`: a new stable release would empty the build cache and could
+  # add clippy lints that fail CI with no change on our side. Keep it equal to
+  # rust-version in Cargo.toml.
+  RUST_TOOLCHAIN: "1.98.1"
 
 jobs:
   quality:
     name: Format, check, clippy, test
+    # auto-merge.yml opens a PR from features, and CI already passed on that same
+    # commit through the push to features, so that PR run would repeat it. Forks
+    # still get CI: only a PR from this repository's own features branch is skipped.
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
+    env:
+      # Line tables keep panic backtraces readable while linking and caching far
+      # less debug info than the default.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
-      - name: Install valgrind
-        run: sudo apt-get update && sudo apt-get install -y valgrind
-      - name: Install iai-callgrind-runner
-        run: cargo install iai-callgrind-runner --version 0.16.1
-      - name: Run repository quality gates
-        run: ./scripts/ci.sh
+      - uses: actions/checkout@v4
 
-  security:
-    name: Dependency security
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@cargo-audit
-      - name: Audit dependencies
-        run: cargo audit
-
-  hygiene:
-    name: Repository hygiene
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Reject accidental large files
+      # Cheap and independent of the build, so it fails before the toolchain is installed.
+      - name: Repository hygiene
         shell: bash
         run: |
           set -euo pipefail
@@ -64,10 +52,6 @@ jobs:
             echo "$bad"
             exit 1
           fi
-      - name: Check for common secret files
-        shell: bash
-        run: |
-          set -euo pipefail
           for f in .env .env.local .env.production; do
             if [ -e "$f" ]; then
               echo "Forbidden secret file present: $f"
@@ -75,51 +59,123 @@ jobs:
             fi
           done
 
-  tsc-drift:
-    name: Compare against real tsc (false-positive gate)
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run repository quality gates
+        run: ./scripts/ci.sh
+
+  security:
+    name: Dependency security
+    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
+        with:
+          # The base commit has to be present to see what changed.
+          fetch-depth: 0
+
+      - name: Decide whether the dependencies need auditing
+        id: gate
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          run=true
+          if [ "\(EVENT" != "schedule" ] && [ "\)EVENT" != "workflow_dispatch" ] \
+             && [ -n "\(BASE" ] && [ "\)BASE" != "0000000000000000000000000000000000000000" ] \
+             && changed="\((git diff --name-only "\)BASE" HEAD 2>/dev/null)"; then
+            if ! grep -qE '(^|/)Cargo\.(lock|toml)\(' <<<"\)changed"; then
+              run=false
+            fi
+          fi
+          echo "run=\(run" >> "\)GITHUB_OUTPUT"
+
+      - if: steps.gate.outputs.run == 'true'
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Audit dependencies
+        if: steps.gate.outputs.run == 'true'
+        run: cargo audit
+
+  tsc-drift:
+    name: Compare against real tsc (false-positive gate)
+    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v7
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: scripts/ts-diag-tool/package-lock.json
+
       - name: Build ts-rust (release)
         run: cargo build --release --bin ts-rust
+
       - name: Install ts-diag-tool dependencies
         working-directory: scripts/ts-diag-tool
         run: npm ci
+
       - name: Compare ts-rust against real tsc over tests/fixtures
-        # Informational by design: many fixtures deliberately diverge from
-        # tsc on purpose (this checker's own recovery behavior -- see
-        # bin/compare-tsc.rs's module doc comment), so this step's own exit
-        # code is never checked. What's gated is only the false-positive
-        # count, via check-baseline.js in the next step.
         run: |
-          node scripts/ts-diag-tool/compare.js tests/fixtures target/release/ts-rust --json \
+          node scripts/ts-diag-tool/compare.js tests/fixtures target/release/ts-rust --json --only-differs \
             > /tmp/tsc-drift-result.json || true
+
       - name: Enforce false-positive baseline
         run: node scripts/ts-diag-tool/check-baseline.js < /tmp/tsc-drift-result.json
 
-      # Same-as-main gate: build main's checker, run it over THIS commit's
-      # fixtures, and require that this commit's checker agrees with real tsc
-      # at least as well as main's does. Both binaries see identical fixtures, so
-      # any difference comes from the checker code, not from the fixtures.
       - name: Check out main for comparison
         if: github.ref != 'refs/heads/main'
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           ref: main
           path: main-src
-      - name: Build main's ts-rust (release)
+
+      - name: Identify main's commit
+        id: main
         if: github.ref != 'refs/heads/main'
+        run: echo "sha=\((git -C main-src rev-parse HEAD)" >> "\)GITHUB_OUTPUT"
+
+      - name: Restore main's binary
+        id: main-bin
+        if: github.ref != 'refs/heads/main'
+        uses: actions/cache@v4
+        with:
+          path: main-src/target/release/ts-rust
+          key: main-ts-rust-\({{ runner.os }}-\){{ env.RUST_TOOLCHAIN }}-${{ steps.main.outputs.sha }}-v1
+
+      - name: Build main's ts-rust (release)
+        if: github.ref != 'refs/heads/main' && steps.main-bin.outputs.cache-hit != 'true'
         run: cargo build --release --bin ts-rust --manifest-path main-src/Cargo.toml
+
       - name: Compare main's ts-rust against real tsc over the same fixtures
         if: github.ref != 'refs/heads/main'
         run: |
           node scripts/ts-diag-tool/compare.js tests/fixtures main-src/target/release/ts-rust --json \
             > /tmp/tsc-drift-main.json || true
+
       - name: Fail if this commit is worse than main
         if: github.ref != 'refs/heads/main'
         run: |

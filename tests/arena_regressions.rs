@@ -1,17 +1,3 @@
-// Drop this in tests/arena_regressions.rs.
-//
-// End-to-end versions of the arena suspects, through the public API only, plus
-// a diagnostics baseline for the benchmark fixtures so an arena change that
-// alters behavior (not just speed) shows up as a test failure.
-//
-// Expected on the current code:
-//   - alias_of_a_primitive_does_not_rename_the_primitive        FAILS (predicted)
-//   - empty_enum_does_not_rename_never                          FAILS (predicted)
-//   - identical_recursive_interfaces_in_a_union_terminates      overflows the stack (predicted)
-//   - benchmark_fixtures_report_the_expected_number_of_diagnostics
-//       PASSES on the interning commit (counts come from your dhat run there).
-//       Run it on 81c7b8b^ too: a failure there means interning changed behavior.
-
 use ts_rust::{Diagnostic, Severity, TypeChecker};
 
 #[allow(dead_code)]
@@ -95,8 +81,14 @@ function f(x: Either): number { return 0; }
 // when parenthesized expressions started being looked through (350d5b5). Each
 // unit's `runBatch` ends in `return ( ... );`, which used to hit the catch-all in
 // infer_expression_type and report one "unimplemented expression kind" warning.
-// That warning is gone on purpose; the remaining 9 per unit plus the 10 from the
-// shared prelude are all real errors.
+// That warning is gone on purpose.
+//
+// They dropped again, to 2 per unit plus 1 from the shared prelude (21, 101 and 201
+// at scales 10, 50 and 100), and complex_mixed_scale_200 from 205 to 5, when a
+// property read on a union became legal whenever every member has the property.
+// Before that, reading a shared field such as `kind` on an un-narrowed union was
+// reported as missing, once per read. The wide_union_50 count went to 0 for the
+// same reason. Print the remaining messages before trusting a new number.
 #[test]
 fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
     use complex_fixtures::*;
@@ -105,7 +97,7 @@ fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
         (
             "wide_union_50_variants",
             wide_discriminated_union_source(50),
-            100,
+            0,
         ),
         ("nested_objects_depth_50", nested_object_source(50), 0),
         ("class_hierarchy_depth_50", class_hierarchy_source(50), 0),
@@ -115,21 +107,21 @@ fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
             destructuring_heavy_source(500),
             0,
         ),
-        ("complex_mixed_scale_200", complex_source(200), 401),
+        ("complex_mixed_scale_200", complex_source(200), 5),
         (
             "connected_application_scale_10",
             connected_application_source(10),
-            100,
+            21,
         ),
         (
             "connected_application_scale_50",
             connected_application_source(50),
-            460,
+            101,
         ),
         (
             "connected_application_scale_100",
             connected_application_source(100),
-            910,
+            201,
         ),
     ];
 

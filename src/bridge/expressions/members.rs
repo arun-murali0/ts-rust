@@ -2,26 +2,29 @@ use oxc_ast::ast::Expression;
 use oxc_semantic::Scoping;
 use oxc_span::{GetSpan, Span};
 
-use crate::arena::TypeId;
+use crate::arena::{TypeArena, TypeId};
 use crate::types::Type;
 
 use super::super::context::CheckContext;
 use super::super::narrow::narrow_to_non_nullish;
 use super::infer_expression_type;
 
-// Member access is fully modelled only on Type::Object. String and array member
-// access is limited to `.length`, deliberately: every other String.prototype and
-// Array.prototype method (`.map`, `.slice`, `.indexOf`, ...) would need this
-// checker to model a whole method's signature, and several of the array ones
-// take a callback whose parameter types have to be inferred from the element
-// type, which is a feature in its own right, not a small addition here. `.length`
-// needs neither: it is a fixed property returning `number` on both, so it is
-// covered without pulling in either of those.
+// Member access is modelled on Type::Object, on a union of types that all have the
+// property, and on `.length` for strings and arrays. `.length` is the only
+// String/Array member, deliberately: every other String.prototype and
+// Array.prototype method (`.map`, `.slice`, `.indexOf`, ...) would need a whole
+// method signature modelled, and the array ones take a callback whose parameter
+// types have to be inferred from the element type, which is a feature in its own
+// right. `.length` is a fixed property returning `number` on both, so it needs
+// neither.
 //
-// A union type (for example, a discriminated union not yet narrowed by its tag)
-// is not looked through here either, so accessing a property on an un-narrowed
-// union reports it as missing even if every member happens to share that
-// property.
+// A union is looked through, not rejected: as in tsc, a property is readable on a
+// union when every member has it, and its type is the union of the members'
+// property types. Without this, `shape.kind` on an un-narrowed discriminated union
+// would be reported as missing, so the very read that a `kind` check narrows on
+// would be a false error before narrowing ever ran. A member that lacks the
+// property makes the whole access an error, reported once on the union rather than
+// once per member.
 pub(crate) fn infer_member_access_type(
     object_type: TypeId,
     property_name: &str,
@@ -31,24 +34,15 @@ pub(crate) fn infer_member_access_type(
     // A constrained generic parameter (`T extends HasLength`) exposes its
     // constraint's members inside the function body, the same way tsc treats
     // `T`'s accessible shape as its constraint's shape. An unconstrained `T`
-    // has no known members and falls through to the Type::Object match below
-    // unchanged.
+    // has no known members, so the lookup finds nothing and reports it.
     let effective_type = match ctx.arena.get(object_type) {
         Type::GenericParameter(_, _, Some(constraint)) => *constraint,
         _ => object_type,
     };
 
-    if property_name == "length"
-        && matches!(
-            ctx.arena.get(effective_type),
-            Type::String | Type::StringLiteral(_) | Type::Array(_)
-        )
-    {
-        return ctx.arena.number();
-    }
-
-    let Type::Object(object) = ctx.arena.get(effective_type) else {
-        if !matches!(ctx.arena.get(effective_type), Type::Any | Type::Error) {
+    match lookup_member(&mut ctx.arena, effective_type, property_name) {
+        Some(found) => found,
+        None => {
             ctx.error(
                 crate::diagnostic_messages::messages::property_does_not_exist(
                     &ctx.arena,
@@ -57,26 +51,41 @@ pub(crate) fn infer_member_access_type(
                 ),
                 span,
             );
+            ctx.arena.error()
         }
-        return ctx.arena.error();
+    }
+}
+
+// The type of `property_name` on `type_id`, or None when it is not there. It reports
+// nothing itself, so a union can ask every member and let the caller report once.
+// `any` and the error type answer with the error type: they are compatible with
+// everything, which stops one failure from cascading into more diagnostics.
+fn lookup_member(arena: &mut TypeArena, type_id: TypeId, property_name: &str) -> Option<TypeId> {
+    let effective = match arena.get(type_id) {
+        Type::GenericParameter(_, _, Some(constraint)) => *constraint,
+        _ => type_id,
     };
 
-    match object.properties.iter().find(|p| *p.name == *property_name) {
-        Some(property) => property.type_id,
-        None => match ctx.arena.record_value_type(effective_type) {
-            Some(value_type) => value_type,
-            None => {
-                ctx.error(
-                    crate::diagnostic_messages::messages::property_does_not_exist(
-                        &ctx.arena,
-                        property_name,
-                        effective_type,
-                    ),
-                    span,
-                );
-                ctx.arena.error()
+    match arena.get(effective) {
+        Type::Any | Type::Error => Some(arena.error()),
+        Type::String | Type::StringLiteral(_) | Type::Array(_) if property_name == "length" => {
+            Some(arena.number())
+        }
+        Type::Object(object) => {
+            match object.properties.iter().find(|p| *p.name == *property_name) {
+                Some(property) => Some(property.type_id),
+                None => arena.record_value_type(effective),
             }
-        },
+        }
+        Type::Union(members) => {
+            let members = members.clone();
+            let mut found = Vec::with_capacity(members.len());
+            for member in members {
+                found.push(lookup_member(arena, member, property_name)?);
+            }
+            Some(arena.alloc_union(found))
+        }
+        _ => None,
     }
 }
 
