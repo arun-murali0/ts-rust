@@ -1,16 +1,24 @@
 name: Auto-merge features into main
 
-# Promotes `features` to `main` a few times a day, not on every push, so main stays
-# one clean commit per batch of work. A run merges only when ALL of these hold:
+# Promotes `features` to `main` as soon as CI goes green on it, with the schedule
+# below as a safety net, so main stays one clean commit per batch of work. A run
+# merges only when ALL of these hold:
 #   1. features is ahead of main
 #   2. every commit in the batch is authored by the repository owner
 #   3. CI completed successfully on the exact head commit of features
-# Otherwise it does nothing and tries again at the next slot.
+# Otherwise it does nothing and tries again on the next trigger.
+#
+# Note: `workflow_run` triggers always use the workflow file on the default
+# branch (main), so this takes effect once this file has been merged to main.
 
 on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [features]
   schedule:
-    # ~3x/day (UTC), offset from ci.yml's own schedule. Scheduled workflows never
-    # run on forks, so this is effectively owner-only.
+    # Retry slots (UTC), offset from ci.yml's own schedule. Scheduled workflows
+    # never run on forks, so this is effectively owner-only.
     - cron: "30 3,11,19 * * *"
   workflow_dispatch:
 
@@ -32,6 +40,8 @@ jobs:
   merge:
     name: Merge features into main
     runs-on: ubuntu-latest
+    # A failed or cancelled CI run never triggers a merge attempt.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,7 +78,7 @@ jobs:
           STATE="$(gh run list --workflow ci.yml --branch "$SOURCE" --commit "$SHA" \
             --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' || true)"
           if [ "$STATE" != "completed/success" ]; then
-            echo "CI on $SHA is '${STATE:-not found}', not completed/success. Will retry next slot."
+            echo "CI on $SHA is '${STATE:-not found}', not completed/success. Will retry on the next trigger."
             exit 0
           fi
 

@@ -341,3 +341,67 @@ fn switch_case_narrowing_does_not_leak_to_the_next_case() {
     );
     assert_eq!(diagnostics[0].code, DiagnosticCode::DeclaredTypeMismatch);
 }
+
+#[test]
+fn equality_narrows_a_non_union_string() {
+    let source =
+        include_str!("fixtures/control-flow-narrowing/non_union_string_equality_narrows.ts");
+    let diagnostics = check(source, "non_union_string_equality_narrows.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn typeof_narrows_unknown_to_string() {
+    let source =
+        include_str!("fixtures/control-flow-narrowing/typeof_narrows_unknown_to_string.ts");
+    let diagnostics = check(source, "typeof_narrows_unknown_to_string.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
+    );
+}
+
+// The guard inside the arrow function must not narrow `x` for the enclosing
+// function, so the final `return x;` is still an error.
+#[test]
+fn callback_guard_does_not_leak_into_enclosing_function() {
+    let source = include_str!(
+        "fixtures/control-flow-narrowing/callback_guard_leaks_into_enclosing_function.ts"
+    );
+    let diagnostics = check(source, "callback_guard_leaks_into_enclosing_function.ts");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got: {diagnostics:?}"
+    );
+    assert_eq!(diagnostics[0].code, DiagnosticCode::ReturnTypeMismatch);
+}
+
+#[test]
+fn assignment_to_a_narrowed_variable_uses_its_declared_type() {
+    let source = include_str!(
+        "fixtures/control-flow-narrowing/assignment_to_narrowed_variable_uses_declared_type.ts"
+    );
+    let diagnostics = check(
+        source,
+        "assignment_to_narrowed_variable_uses_declared_type.ts",
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn object_spread_keeps_the_spread_properties() {
+    let source =
+        include_str!("fixtures/control-flow-narrowing/object_spread_keeps_spread_properties.ts");
+    let diagnostics = check(source, "object_spread_keeps_spread_properties.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no false positives, got: {diagnostics:?}"
+    );
+}
