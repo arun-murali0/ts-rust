@@ -98,8 +98,8 @@ pub struct TypeNamespace<'a> {
     // first is appended here instead. resolve() below folds this in when the
     // kind is Interface, alongside decl itself, so nothing else has to know two
     // tables exist. A class or alias with a colliding name is unaffected: it
-    // still just overwrites in entries, exactly as before this feature -- a
-    // separate, existing limitation, not addressed here.
+    // still just overwrites in entries -- a separate limitation that interface
+    // merging does not address.
     merged_interface_parts: FxHashMap<String, Vec<&'a TSInterfaceDeclaration<'a>>>,
 
     // See TypeArgumentIssue. Deduplicated by source position, since the same
@@ -114,8 +114,8 @@ pub struct TypeNamespace<'a> {
     constraint_violations: Vec<(String, TypeId, TypeId, Span)>,
 
     // Finished generic instantiations, `Box<number>` and the like, by the generic
-    // shape they came from. Every reference used to redo the substitution and
-    // rebuild the display name, however many times the same instantiation was
+    // shape they came from. Without it every reference would redo the substitution
+    // and rebuild the display name, however many times the same instantiation was
     // written. See cache_instantiation for what may go in and why.
     //
     // A list per shape, searched by comparing slices, rather than one map keyed on

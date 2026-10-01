@@ -32,7 +32,7 @@ pub(crate) fn infer_member_access_type(
     // constraint's members inside the function body, the same way tsc treats
     // `T`'s accessible shape as its constraint's shape. An unconstrained `T`
     // has no known members and falls through to the Type::Object match below
-    // unchanged, same as before this fix.
+    // unchanged.
     let effective_type = match ctx.arena.get(object_type) {
         Type::GenericParameter(_, _, Some(constraint)) => *constraint,
         _ => object_type,
