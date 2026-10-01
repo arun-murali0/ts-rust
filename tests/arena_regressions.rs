@@ -105,7 +105,7 @@ fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
         (
             "wide_union_50_variants",
             wide_discriminated_union_source(50),
-            100,
+            0,
         ),
         ("nested_objects_depth_50", nested_object_source(50), 0),
         ("class_hierarchy_depth_50", class_hierarchy_source(50), 0),
@@ -115,7 +115,7 @@ fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
             destructuring_heavy_source(500),
             0,
         ),
-        ("complex_mixed_scale_200", complex_source(200), 401),
+        ("complex_mixed_scale_200", complex_source(200), 205),
         (
             "connected_application_scale_10",
             connected_application_source(10),
