@@ -83,7 +83,8 @@ pub(super) fn infer_function_expression_type(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
-    // Same reasoning as infer_arrow_function_type: body narrowing stays inside.
+    // Narrowing from the body must not outlive the function; it is saved and
+    // restored around the whole body, as in infer_arrow_function_type.
     let outer_narrow = ctx.narrow.clone();
     let result = infer_function_expression_type_inner(func, scoping, ctx);
     ctx.narrow = outer_narrow;

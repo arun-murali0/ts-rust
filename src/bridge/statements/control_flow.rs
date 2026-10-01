@@ -9,17 +9,14 @@ use super::super::narrow::{
 };
 use super::{check_statement, check_variable_declaration, statement_always_exits};
 
-// Control flow joins here. Each way through the statement is walked from the state
-// the condition establishes for it, and what the code after the statement sees is
-// decided by which of those ways can actually fall out the bottom:
-//   - only the alternate can (the consequent always exits): the alternate's end state,
-//     which is how a guard clause `if (x === null) return;` narrows what follows;
-//   - only the consequent can (the alternate always exits): the consequent's end state;
-//   - both can: the join of the two end states, so a variable narrowed or assigned on
-//     both ways keeps the union of what each way left it as, and one narrowed on only
-//     one way falls back to what it was before (`if (x === null) { x = "d"; }` leaves
-//     x a string);
-//   - neither can: the code after is unreachable, and the state from before is kept.
+// Where control flow joins after an `if`. What the code after the statement sees
+// depends on which branches can fall out the bottom, because a branch that always
+// exits contributes nothing to it; that is why the guard clause
+// `if (x === null) return;` narrows everything that follows. When both branches
+// can fall through their end states are joined, so a variable narrowed or assigned
+// on both keeps the union of the two, while one narrowed on only one branch
+// reverts to its earlier type (`if (x === null) { x = "d"; }` leaves x a string).
+// When neither can, the code after is unreachable and the earlier state is kept.
 // With no else branch the missing alternate is the condition's false side alone.
 pub(super) fn check_if_statement(
     if_stmt: &IfStatement,
@@ -92,7 +89,8 @@ pub(super) fn check_for_statement(
         infer_expression_type(update, scoping, ctx);
     }
 
-    // Same reasoning as check_while_statement.
+    // A `for` test narrows its body for the same reason a `while` test does: it
+    // runs before every pass.
     let test_overrides = match &for_stmt.test {
         Some(test) => narrow_condition(test, scoping, ctx).0,
         None => NarrowState::new(),

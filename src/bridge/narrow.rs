@@ -252,9 +252,10 @@ fn by_symbol(
     )
 }
 
-// What a `switch` narrows on. A bare identifier (`switch (kind)`), a property of
-// one (`switch (shape.kind)`, the discriminated-union shape), or `typeof` of one
-// (`switch (typeof x)`). Anything else narrows nothing.
+// The discriminant shapes a `switch` can narrow on: `kind`, `shape.kind` (the
+// discriminated-union form) and `typeof x`. The narrowing overlay is keyed by a
+// single symbol, so a discriminant that does not resolve to one (a call, an index,
+// a longer chain) has nowhere to record a result and narrows nothing.
 pub enum SwitchDiscriminant {
     Identifier(SymbolId),
     Property(SymbolId, String),
@@ -499,9 +500,9 @@ fn literal_check(
     Some((symbol_id, literal))
 }
 
-// Recognizes `ident.property === <literal>` (either order): the shape a
-// discriminated union is narrowed by. An optional chain (`ident?.property`) is
-// left alone, since it can also be undefined.
+// `ident.property === <literal>` (either order) is how a discriminated union is
+// narrowed. An optional chain is left out because `ident?.property` can also be
+// undefined, which this narrowing does not model.
 fn member_literal_check(
     maybe_member: &Expression,
     maybe_literal: &Expression,
@@ -593,14 +594,18 @@ fn narrow_by_literal(
     narrow_by_literals(arena, id, &[literal], want_match)
 }
 
-// Narrows by equality against a set of literals. In the matching direction a
-// member equal to one of them is kept, a wider member that contains one (`string`
-// for "a", `number` for 1, `boolean` for true, `unknown` for any) is replaced by
-// the literals it covers, and `any`, the error type and a generic parameter are
-// kept as they are. In the excluding direction only an exact literal member is
-// removed, except that `boolean` is true | false, so excluding one of them leaves
-// the other. The literals are compared by TypeId, which is safe because every
-// literal Type is interned.
+// Narrows by equality against a set of literals.
+// Matching direction: a wide member (`string` for "a", `number` for 1, `boolean`
+// for true, `unknown` for anything) is replaced by the literals it covers, as tsc
+// does. Keeping the wide member would lose the narrowing, and dropping it would
+// turn `if (s === "a")` on a plain `string` into `never` and flag valid code.
+// `any`, the error type and a generic parameter are kept as they are, because a
+// guessed narrowing for them would turn a gap in this checker into false errors.
+// Excluding direction: only an exact literal member is removed, since `string`
+// minus "a" is still `string`. `boolean` is the exception because it is exactly
+// true | false, so removing one leaves the other.
+// Literals are compared by TypeId, which is sound only because every literal Type
+// is interned.
 fn narrow_by_literals(
     arena: &mut TypeArena,
     id: TypeId,
@@ -660,9 +665,9 @@ fn keep_remaining(
         .any(|&literal| matches!(arena.get(literal), Type::BooleanLiteral(_)));
     if matches!(arena.get(member), Type::Boolean) && excludes_a_boolean {
         for value in [true, false] {
-            let excluded = literals
-                .iter()
-                .any(|&literal| matches!(arena.get(literal), Type::BooleanLiteral(b) if *b == value));
+            let excluded = literals.iter().any(
+                |&literal| matches!(arena.get(literal), Type::BooleanLiteral(b) if *b == value),
+            );
             if !excluded {
                 kept.push(arena.alloc(Type::BooleanLiteral(value)));
             }
@@ -672,13 +677,14 @@ fn keep_remaining(
     kept.push(member);
 }
 
-// Narrows a union of object types by the literal type of one of their properties,
-// the discriminated-union case. Only a union narrows: a single object type is
-// returned as it is. A member that is not an object, or has no such property, is
-// kept, since this cannot tell whether it matches. In the matching direction a
-// member stays if its property's type can be one of the literals; in the
-// excluding direction it is removed only when its property's type is exactly one
-// of them (a property typed "a" | "b" could still be "b", so it stays).
+// Narrows a union of object types by one property's literal type (the
+// discriminated-union case). A lone object type is returned unchanged, since there
+// is nothing to discriminate between. A member that is not an object, or lacks the
+// property, is kept: this cannot prove it does not match, and dropping a member
+// that does match would report valid code as an error. Matching keeps a member
+// whose property type can be one of the literals; excluding removes a member only
+// when its property type is exactly one literal, because a property typed
+// "a" | "b" could still be "b".
 fn narrow_by_property_literals(
     arena: &mut TypeArena,
     id: TypeId,
@@ -702,8 +708,8 @@ fn narrow_by_property_literals(
         let keep = match property_type {
             None => true,
             Some(property_type) => {
-                let candidates = union_members(arena, property_type)
-                    .unwrap_or_else(|| vec![property_type]);
+                let candidates =
+                    union_members(arena, property_type).unwrap_or_else(|| vec![property_type]);
                 if want_match {
                     candidates.iter().any(|&candidate| {
                         literals
