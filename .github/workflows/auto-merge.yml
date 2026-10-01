@@ -17,9 +17,10 @@ on:
     types: [completed]
     branches: [features]
   schedule:
-    # Retry slots (UTC), offset from ci.yml's own schedule. Scheduled workflows
-    # never run on forks, so this is effectively owner-only.
-    - cron: "30 3,11,19 * * *"
+    # One retry slot (UTC), after ci.yml's daily run. A merge is normally triggered
+    # by CI finishing on features; this only covers a merge that was skipped then.
+    # Scheduled workflows never run on forks, so this is effectively owner-only.
+    - cron: "30 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -91,7 +92,10 @@ jobs:
             PR="$(gh pr create --base "$TARGET" --head "$SOURCE" --title "$TITLE" --body "$BODY")"
           fi
           # --match-head-commit: abort if something was pushed after CI was checked.
-          gh pr merge "$PR" --squash --subject "$TITLE" --body "$BODY" --match-head-commit "$SHA"
+          # [skip ci] on the squash commit: main and the realigned features then hold
+          # exactly the tree CI just passed on features, so re-running CI on either
+          # push would repeat that run. The daily CI schedule still covers main.
+          gh pr merge "$PR" --squash --subject "$TITLE [skip ci]" --body "$BODY" --match-head-commit "$SHA"
 
           # 4. A squash leaves features with different history than main, which
           # would cause conflicts next time. Realign it to main, but only if nobody
