@@ -732,13 +732,17 @@ fn property_may_equal(arena: &TypeArena, candidate: TypeId, literal: TypeId) -> 
     if candidate == literal {
         return true;
     }
-    match (arena.get(candidate), arena.get(literal)) {
-        (Type::Any | Type::Unknown | Type::Error | Type::GenericParameter(..), _) => true,
-        (Type::String, Type::StringLiteral(_))
-        | (Type::Number, Type::NumberLiteral(_))
-        | (Type::Boolean, Type::BooleanLiteral(_)) => true,
-        _ => false,
-    }
+    // matches! rather than a match with `=> true` arms: every arm is a bare bool,
+    // which clippy::match_like_matches_macro rejects under -D warnings.
+    matches!(
+        (arena.get(candidate), arena.get(literal)),
+        (
+            Type::Any | Type::Unknown | Type::Error | Type::GenericParameter(..),
+            _
+        ) | (Type::String, Type::StringLiteral(_))
+            | (Type::Number, Type::NumberLiteral(_))
+            | (Type::Boolean, Type::BooleanLiteral(_))
+    )
 }
 
 fn narrow_by_nullish(
