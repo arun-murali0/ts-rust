@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-\({{ github.workflow }}-\){{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -40,8 +40,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
-      # Cheap and independent of the build, so it fails before the toolchain is
-      # installed. It lives in this job to avoid paying for a second runner.
+
+      # Cheap and independent of the build, so it fails before the toolchain is installed.
       - name: Repository hygiene
         shell: bash
         run: |
@@ -58,15 +58,16 @@ jobs:
               exit 1
             fi
           done
-      - uses: dtolnay/rust-toolchain@master
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
+
       - uses: Swatinem/rust-cache@v2
         with:
-          # Only main writes the cache. Branch and PR runs restore it, and writing
-          # their own copies would push main's out of the repository cache limit.
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Run repository quality gates
         run: ./scripts/ci.sh
 
@@ -79,9 +80,7 @@ jobs:
         with:
           # The base commit has to be present to see what changed.
           fetch-depth: 0
-      # An audit result only changes when the dependency set changes or a new
-      # advisory is published, so a push that touches neither skips it. The daily
-      # and manual runs always audit, which covers new advisories.
+
       - name: Decide whether the dependencies need auditing
         id: gate
         shell: bash
@@ -90,98 +89,93 @@ jobs:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: |
           run=true
-          if [ "$EVENT" != "schedule" ] && [ "$EVENT" != "workflow_dispatch" ] \
-             && [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
-             && changed="$(git diff --name-only "$BASE" HEAD 2>/dev/null)"; then
-            # If the base is unknown (new branch, force-push) the diff fails and
-            # the audit runs, which is the safe direction.
-            if ! grep -qE '(^|/)Cargo\.(lock|toml)$' <<<"$changed"; then
+          if [ "\(EVENT" != "schedule" ] && [ "\)EVENT" != "workflow_dispatch" ] \
+             && [ -n "\(BASE" ] && [ "\)BASE" != "0000000000000000000000000000000000000000" ] \
+             && changed="\((git diff --name-only "\)BASE" HEAD 2>/dev/null)"; then
+            if ! grep -qE '(^|/)Cargo\.(lock|toml)\(' <<<"\)changed"; then
               run=false
             fi
           fi
-          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "run=\(run" >> "\)GITHUB_OUTPUT"
+
       - if: steps.gate.outputs.run == 'true'
         uses: taiki-e/install-action@cargo-audit
+
       - name: Audit dependencies
         if: steps.gate.outputs.run == 'true'
         run: cargo audit
 
   tsc-drift:
     name: Compare against real tsc (false-positive gate)
-    # Not on the daily schedule: it measures code changes, and nothing changed.
     if: ${{ github.event_name != 'schedule' && !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     env:
-      # This job needs a binary that behaves like release, not one tuned for speed.
-      # Fat LTO with one codegen unit is most of the release build time, and it
-      # would be paid twice here (this commit and main). Set through the
-      # environment, not Cargo.toml, so it also applies to main's checkout, whose
-      # manifest cannot have a profile this change adds.
       CARGO_PROFILE_RELEASE_LTO: "off"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
       CARGO_PROFILE_RELEASE_OPT_LEVEL: "1"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
+
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: scripts/ts-diag-tool/package-lock.json
+
       - name: Build ts-rust (release)
         run: cargo build --release --bin ts-rust
+
       - name: Install ts-diag-tool dependencies
         working-directory: scripts/ts-diag-tool
         run: npm ci
+
       - name: Compare ts-rust against real tsc over tests/fixtures
-        # Informational by design: many fixtures diverge from tsc on purpose (this
-        # checker's own recovery behavior, see bin/compare-tsc.rs), so this step's
-        # exit code is ignored. Only the false-positive count is gated, by
-        # check-baseline.js in the next step.
         run: |
           node scripts/ts-diag-tool/compare.js tests/fixtures target/release/ts-rust --json --only-differs \
             > /tmp/tsc-drift-result.json || true
+
       - name: Enforce false-positive baseline
         run: node scripts/ts-diag-tool/check-baseline.js < /tmp/tsc-drift-result.json
 
-      # Same-as-main gate: run main's checker over THIS commit's fixtures and
-      # require this commit to agree with real tsc at least as well. Both binaries
-      # see identical fixtures, so any difference comes from the checker code.
       - name: Check out main for comparison
         if: github.ref != 'refs/heads/main'
         uses: actions/checkout@v4
         with:
           ref: main
           path: main-src
+
       - name: Identify main's commit
         id: main
         if: github.ref != 'refs/heads/main'
-        run: echo "sha=$(git -C main-src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      # Main changes about once per batch, but this job runs on every push to
-      # features. Keying the binary on main's commit builds it once per change of
-      # main instead of once per run. The trailing v1 is bumped if the build
-      # settings above change in a way that alters the binary.
+        run: echo "sha=\((git -C main-src rev-parse HEAD)" >> "\)GITHUB_OUTPUT"
+
       - name: Restore main's binary
         id: main-bin
         if: github.ref != 'refs/heads/main'
         uses: actions/cache@v4
         with:
           path: main-src/target/release/ts-rust
-          key: main-ts-rust-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ steps.main.outputs.sha }}-v1
+          key: main-ts-rust-\({{ runner.os }}-\){{ env.RUST_TOOLCHAIN }}-${{ steps.main.outputs.sha }}-v1
+
       - name: Build main's ts-rust (release)
         if: github.ref != 'refs/heads/main' && steps.main-bin.outputs.cache-hit != 'true'
         run: cargo build --release --bin ts-rust --manifest-path main-src/Cargo.toml
+
       - name: Compare main's ts-rust against real tsc over the same fixtures
         if: github.ref != 'refs/heads/main'
         run: |
           node scripts/ts-diag-tool/compare.js tests/fixtures main-src/target/release/ts-rust --json \
             > /tmp/tsc-drift-main.json || true
+
       - name: Fail if this commit is worse than main
         if: github.ref != 'refs/heads/main'
         run: |
