@@ -43,7 +43,7 @@ jobs:
     # A failed or cancelled CI run never triggers a merge attempt.
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
