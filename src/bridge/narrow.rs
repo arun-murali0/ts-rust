@@ -1,4 +1,6 @@
-use oxc_ast::ast::{BinaryOperator, Expression, IdentifierReference, UnaryOperator};
+use oxc_ast::ast::{
+    BinaryOperator, Expression, IdentifierReference, LogicalOperator, UnaryOperator,
+};
 use oxc_semantic::{Scoping, SymbolId};
 
 use crate::arena::{TypeArena, TypeId};
@@ -41,6 +43,22 @@ impl NarrowState {
             self.insert(symbol_id, type_id);
         }
     }
+}
+
+// The state after two control-flow paths meet: a symbol narrowed on both paths
+// becomes the union of the two narrowed types; a symbol narrowed on only one path
+// is dropped, since the other path still holds whatever the symbol had before and
+// the union of that with the narrowed type is no narrower than the earlier state.
+// Used where paths rejoin (after an if/else, after a loop, for the true side of
+// `a || b` and the false side of `a && b`).
+pub fn join_states(a: &NarrowState, b: &NarrowState, arena: &mut TypeArena) -> NarrowState {
+    let mut joined = NarrowState::new();
+    for &(symbol_id, a_type) in &a.0 {
+        if let Some(b_type) = b.get(symbol_id) {
+            joined.insert(symbol_id, arena.alloc_union(vec![a_type, b_type]));
+        }
+    }
+    joined
 }
 
 // Given a condition expression, returns the type overlay that should apply in the
@@ -128,8 +146,65 @@ pub fn narrow_condition(
                 }
             }
 
+            // `shape.kind === "circle"`: narrows `shape` itself, when it is a union of
+            // object types, to the members whose `kind` can be that literal. Strict
+            // equality only, for the same coercion reason as above.
+            if !is_loose
+                && let Some((symbol_id, property, literal)) =
+                    member_literal_check(&bin.left, &bin.right, scoping, &mut ctx.arena).or_else(
+                        || member_literal_check(&bin.right, &bin.left, scoping, &mut ctx.arena),
+                    )
+            {
+                return by_symbol(ctx, symbol_id, move |arena, current, want_true| {
+                    narrow_by_property_literals(
+                        arena,
+                        current,
+                        &property,
+                        &[literal],
+                        want_true != negated,
+                    )
+                });
+            }
+
             empty_pair()
         }
+
+        // `a && b`: the true side needs both to hold; the false side is reached
+        // either because `a` was false or because `a` held and `b` did not, so it
+        // is the join of those two paths. `b` is narrowed against the state `a`
+        // establishes, since it only runs when `a` held. `a || b` is the mirror
+        // image. `??` narrows nothing here.
+        Expression::LogicalExpression(logical) => match logical.operator {
+            LogicalOperator::And => {
+                let (left_true, left_false) = narrow_condition(&logical.left, scoping, ctx);
+                let outer_narrow = ctx.narrow.clone();
+                ctx.narrow.extend(left_true.clone());
+                let (right_true, right_false) = narrow_condition(&logical.right, scoping, ctx);
+                ctx.narrow = outer_narrow;
+
+                let mut true_overlay = left_true.clone();
+                true_overlay.extend(right_true);
+                let mut right_false_path = left_true;
+                right_false_path.extend(right_false);
+                let false_overlay = join_states(&left_false, &right_false_path, &mut ctx.arena);
+                (true_overlay, false_overlay)
+            }
+            LogicalOperator::Or => {
+                let (left_true, left_false) = narrow_condition(&logical.left, scoping, ctx);
+                let outer_narrow = ctx.narrow.clone();
+                ctx.narrow.extend(left_false.clone());
+                let (right_true, right_false) = narrow_condition(&logical.right, scoping, ctx);
+                ctx.narrow = outer_narrow;
+
+                let mut false_overlay = left_false.clone();
+                false_overlay.extend(right_false);
+                let mut right_true_path = left_false;
+                right_true_path.extend(right_true);
+                let true_overlay = join_states(&left_true, &right_true_path, &mut ctx.arena);
+                (true_overlay, false_overlay)
+            }
+            LogicalOperator::Coalesce => empty_pair(),
+        },
 
         // `!x`, `!(x === null)`, `!(typeof x === "string")`: whatever the inner
         // expression's own pair would be, just with the two branches swapped, so
@@ -177,67 +252,172 @@ fn by_symbol(
     )
 }
 
-// A switch case's own narrowing: `case <test>:` behaves like `if (discriminant
-// === test)` for the statements in that case, but only the true side is ever
-// needed here -- check_switch_statement (control_flow.rs) already resets to the
-// outer state before each case, so there is no false branch to compute the way
-// an if/else needs one. `symbol_id` is the discriminant's own symbol, already
-// resolved by the caller (only a bare identifier discriminant is handled -- see
-// the comment above this function's call site).
-pub fn narrow_by_identifier_equals(
-    symbol_id: SymbolId,
-    test: &Expression,
-    ctx: &mut CheckContext<'_, '_>,
-) -> NarrowState {
-    let Some(current) = ctx
-        .narrow
+// What a `switch` narrows on. A bare identifier (`switch (kind)`), a property of
+// one (`switch (shape.kind)`, the discriminated-union shape), or `typeof` of one
+// (`switch (typeof x)`). Anything else narrows nothing.
+pub enum SwitchDiscriminant {
+    Identifier(SymbolId),
+    Property(SymbolId, String),
+    Typeof(SymbolId),
+}
+
+pub fn switch_discriminant(expr: &Expression, scoping: &Scoping) -> Option<SwitchDiscriminant> {
+    match expr {
+        Expression::ParenthesizedExpression(inner) => {
+            switch_discriminant(&inner.expression, scoping)
+        }
+        Expression::Identifier(ident) => {
+            resolve_symbol_id(ident, scoping).map(SwitchDiscriminant::Identifier)
+        }
+        Expression::StaticMemberExpression(member) if !member.optional => {
+            let Expression::Identifier(ident) = &member.object else {
+                return None;
+            };
+            let symbol_id = resolve_symbol_id(ident, scoping)?;
+            Some(SwitchDiscriminant::Property(
+                symbol_id,
+                member.property.name.to_string(),
+            ))
+        }
+        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::Typeof => {
+            let Expression::Identifier(ident) = &unary.argument else {
+                return None;
+            };
+            resolve_symbol_id(ident, scoping).map(SwitchDiscriminant::Typeof)
+        }
+        _ => None,
+    }
+}
+
+fn current_type(ctx: &CheckContext<'_, '_>, symbol_id: SymbolId) -> Option<TypeId> {
+    ctx.narrow
         .get(symbol_id)
         .or_else(|| ctx.symbols.get(symbol_id))
-    else {
-        return NarrowState::new();
-    };
-    let Some(literal) = resolve_literal(test, &mut ctx.arena) else {
-        return NarrowState::new();
-    };
-    let narrowed = narrow_by_literal(&mut ctx.arena, current, literal, true);
-    NarrowState::from_single(symbol_id, narrowed)
 }
 
-// Resolves a switch case's own test the same way narrow_by_identifier_equals
-// does, exposed so check_switch_statement can build up the set every sibling
-// case excludes before default gets its turn (see narrow_by_identifier_excluding).
-pub fn resolve_case_literal(test: &Expression, arena: &mut TypeArena) -> Option<TypeId> {
-    resolve_literal(test, arena)
-}
-
-// A switch's default case: the discriminant is narrowed to whatever remains once
-// every literal a sibling case matched on is excluded. `excluded` is built by the
-// caller from every sibling case's own test via resolve_case_literal; a case this
-// checker cannot resolve a literal from (a computed test, say) is simply absent
-// from that list rather than aborting the whole exclusion -- default still
-// narrows out what it can prove, which is always safe, and keeps whatever member
-// it could not rule out.
-pub fn narrow_by_identifier_excluding(
-    symbol_id: SymbolId,
-    excluded: &[TypeId],
+// The narrowing for a case body reached through any of `tests` (several when empty
+// case labels are grouped: `case "a": case "b": body`). If any one test cannot be
+// resolved to a literal (or a known typeof tag) the body could be reached with a
+// value this checker cannot describe, so nothing is narrowed.
+pub fn narrow_switch_case(
+    discriminant: &SwitchDiscriminant,
+    tests: &[&Expression],
     ctx: &mut CheckContext<'_, '_>,
 ) -> NarrowState {
-    let Some(current) = ctx
-        .narrow
-        .get(symbol_id)
-        .or_else(|| ctx.symbols.get(symbol_id))
-    else {
-        return NarrowState::new();
-    };
-    let narrowed = narrow_by_literals(&mut ctx.arena, current, excluded, false);
-    NarrowState::from_single(symbol_id, narrowed)
+    match discriminant {
+        SwitchDiscriminant::Identifier(symbol_id) => {
+            let Some(literals) = resolve_all_literals(tests, &mut ctx.arena) else {
+                return NarrowState::new();
+            };
+            let Some(current) = current_type(ctx, *symbol_id) else {
+                return NarrowState::new();
+            };
+            let narrowed = narrow_by_literals(&mut ctx.arena, current, &literals, true);
+            NarrowState::from_single(*symbol_id, narrowed)
+        }
+        SwitchDiscriminant::Property(symbol_id, property) => {
+            let Some(literals) = resolve_all_literals(tests, &mut ctx.arena) else {
+                return NarrowState::new();
+            };
+            let Some(current) = current_type(ctx, *symbol_id) else {
+                return NarrowState::new();
+            };
+            let narrowed =
+                narrow_by_property_literals(&mut ctx.arena, current, property, &literals, true);
+            NarrowState::from_single(*symbol_id, narrowed)
+        }
+        SwitchDiscriminant::Typeof(symbol_id) => {
+            let Some(tags) = resolve_all_typeof_tags(tests) else {
+                return NarrowState::new();
+            };
+            let Some(current) = current_type(ctx, *symbol_id) else {
+                return NarrowState::new();
+            };
+            let mut parts = Vec::with_capacity(tags.len());
+            for tag in &tags {
+                parts.push(narrow_by_typeof(&mut ctx.arena, current, tag, true));
+            }
+            let narrowed = ctx.arena.alloc_union(parts);
+            NarrowState::from_single(*symbol_id, narrowed)
+        }
+    }
 }
 
-// The literal-resolution half of literal_check, split out so
-// narrow_by_identifier_equals above can reuse it without needing a second
-// identifier to match against -- a case's test is compared to a discriminant
-// already known by symbol_id, not discovered from an ident/other pair the way a
-// binary expression's two operands are.
+// A switch's default: whatever remains once every sibling case's test is ruled
+// out. A test this checker cannot resolve is simply left out of the exclusion,
+// which keeps more members than strictly necessary and is always safe.
+pub fn narrow_switch_default(
+    discriminant: &SwitchDiscriminant,
+    tests: &[&Expression],
+    ctx: &mut CheckContext<'_, '_>,
+) -> NarrowState {
+    match discriminant {
+        SwitchDiscriminant::Identifier(symbol_id) => {
+            let literals: Vec<TypeId> = tests
+                .iter()
+                .filter_map(|test| resolve_literal(test, &mut ctx.arena))
+                .collect();
+            let Some(current) = current_type(ctx, *symbol_id) else {
+                return NarrowState::new();
+            };
+            let narrowed = narrow_by_literals(&mut ctx.arena, current, &literals, false);
+            NarrowState::from_single(*symbol_id, narrowed)
+        }
+        SwitchDiscriminant::Property(symbol_id, property) => {
+            let literals: Vec<TypeId> = tests
+                .iter()
+                .filter_map(|test| resolve_literal(test, &mut ctx.arena))
+                .collect();
+            let Some(current) = current_type(ctx, *symbol_id) else {
+                return NarrowState::new();
+            };
+            let narrowed =
+                narrow_by_property_literals(&mut ctx.arena, current, property, &literals, false);
+            NarrowState::from_single(*symbol_id, narrowed)
+        }
+        SwitchDiscriminant::Typeof(symbol_id) => {
+            let Some(mut narrowed) = current_type(ctx, *symbol_id) else {
+                return NarrowState::new();
+            };
+            for test in tests {
+                if let Expression::StringLiteral(tag) = test
+                    && is_known_typeof_tag(&tag.value)
+                {
+                    narrowed = narrow_by_typeof(&mut ctx.arena, narrowed, &tag.value, false);
+                }
+            }
+            NarrowState::from_single(*symbol_id, narrowed)
+        }
+    }
+}
+
+fn resolve_all_literals(tests: &[&Expression], arena: &mut TypeArena) -> Option<Vec<TypeId>> {
+    let mut literals = Vec::with_capacity(tests.len());
+    for test in tests {
+        literals.push(resolve_literal(test, arena)?);
+    }
+    Some(literals)
+}
+
+fn resolve_all_typeof_tags(tests: &[&Expression]) -> Option<Vec<String>> {
+    let mut tags = Vec::with_capacity(tests.len());
+    for test in tests {
+        let Expression::StringLiteral(tag) = test else {
+            return None;
+        };
+        if !is_known_typeof_tag(&tag.value) {
+            return None;
+        }
+        tags.push(tag.value.to_string());
+    }
+    Some(tags)
+}
+
+// The literal-resolution half of literal_check, split out so the switch narrowing
+// above can reuse it without needing a second identifier to match against -- a
+// case's test is compared to a discriminant already known by symbol_id, not
+// discovered from an ident/other pair the way a binary expression's two operands
+// are.
 fn resolve_literal(expr: &Expression, arena: &mut TypeArena) -> Option<TypeId> {
     match expr {
         Expression::StringLiteral(lit) => {
@@ -319,6 +499,29 @@ fn literal_check(
     Some((symbol_id, literal))
 }
 
+// Recognizes `ident.property === <literal>` (either order): the shape a
+// discriminated union is narrowed by. An optional chain (`ident?.property`) is
+// left alone, since it can also be undefined.
+fn member_literal_check(
+    maybe_member: &Expression,
+    maybe_literal: &Expression,
+    scoping: &Scoping,
+    arena: &mut TypeArena,
+) -> Option<(SymbolId, String, TypeId)> {
+    let Expression::StaticMemberExpression(member) = maybe_member else {
+        return None;
+    };
+    if member.optional {
+        return None;
+    }
+    let Expression::Identifier(ident) = &member.object else {
+        return None;
+    };
+    let symbol_id = resolve_symbol_id(ident, scoping)?;
+    let literal = resolve_literal(maybe_literal, arena)?;
+    Some((symbol_id, member.property.name.to_string(), literal))
+}
+
 fn is_known_typeof_tag(tag: &str) -> bool {
     matches!(
         tag,
@@ -341,87 +544,194 @@ fn matches_typeof_tag(arena: &TypeArena, id: TypeId, tag: &str) -> bool {
     )
 }
 
-// Shared shape for every narrow_by_* and narrow_to_* function below: if id is a
-// union, keep only the members that satisfy the predicate and rebuild the union;
-// if it is a single type, either keep it whole or collapse it to never, since a
-// single type either fully satisfies the predicate or does not, there is no
-// partial member to keep.
+// `unknown` becomes the matching primitive in the true branch (`typeof x ===
+// "string"` makes an unknown `x` a string) and stays unknown otherwise. `any`, the
+// error type and a generic parameter are kept as they are on both sides: narrowing
+// them to never would turn a gap in this checker's model into errors on valid
+// source. A lone (non-union) type is handled as a one-member union, so one that
+// does not match still ends up as never.
 fn narrow_by_typeof(arena: &mut TypeArena, id: TypeId, tag: &str, want_match: bool) -> TypeId {
-    match union_members(arena, id) {
-        Some(members) => {
-            let filtered = members
-                .into_iter()
-                .filter(|&m| matches_typeof_tag(arena, m, tag) == want_match)
-                .collect();
-            arena.alloc_union(filtered)
-        }
-        None => {
-            if matches_typeof_tag(arena, id, tag) == want_match {
-                id
+    let members = union_members(arena, id).unwrap_or_else(|| vec![id]);
+    let mut kept = Vec::with_capacity(members.len());
+    for member in members {
+        let opaque = matches!(
+            arena.get(member),
+            Type::Any | Type::Error | Type::GenericParameter(..)
+        );
+        let is_unknown = matches!(arena.get(member), Type::Unknown);
+        if opaque {
+            kept.push(member);
+        } else if is_unknown {
+            if want_match {
+                kept.push(primitive_for_tag(arena, tag).unwrap_or(member));
             } else {
-                arena.never()
+                kept.push(member);
             }
+        } else if matches_typeof_tag(arena, member, tag) == want_match {
+            kept.push(member);
         }
+    }
+    arena.alloc_union(kept)
+}
+
+fn primitive_for_tag(arena: &TypeArena, tag: &str) -> Option<TypeId> {
+    match tag {
+        "string" => Some(arena.string()),
+        "number" => Some(arena.number()),
+        "boolean" => Some(arena.boolean()),
+        "undefined" => Some(arena.undefined()),
+        _ => None,
     }
 }
 
-// Same shared shape as narrow_by_typeof: keeps union members equal to `literal`
-// (or every member but that one, in the false-branch/negated case), collapses a
-// non-union type to itself or never. `literal` is compared by TypeId, not by
-// value, which is safe here because every literal Type is interned (see
-// TypeArena::alloc_string_literal and friends): two occurrences of the string
-// literal "circle" always resolve to the same TypeId, so this is exactly the
-// same identity a `structurally_equal` comparison would reach for a leaf type.
 fn narrow_by_literal(
     arena: &mut TypeArena,
     id: TypeId,
     literal: TypeId,
     want_match: bool,
 ) -> TypeId {
-    match union_members(arena, id) {
-        Some(members) => {
-            let filtered = members
-                .into_iter()
-                .filter(|&m| (m == literal) == want_match)
-                .collect();
-            arena.alloc_union(filtered)
-        }
-        None => {
-            if (id == literal) == want_match {
-                id
-            } else {
-                arena.never()
-            }
-        }
-    }
+    narrow_by_literals(arena, id, &[literal], want_match)
 }
 
-// Same shape as narrow_by_literal, generalized to a set: keeps every union member
-// that does (or, with want_match false, does not) match one of `literals`. An
-// empty slice narrows nothing -- want_match false against no literals keeps every
-// member, which is the correct answer for a default case with no siblings to
-// exclude, not an accidental never.
+// Narrows by equality against a set of literals. In the matching direction a
+// member equal to one of them is kept, a wider member that contains one (`string`
+// for "a", `number` for 1, `boolean` for true, `unknown` for any) is replaced by
+// the literals it covers, and `any`, the error type and a generic parameter are
+// kept as they are. In the excluding direction only an exact literal member is
+// removed, except that `boolean` is true | false, so excluding one of them leaves
+// the other. The literals are compared by TypeId, which is safe because every
+// literal Type is interned.
 fn narrow_by_literals(
     arena: &mut TypeArena,
     id: TypeId,
     literals: &[TypeId],
     want_match: bool,
 ) -> TypeId {
-    match union_members(arena, id) {
-        Some(members) => {
-            let filtered = members
-                .into_iter()
-                .filter(|m| literals.contains(m) == want_match)
-                .collect();
-            arena.alloc_union(filtered)
+    let members = union_members(arena, id).unwrap_or_else(|| vec![id]);
+    let mut kept: Vec<TypeId> = Vec::with_capacity(members.len());
+    for member in members {
+        if want_match {
+            keep_matching(arena, member, literals, &mut kept);
+        } else {
+            keep_remaining(arena, member, literals, &mut kept);
         }
-        None => {
-            if literals.contains(&id) == want_match {
-                id
-            } else {
-                arena.never()
+    }
+    arena.alloc_union(kept)
+}
+
+fn literal_widens_to(arena: &TypeArena, wide: TypeId, literal: TypeId) -> bool {
+    matches!(
+        (arena.get(wide), arena.get(literal)),
+        (Type::String, Type::StringLiteral(_))
+            | (Type::Number, Type::NumberLiteral(_))
+            | (Type::Boolean, Type::BooleanLiteral(_))
+    )
+}
+
+fn keep_matching(arena: &TypeArena, member: TypeId, literals: &[TypeId], kept: &mut Vec<TypeId>) {
+    if literals.contains(&member) {
+        kept.push(member);
+        return;
+    }
+    match arena.get(member) {
+        Type::Any | Type::Error | Type::GenericParameter(..) => kept.push(member),
+        Type::Unknown => kept.extend_from_slice(literals),
+        Type::String | Type::Number | Type::Boolean => kept.extend(
+            literals
+                .iter()
+                .copied()
+                .filter(|&literal| literal_widens_to(arena, member, literal)),
+        ),
+        _ => {}
+    }
+}
+
+fn keep_remaining(
+    arena: &mut TypeArena,
+    member: TypeId,
+    literals: &[TypeId],
+    kept: &mut Vec<TypeId>,
+) {
+    if literals.contains(&member) {
+        return;
+    }
+    let excludes_a_boolean = literals
+        .iter()
+        .any(|&literal| matches!(arena.get(literal), Type::BooleanLiteral(_)));
+    if matches!(arena.get(member), Type::Boolean) && excludes_a_boolean {
+        for value in [true, false] {
+            let excluded = literals
+                .iter()
+                .any(|&literal| matches!(arena.get(literal), Type::BooleanLiteral(b) if *b == value));
+            if !excluded {
+                kept.push(arena.alloc(Type::BooleanLiteral(value)));
             }
         }
+        return;
+    }
+    kept.push(member);
+}
+
+// Narrows a union of object types by the literal type of one of their properties,
+// the discriminated-union case. Only a union narrows: a single object type is
+// returned as it is. A member that is not an object, or has no such property, is
+// kept, since this cannot tell whether it matches. In the matching direction a
+// member stays if its property's type can be one of the literals; in the
+// excluding direction it is removed only when its property's type is exactly one
+// of them (a property typed "a" | "b" could still be "b", so it stays).
+fn narrow_by_property_literals(
+    arena: &mut TypeArena,
+    id: TypeId,
+    property: &str,
+    literals: &[TypeId],
+    want_match: bool,
+) -> TypeId {
+    let Some(members) = union_members(arena, id) else {
+        return id;
+    };
+    let mut kept = Vec::with_capacity(members.len());
+    for member in members {
+        let property_type = match arena.get(member) {
+            Type::Object(object) => object
+                .properties
+                .iter()
+                .find(|entry| &*entry.name == property)
+                .map(|entry| entry.type_id),
+            _ => None,
+        };
+        let keep = match property_type {
+            None => true,
+            Some(property_type) => {
+                let candidates = union_members(arena, property_type)
+                    .unwrap_or_else(|| vec![property_type]);
+                if want_match {
+                    candidates.iter().any(|&candidate| {
+                        literals
+                            .iter()
+                            .any(|&literal| property_may_equal(arena, candidate, literal))
+                    })
+                } else {
+                    !(candidates.len() == 1 && literals.contains(&candidates[0]))
+                }
+            }
+        };
+        if keep {
+            kept.push(member);
+        }
+    }
+    arena.alloc_union(kept)
+}
+
+fn property_may_equal(arena: &TypeArena, candidate: TypeId, literal: TypeId) -> bool {
+    if candidate == literal {
+        return true;
+    }
+    match (arena.get(candidate), arena.get(literal)) {
+        (Type::Any | Type::Unknown | Type::Error | Type::GenericParameter(..), _) => true,
+        (Type::String, Type::StringLiteral(_))
+        | (Type::Number, Type::NumberLiteral(_))
+        | (Type::Boolean, Type::BooleanLiteral(_)) => true,
+        _ => false,
     }
 }
 
