@@ -107,7 +107,7 @@ fn any_typed_value_is_callable() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("Operator"),
+        diagnostics[0].message.contains("arithmetic operation"),
         "expected the `1 - \"x\"` mismatch inside the call, got: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].severity, ts_rust::Severity::Error);
@@ -203,7 +203,7 @@ fn and_result_type_includes_left_falsy_slice() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -287,7 +287,7 @@ fn ternary_result_type_mismatch_is_caught() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -326,7 +326,7 @@ fn as_expression_does_not_block_downstream_errors() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -456,7 +456,7 @@ fn optional_chaining_result_type_mismatch_is_caught() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -515,7 +515,7 @@ fn enum_member_value_type_mismatch_is_caught() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -533,7 +533,7 @@ fn enum_constant_expression_initializer_is_evaluated() {
     );
     assert_eq!(diagnostics[0].severity, ts_rust::Severity::Error);
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -550,7 +550,7 @@ fn enum_members_can_refer_to_earlier_members_and_auto_increment_after_them() {
         "only `next` returns the enum as a string, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -667,7 +667,7 @@ fn array_indexing_with_numeric_literal_result_includes_undefined() {
         "expected exactly one diagnostic (the honest element | undefined vs number mismatch), got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -684,7 +684,7 @@ fn array_indexing_with_numeric_literal_mismatch_is_caught() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -701,7 +701,7 @@ fn array_indexing_with_dynamic_key_result_includes_undefined() {
         "expected exactly one diagnostic (the honest element | undefined vs number mismatch), got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -717,7 +717,7 @@ fn static_method_body_internal_error_is_caught() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -753,7 +753,7 @@ fn call_arity_mismatch_still_checks_argument_expressions() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("argument(s)")),
+            .any(|d| d.message.contains("arguments, but got")),
         "got: {diagnostics:?}"
     );
     assert!(

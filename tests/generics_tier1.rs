@@ -74,7 +74,7 @@ fn generic_array_element_type_is_inferred() {
         "expected exactly one diagnostic (the honest element | undefined vs T mismatch), got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -110,7 +110,7 @@ fn two_generic_functions_share_type_param_name_without_cross_contamination() {
         "expected exactly one diagnostic (the honest element | undefined vs T mismatch in firstOf), got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("declared return type"),
+        diagnostics[0].message.contains("is not assignable to type"),
         "got: {diagnostics:?}"
     );
 }
@@ -307,7 +307,7 @@ fn explicit_type_argument_is_checked_against_its_constraint() {
     assert!(
         diagnostics[0]
             .message
-            .contains("constraint of type parameter"),
+            .contains("does not satisfy the constraint"),
         "got: {diagnostics:?}"
     );
 }

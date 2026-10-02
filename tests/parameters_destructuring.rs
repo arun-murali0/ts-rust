@@ -42,7 +42,7 @@ fn optional_param_does_not_excuse_a_missing_required_arg() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("argument(s)"),
+        diagnostics[0].message.contains("arguments, but got"),
         "got: {diagnostics:?}"
     );
 }
@@ -226,7 +226,7 @@ fn array_destructuring_a_non_array_source_is_caught() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("requires an array type"),
+        diagnostics[0].message.contains("[Symbol.iterator]()"),
         "got: {diagnostics:?}"
     );
 }

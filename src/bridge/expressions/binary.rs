@@ -72,12 +72,26 @@ pub(super) fn infer_binary_expression_type(
             // way it satisfies any other, giving back the overload's own
             // `number` result rather than `any`.
             let number_ty = ctx.arena.number();
-            if ctx.semantic().is_assignable(left, number_ty)
-                && ctx.semantic().is_assignable(right, number_ty)
-            {
+            let left_ok = ctx.semantic().is_assignable(left, number_ty);
+            let right_ok = ctx.semantic().is_assignable(right, number_ty);
+            if left_ok && right_ok {
                 ctx.arena.number()
             } else {
-                push_binary_op_mismatch(ctx, span, operator.as_str(), left, right);
+                // One diagnostic per bad side, as tsc reports it (TS2362 and
+                // TS2363). Both land on the whole expression's span, since
+                // only that is available here.
+                if !left_ok {
+                    ctx.error(
+                        crate::diagnostic_messages::messages::arithmetic_left_operand_invalid(),
+                        span,
+                    );
+                }
+                if !right_ok {
+                    ctx.error(
+                        crate::diagnostic_messages::messages::arithmetic_right_operand_invalid(),
+                        span,
+                    );
+                }
                 ctx.arena.error()
             }
         }

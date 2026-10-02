@@ -78,7 +78,7 @@ dhat-heap = ["dep:dhat"]
 # previous "s" traded exactly that inlining for size, which was right for the wasm
 # bundle but skewed every native measurement.
 [profile.release]
-panic = "abort"
+# panic = "abort"
 opt-level = 3
 lto = "fat"
 codegen-units = 1

@@ -18,6 +18,89 @@ pub fn display_type(arena: &TypeArena, type_id: TypeId) -> String {
     out
 }
 
+// How tsc words the source side of a "not assignable" message: a literal is
+// shown as its base type (`number`, not `2`) unless the target itself could
+// hold a literal, since the literal is only worth naming when the target is
+// one too. tsc does this in reportRelationError, and it is why
+// `let s: string = 2` says `Type 'number'` and not `Type '2'`.
+pub fn display_source_type(arena: &TypeArena, source: TypeId, target: TypeId) -> String {
+    // A named source (an enum is a union of literals underneath) keeps its name:
+    // tsc prints `Type 'Color'`, never the widened `number`.
+    if arena.display_name(source).is_some()
+        || !is_literal_type(arena, source)
+        || could_have_singleton(arena, target)
+    {
+        return display_type(arena, source);
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let members = match arena.get(source) {
+        Type::Union(members) => members.clone(),
+        _ => vec![source],
+    };
+    for member in members {
+        let shown = display_type(arena, crate::types::widen(arena, member));
+        if !parts.contains(&shown) {
+            parts.push(shown);
+        }
+    }
+    parts.join(" | ")
+}
+
+// A literal, or a union made only of literals (`1 | 2`, `"a" | "b"`).
+fn is_literal_type(arena: &TypeArena, id: TypeId) -> bool {
+    match arena.get(id) {
+        Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => true,
+        Type::Union(members) => members.iter().all(|&m| {
+            matches!(
+                arena.get(m),
+                Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_)
+            )
+        }),
+        _ => false,
+    }
+}
+
+// Whether a target has a unit type at its top level (a literal, null or
+// undefined, possibly inside a union). A plain `boolean` does not count, same as
+// tsc's typeCouldHaveTopLevelSingletonTypes.
+fn could_have_singleton(arena: &TypeArena, id: TypeId) -> bool {
+    match arena.get(id) {
+        Type::Union(members) => members.iter().any(|&m| could_have_singleton(arena, m)),
+        Type::StringLiteral(_)
+        | Type::NumberLiteral(_)
+        | Type::BooleanLiteral(_)
+        | Type::Null
+        | Type::Undefined => true,
+        _ => false,
+    }
+}
+
+// The members of a union in the order tsc prints them. A literal whose base type
+// is also a member is absorbed by it (`"none" | string` is just `string`), and
+// null then undefined go last (`string | null | undefined`) however the union was
+// built.
+fn union_display_order(arena: &TypeArena, members: &[TypeId]) -> Vec<TypeId> {
+    let has = |wanted: fn(&Type) -> bool| members.iter().any(|&m| wanted(arena.get(m)));
+    let has_string = has(|t| matches!(t, Type::String));
+    let has_number = has(|t| matches!(t, Type::Number));
+    let has_boolean = has(|t| matches!(t, Type::Boolean));
+    let mut ordered: Vec<TypeId> = Vec::with_capacity(members.len());
+    let (mut null, mut undefined) = (None, None);
+    for &member in members {
+        match arena.get(member) {
+            Type::StringLiteral(_) if has_string => {}
+            Type::NumberLiteral(_) if has_number => {}
+            Type::BooleanLiteral(_) if has_boolean => {}
+            Type::Null => null = Some(member),
+            Type::Undefined => undefined = Some(member),
+            _ => ordered.push(member),
+        }
+    }
+    ordered.extend(null);
+    ordered.extend(undefined);
+    ordered
+}
+
 fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize) {
     if depth == 0 {
         out.push_str("...");
@@ -80,7 +163,7 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
         }
 
         Type::Union(members) => {
-            for (index, &member) in members.iter().enumerate() {
+            for (index, member) in union_display_order(arena, members).into_iter().enumerate() {
                 if index > 0 {
                     out.push_str(" | ");
                 }
@@ -99,19 +182,19 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
                 out.push_str("{}");
                 return;
             }
+            // tsc terminates every member with `;`, the last one included:
+            // `{ x: number; y: string; }`.
             out.push_str("{ ");
-            for (index, property) in object.properties.iter().enumerate() {
-                if index > 0 {
-                    out.push_str("; ");
-                }
+            for property in object.properties.iter() {
                 out.push_str(&property.name);
                 if property.optional {
                     out.push('?');
                 }
                 out.push_str(": ");
                 write_type(arena, property.type_id, out, depth - 1);
+                out.push_str("; ");
             }
-            out.push_str(" }");
+            out.push('}');
         }
 
         Type::Function(function) => {
@@ -186,6 +269,49 @@ mod tests {
     }
 
     #[test]
+    fn source_literal_is_widened_unless_the_target_is_a_literal() {
+        let mut arena = TypeArena::new();
+        let two = arena.alloc(Type::NumberLiteral(2.0));
+        let (string, number) = (arena.string(), arena.number());
+        // tsc: `let s: string = 2` says 'number', not '2'.
+        assert_eq!(display_source_type(&arena, two, string), "number");
+        // A literal target keeps the literal visible on both sides.
+        let three = arena.alloc(Type::NumberLiteral(3.0));
+        assert_eq!(display_source_type(&arena, two, three), "2");
+        // A non-literal source is left alone.
+        assert_eq!(display_source_type(&arena, number, string), "number");
+    }
+
+    #[test]
+    fn source_union_of_literals_widens_to_one_base_type() {
+        let mut arena = TypeArena::new();
+        let (one, two) = (
+            arena.alloc(Type::NumberLiteral(1.0)),
+            arena.alloc(Type::NumberLiteral(2.0)),
+        );
+        let union = arena.alloc(Type::Union(vec![one, two]));
+        let string = arena.string();
+        assert_eq!(display_source_type(&arena, union, string), "number");
+    }
+
+    #[test]
+    fn union_prints_null_then_undefined_last() {
+        let mut arena = TypeArena::new();
+        let (undefined, null, string) = (arena.undefined(), arena.null(), arena.string());
+        let union = arena.alloc(Type::Union(vec![undefined, null, string]));
+        assert_eq!(render(&arena, union), "string | null | undefined");
+    }
+
+    #[test]
+    fn union_drops_a_literal_its_base_type_absorbs() {
+        let mut arena = TypeArena::new();
+        let none = arena.alloc(Type::StringLiteral("none".to_string()));
+        let string = arena.string();
+        let union = arena.alloc(Type::Union(vec![none, string]));
+        assert_eq!(render(&arena, union), "string");
+    }
+
+    #[test]
     fn string_literal_escapes_quotes_and_backslashes() {
         let mut arena = TypeArena::new();
         let s = arena.alloc(Type::StringLiteral("a\"b\\c".to_string()));
@@ -250,7 +376,7 @@ mod tests {
         ])));
         // ObjectType::new sorts by name, so x comes before y regardless of
         // construction order.
-        assert_eq!(render(&arena, obj), "{ x: number; y?: string }");
+        assert_eq!(render(&arena, obj), "{ x: number; y?: string; }");
     }
 
     #[test]
@@ -270,7 +396,7 @@ mod tests {
             optional: false,
             is_method: false,
         }])));
-        assert_eq!(render(&arena, outer), "{ items: { name: string }[] }");
+        assert_eq!(render(&arena, outer), "{ items: { name: string; }[]; }");
     }
 
     #[test]

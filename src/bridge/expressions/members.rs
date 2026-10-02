@@ -152,7 +152,11 @@ pub(super) fn infer_computed_member_access_type(
         );
         if plain_object && plain_key {
             ctx.error(
-                crate::diagnostic_messages::messages::element_implicitly_any(),
+                crate::diagnostic_messages::messages::element_implicitly_any(
+                    &ctx.arena,
+                    key_type,
+                    object_type,
+                ),
                 span,
             );
         } else {

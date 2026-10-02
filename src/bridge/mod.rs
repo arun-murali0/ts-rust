@@ -65,25 +65,30 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
         } else {
             // Includes a bare `Box` for `Box<T>` (given == 0), which tsc also
             // reports as a missing type argument.
+            // tsc prints the generic with its parameter list: `Box<T>`, `Pair<A, B>`.
+            let display_name = match ctx.namespace.declared_type_param_decl(name) {
+                Some(decl) => {
+                    let params: Vec<&str> =
+                        decl.params.iter().map(|p| p.name.name.as_str()).collect();
+                    format!("{name}<{}>", params.join(", "))
+                }
+                None => name.to_string(),
+            };
             ctx.error(
                 crate::diagnostic_messages::messages::type_argument_count_mismatch(
-                    name,
+                    &display_name,
                     issue.required,
                     issue.expected,
-                    issue.given,
                 ),
                 issue.span,
             );
         }
     }
 
-    for (parameter_name, actual, constraint, span) in ctx.namespace.take_constraint_violations() {
+    for (_, actual, constraint, span) in ctx.namespace.take_constraint_violations() {
         ctx.error(
             crate::diagnostic_messages::messages::type_argument_constraint_violation(
-                &ctx.arena,
-                &parameter_name,
-                actual,
-                constraint,
+                &ctx.arena, actual, constraint,
             ),
             span,
         );

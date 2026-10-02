@@ -111,7 +111,7 @@ fn this_expression_type_mismatch_is_caught() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("declared return type")),
+            .any(|d| d.message.contains("is not assignable to type")),
         "got: {diagnostics:?}"
     );
 }
@@ -236,7 +236,9 @@ fn untyped_method_param_skips_arity_not_whole_class() {
         Some(Severity::Warning)
     );
 
-    let binary_op_mismatch = diagnostics.iter().find(|d| d.message.contains("Operator"));
+    let binary_op_mismatch = diagnostics
+        .iter()
+        .find(|d| d.message.contains("arithmetic operation"));
     assert!(
         binary_op_mismatch.is_some(),
         "expected the `1 - \"x\"` mismatch inside the call to still be caught, got: {diagnostics:?}"

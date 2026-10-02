@@ -198,28 +198,9 @@ fn check_callable(
             None => true,
         };
     if !arity_ok {
-        // Only "too few" can name a parameter; "too many" has no single one
-        // to blame. The names are those of the required parameters the arguments
-        // do not reach, found by skipping past the arguments given rather than by
-        // slicing up to `required`, so no shape of parameter list can put the
-        // range out of bounds. A destructured param among them drops the whole
-        // list rather than naming some and not others.
-        let missing_names: Option<Vec<&str>> = if arguments.len() < required {
-            function_type
-                .params
-                .iter()
-                .skip(arguments.len())
-                .filter(|p| !p.optional && !p.rest)
-                .map(|p| p.name.as_deref())
-                .collect()
-        } else {
-            None
-        };
-
-        ctx.error(
-            arity_message(required, max, arguments.len(), missing_names.as_deref()),
-            span,
-        );
+        // The text is tsc's TS2554 verbatim, which never names the missing
+        // parameter, so there is nothing to look up here.
+        ctx.error(arity_message(required, max, arguments.len()), span);
 
         for arg in arguments {
             if let Some(arg_expr) = arg.as_expression() {
@@ -298,7 +279,7 @@ fn check_callable(
     }
     collect_generic_param_constraints(&ctx.arena, function_type.return_type, &mut constraints);
 
-    for (id, name, constraint) in &constraints {
+    for (id, _, constraint) in &constraints {
         let Some(&(_, bound)) = bindings.iter().find(|(bound_id, _)| bound_id == id) else {
             continue;
         };
@@ -317,7 +298,7 @@ fn check_callable(
         if !ctx.semantic().is_assignable(bound, constraint) {
             ctx.error(
                 crate::diagnostic_messages::messages::type_argument_constraint_violation(
-                    &ctx.arena, name, bound, constraint,
+                    &ctx.arena, bound, constraint,
                 ),
                 span,
             );
@@ -354,14 +335,11 @@ fn arity_message(
     required: usize,
     max: Option<usize>,
     got: usize,
-    missing_names: Option<&[&str]>,
 ) -> crate::diagnostic_messages::DiagnosticMessage {
     use crate::diagnostic_messages::messages;
     match max {
-        Some(max) if max == required => {
-            messages::argument_arity_exact(required, got, missing_names)
-        }
-        Some(max) => messages::argument_arity_range(required, max, got, missing_names),
-        None => messages::argument_arity_at_least(required, got, missing_names),
+        Some(max) if max == required => messages::argument_arity_exact(required, got),
+        Some(max) => messages::argument_arity_range(required, max, got),
+        None => messages::argument_arity_at_least(required, got),
     }
 }

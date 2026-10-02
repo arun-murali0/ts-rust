@@ -103,13 +103,7 @@ pub fn resolve_ts_type(
             let arity = namespace.declared_type_param_arity(&id.name);
             if let Some((required, total)) = arity {
                 if given < required || given > total {
-                    namespace.note_type_argument_issue(
-                        &id.name,
-                        required,
-                        total,
-                        given,
-                        reference.span,
-                    );
+                    namespace.note_type_argument_issue(&id.name, required, total, reference.span);
                 }
             }
 

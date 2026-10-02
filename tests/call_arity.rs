@@ -35,7 +35,7 @@ fn a_missing_argument_is_named() {
     let diagnostics = check(source, "missing_argument_is_named.ts");
     assert_eq!(
         arity_message(&diagnostics),
-        "Expected 2 argument(s), but got 1. Missing argument for parameter 'b'."
+        "Expected 2 arguments, but got 1."
     );
 }
 
@@ -45,7 +45,7 @@ fn several_missing_arguments_are_all_named() {
     let diagnostics = check(source, "several_missing_arguments_are_named.ts");
     assert_eq!(
         arity_message(&diagnostics),
-        "Expected 3 argument(s), but got 1. Missing argument for parameters 'height', 'depth'."
+        "Expected 3 arguments, but got 1."
     );
 }
 
@@ -55,7 +55,7 @@ fn too_many_arguments_names_no_parameter() {
     let diagnostics = check(source, "too_many_arguments_names_no_parameter.ts");
     assert_eq!(
         arity_message(&diagnostics),
-        "Expected 2 argument(s), but got 3."
+        "Expected 2 arguments, but got 3."
     );
 }
 
@@ -65,7 +65,7 @@ fn a_destructured_parameter_drops_the_whole_list() {
     let diagnostics = check(source, "destructured_parameter_is_left_unnamed.ts");
     assert_eq!(
         arity_message(&diagnostics),
-        "Expected 2 argument(s), but got 0."
+        "Expected 2 arguments, but got 0."
     );
 }
 
@@ -75,7 +75,7 @@ fn a_default_before_a_required_parameter_counts_as_required() {
     let diagnostics = check(source, "default_before_required_counts_as_required.ts");
     assert_eq!(
         arity_message(&diagnostics),
-        "Expected 2 argument(s), but got 0. Missing argument for parameters 'factor', 'value'."
+        "Expected 2 arguments, but got 0."
     );
 }
 
@@ -99,7 +99,7 @@ fn a_trailing_default_still_leaves_earlier_parameters_required() {
     );
     assert_eq!(
         arity_message(&diagnostics),
-        "Expected 1-2 argument(s), but got 0. Missing argument for parameter 'name'."
+        "Expected 1-2 arguments, but got 0."
     );
 }
 
@@ -109,6 +109,6 @@ fn parameter_names_survive_generic_substitution() {
     let diagnostics = check(source, "generic_instantiation_keeps_parameter_names.ts");
     assert_eq!(
         arity_message(&diagnostics),
-        "Expected 2 argument(s), but got 1. Missing argument for parameter 'count'."
+        "Expected 2 arguments, but got 1."
     );
 }
