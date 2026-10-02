@@ -1,4 +1,6 @@
-use oxc_ast::ast::{Expression, ForStatement, IfStatement, SwitchStatement, WhileStatement};
+use oxc_ast::ast::{
+    Expression, ForStatement, IfStatement, Statement, SwitchStatement, WhileStatement,
+};
 use oxc_semantic::Scoping;
 
 use super::super::context::CheckContext;
@@ -54,11 +56,57 @@ pub(super) fn check_if_statement(
     };
 }
 
-// The loop's own test narrows the body (`while (x !== null) { x.length }`), since
-// the test runs before every pass. The body is walked once, so narrowing it
-// establishes does not carry into the next pass; what the code after the loop
-// sees is the join of the state from before (the body may not run at all) and the
-// state the body ended in.
+// Whether a `break` appears anywhere inside `stmt`. Deliberately generous: a break
+// that belongs to a nested loop or switch is counted too, and a `try` or `with` is
+// assumed to hide one, because the only use of this answer is to decide that a loop
+// can only be left by its test failing, and a false "yes there is a break" merely
+// skips a narrowing. A function body is not entered: a break cannot cross it.
+fn contains_break(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::BreakStatement(_) => true,
+        Statement::BlockStatement(block) => block.body.iter().any(contains_break),
+        Statement::IfStatement(if_stmt) => {
+            contains_break(&if_stmt.consequent)
+                || if_stmt.alternate.as_ref().is_some_and(contains_break)
+        }
+        Statement::WhileStatement(inner) => contains_break(&inner.body),
+        Statement::DoWhileStatement(inner) => contains_break(&inner.body),
+        Statement::ForStatement(inner) => contains_break(&inner.body),
+        Statement::ForInStatement(inner) => contains_break(&inner.body),
+        Statement::ForOfStatement(inner) => contains_break(&inner.body),
+        Statement::LabeledStatement(inner) => contains_break(&inner.body),
+        Statement::SwitchStatement(inner) => inner
+            .cases
+            .iter()
+            .any(|case| case.consequent.iter().any(contains_break)),
+        Statement::TryStatement(_) | Statement::WithStatement(_) => true,
+        _ => false,
+    }
+}
+
+// What the code after a loop sees. The loop test narrows the body (`while (x !== null)
+// { x.length }`), since the test runs before every pass. The body is walked once, so
+// narrowing it establishes does not carry into the next pass. After the loop the state
+// is the join of the state from before (the body may not run at all) and the state the
+// body ended in. And if nothing in the body can `break`, the loop is only left by its
+// test failing, so the test's false side also holds afterwards: after `while (x !==
+// null) { ... }` the variable is null.
+fn state_after_loop(
+    outer_narrow: &NarrowState,
+    body_end: &NarrowState,
+    exit_overrides: Option<NarrowState>,
+    body: &Statement,
+    ctx: &mut CheckContext<'_, '_>,
+) -> NarrowState {
+    let mut after = join_states(outer_narrow, body_end, &mut ctx.arena);
+    if let Some(exit_overrides) = exit_overrides
+        && !contains_break(body)
+    {
+        after.extend(exit_overrides);
+    }
+    after
+}
+
 pub(super) fn check_while_statement(
     while_stmt: &WhileStatement,
     scoping: &Scoping,
@@ -66,11 +114,18 @@ pub(super) fn check_while_statement(
 ) {
     infer_expression_type(&while_stmt.test, scoping, ctx);
 
-    let (true_overrides, _) = narrow_condition(&while_stmt.test, scoping, ctx);
+    let (true_overrides, false_overrides) = narrow_condition(&while_stmt.test, scoping, ctx);
     let outer_narrow = ctx.narrow.clone();
     ctx.narrow.extend(true_overrides);
     check_statement(&while_stmt.body, scoping, ctx);
-    ctx.narrow = join_states(&outer_narrow, &ctx.narrow.clone(), &mut ctx.arena);
+    let body_end = ctx.narrow.clone();
+    ctx.narrow = state_after_loop(
+        &outer_narrow,
+        &body_end,
+        Some(false_overrides),
+        &while_stmt.body,
+        ctx,
+    );
 }
 
 pub(super) fn check_for_statement(
@@ -89,16 +144,26 @@ pub(super) fn check_for_statement(
         infer_expression_type(update, scoping, ctx);
     }
 
-    // A `for` test narrows its body for the same reason a `while` test does: it
-    // runs before every pass.
-    let test_overrides = match &for_stmt.test {
-        Some(test) => narrow_condition(test, scoping, ctx).0,
-        None => NarrowState::new(),
+    // Same reasoning as check_while_statement. A `for` with no test never narrows
+    // anything on exit: it can only be left by a break or a return.
+    let (true_overrides, false_overrides) = match &for_stmt.test {
+        Some(test) => {
+            let (on_true, on_false) = narrow_condition(test, scoping, ctx);
+            (on_true, Some(on_false))
+        }
+        None => (NarrowState::new(), None),
     };
     let outer_narrow = ctx.narrow.clone();
-    ctx.narrow.extend(test_overrides);
+    ctx.narrow.extend(true_overrides);
     check_statement(&for_stmt.body, scoping, ctx);
-    ctx.narrow = join_states(&outer_narrow, &ctx.narrow.clone(), &mut ctx.arena);
+    let body_end = ctx.narrow.clone();
+    ctx.narrow = state_after_loop(
+        &outer_narrow,
+        &body_end,
+        false_overrides,
+        &for_stmt.body,
+        ctx,
+    );
 }
 
 pub(super) fn check_switch_statement(

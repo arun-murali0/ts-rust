@@ -8,8 +8,12 @@ mod unreachable_code;
 
 use oxc_allocator::Allocator;
 
+use crate::arena::{TypeArena, TypeArenaStats};
 use crate::diagnostics::Diagnostic;
 use crate::error::CheckerError;
+use crate::namespace::NamespaceStats;
+use crate::semantic::queries::QueryStats;
+use crate::types::FileId;
 use context::CheckContext;
 
 pub use parse::parse;
@@ -21,12 +25,30 @@ pub fn parse_and_bind_only(source: &str, file_name: &str) -> Result<(), CheckerE
     Ok(())
 }
 
+/// Sizes and cache counters from one check, for benchmarks and regression reports.
+pub struct CheckMetrics {
+    pub arena: TypeArenaStats,
+    pub queries: QueryStats,
+    pub namespace: NamespaceStats,
+}
+
 // The whole checking pipeline in two passes: declare_top_level resolves every
 // top-level signature first, so a function can call another declared later in the
 // same file, then check_top_level walks statement and expression bodies against
 // those already-resolved signatures.
-#[tracing::instrument(skip_all, fields(file_name))]
-pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, CheckerError> {
+//
+// The arena is borrowed, not created here, so a CheckSession can keep one allocation
+// across successive versions of a file. It is cleared first, so nothing from the
+// previous check (types, names, intern entries) is visible to this one, and handed
+// back at the end with the retained capacity.
+pub fn check_program_with_state(
+    source: &str,
+    file_name: &str,
+    file_id: FileId,
+    arena: &mut TypeArena,
+) -> Result<(Vec<Diagnostic>, CheckMetrics), CheckerError> {
+    arena.clear();
+
     let allocator = Allocator::default();
     let program = parse(&allocator, source, file_name)?;
     // semantic is kept for the whole check on purpose: it owns the Scoping borrowed
@@ -35,7 +57,8 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
     let semantic = parse::analyze(&program);
     let scoping = semantic.scoping();
 
-    let mut ctx = CheckContext::new(file_name);
+    let reusable_arena = std::mem::take(arena);
+    let mut ctx = CheckContext::with_arena_and_file_id(file_name, file_id, reusable_arena);
 
     declare::declare_top_level(&program, &mut ctx);
     statements::check_top_level(&program, scoping, &mut ctx);
@@ -94,6 +117,30 @@ pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, C
         );
     }
 
-    tracing::info!(diagnostic_count = ctx.diagnostics.len(), "check complete");
-    Ok(ctx.diagnostics)
+    let metrics = CheckMetrics {
+        arena: ctx.arena.stats(),
+        queries: ctx.relation_cache.stats(),
+        namespace: ctx.namespace.stats(),
+    };
+    tracing::info!(
+        diagnostic_count = ctx.diagnostics.len(),
+        arena_types = metrics.arena.type_count,
+        relation_hits = metrics.queries.relation_hits,
+        relation_misses = metrics.queries.relation_misses,
+        generic_instantiations = metrics.namespace.instantiations,
+        "check complete"
+    );
+
+    let diagnostics = std::mem::take(&mut ctx.diagnostics);
+    *arena = ctx.arena;
+    Ok((diagnostics, metrics))
+}
+
+// The one-shot entry point, for callers that check a file once and do not need to
+// keep state: it owns a throwaway arena, so no FileId or arena handling leaks into
+// their code.
+#[tracing::instrument(skip_all, fields(file_name))]
+pub fn check_program(source: &str, file_name: &str) -> Result<Vec<Diagnostic>, CheckerError> {
+    let mut arena = TypeArena::new();
+    Ok(check_program_with_state(source, file_name, FileId::ROOT, &mut arena)?.0)
 }

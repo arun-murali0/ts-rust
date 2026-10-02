@@ -1,7 +1,8 @@
-use crate::arena::{TypeArena, TypeId};
+use crate::arena::{PairStack, TypeArena, TypeId};
 use crate::fxhash::FxHashMap;
 use crate::semantic::queries::{RelationCache, SemanticQueries};
 use crate::types::{FunctionType, ObjectType, PropertyEntry, Type};
+use smallvec::SmallVec;
 
 // Structural inference: walks a generic function's declared parameter type
 // alongside a call's actual argument type in lockstep, recording a binding the
@@ -34,7 +35,7 @@ pub(crate) fn infer_type_param_bindings(
         bindings,
         locked,
         cache,
-        &mut Vec::new(),
+        &mut SmallVec::new(),
     )
 }
 
@@ -53,6 +54,50 @@ fn is_subtype_via_cache(
     SemanticQueries::new(arena, cache).is_subtype(sub, sup)
 }
 
+// Whether a bound asks for narrow types: it is, or contains, a primitive or a literal.
+fn bound_keeps_literals(arena: &TypeArena, bound: TypeId) -> bool {
+    let is_primitive_or_literal = |id: TypeId| {
+        matches!(
+            arena.get(id),
+            Type::String
+                | Type::Number
+                | Type::Boolean
+                | Type::StringLiteral(_)
+                | Type::NumberLiteral(_)
+                | Type::BooleanLiteral(_)
+        )
+    };
+    match arena.get(bound) {
+        Type::Union(members) => members
+            .iter()
+            .any(|&member| is_primitive_or_literal(member)),
+        _ => is_primitive_or_literal(bound),
+    }
+}
+
+// Which primitive a literal, or a union made only of literals, belongs to. None for
+// anything else, and for a union that mixes primitives.
+fn literal_base(arena: &TypeArena, id: TypeId) -> Option<u8> {
+    let base_of = |id: TypeId| match arena.get(id) {
+        Type::StringLiteral(_) => Some(0),
+        Type::NumberLiteral(_) => Some(1),
+        Type::BooleanLiteral(_) => Some(2),
+        _ => None,
+    };
+    match arena.get(id) {
+        Type::Union(members) => {
+            let mut bases = members.iter().map(|&member| base_of(member));
+            let first = bases.next()??;
+            bases.all(|base| base == Some(first)).then_some(first)
+        }
+        _ => base_of(id),
+    }
+}
+
+fn same_literal_base(arena: &TypeArena, a: TypeId, b: TypeId) -> bool {
+    matches!((literal_base(arena, a), literal_base(arena, b)), (Some(x), Some(y)) if x == y)
+}
+
 // A recursive param_type (e.g. `Box<T>`'s own self-referential `next: Box<T>`,
 // still holding the bare GenericParameter shape while it's being matched
 // against a real argument) can lead back to matching the same (param_type,
@@ -66,7 +111,7 @@ fn infer_type_param_bindings_inner(
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
     locked: &[crate::types::TypeParameterId],
     cache: &mut RelationCache,
-    seen: &mut Vec<(TypeId, TypeId)>,
+    seen: &mut PairStack,
 ) {
     let pair = (param_type, arg_type);
     if seen.contains(&pair) {
@@ -84,10 +129,10 @@ fn infer_type_param_bindings_uncached(
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
     locked: &[crate::types::TypeParameterId],
     cache: &mut RelationCache,
-    seen: &mut Vec<(TypeId, TypeId)>,
+    seen: &mut PairStack,
 ) {
     match arena.get(param_type).clone() {
-        Type::GenericParameter(id, _, _) => {
+        Type::GenericParameter(id, _, bound) => {
             // A parameter bound by an explicit call-site type argument
             // (identity<string>(x)) is not up for renegotiation by whatever
             // argument happens to line up with it structurally -- explicit
@@ -97,10 +142,19 @@ fn infer_type_param_bindings_uncached(
                 return;
             }
 
-            // Widened so identity(5) infers number, matching what a
-            // TypeScript author expects from a bare generic call, rather than
-            // the checker binding T to the narrower literal type 5.
-            let candidate = crate::types::widen(arena, arg_type);
+            // A literal argument is widened, so identity(5) infers number and not
+            // the literal 5, which is what a bare generic call is expected to give.
+            // Unless the parameter's bound mentions a primitive or literal type
+            // (`T extends "a" | "b"`, `T extends number`): the bound is then asking
+            // for the narrow type, widening would break it (`pick("a")` would bind T
+            // to string, which does not satisfy `"a" | "b"`), and TypeScript keeps the
+            // literal in exactly this case.
+            let keeps_literals = bound.is_some_and(|bound| bound_keeps_literals(arena, bound));
+            let candidate = if keeps_literals {
+                arg_type
+            } else {
+                crate::types::widen(arena, arg_type)
+            };
 
             match bindings.iter_mut().find(|(bound, _)| *bound == id) {
                 None => bindings.push((id, candidate)),
@@ -109,6 +163,12 @@ fn infer_type_param_bindings_uncached(
                         // The existing binding already covers this candidate.
                     } else if is_subtype_via_cache(arena, cache, *existing, candidate) {
                         *existing = candidate;
+                    } else if keeps_literals && same_literal_base(arena, *existing, candidate) {
+                        // `pair(1, 2)` for `T extends number`: neither literal covers
+                        // the other, but both are numbers, so T is 1 | 2. Literals of
+                        // different primitives (`pair("a", 1)`) are not combined; the
+                        // first binding stays and the second argument is reported.
+                        *existing = arena.alloc_union(vec![*existing, candidate]);
                     }
                 }
             }
@@ -466,7 +526,7 @@ pub(crate) fn ordered_generic_param_ids(
     if !contains_type_param(arena, type_id) {
         return;
     }
-    ordered_generic_param_ids_inner(arena, type_id, out, &mut Vec::new());
+    ordered_generic_param_ids_inner(arena, type_id, out, &mut SmallVec::new());
     out.sort_by_key(|id| id.parameter_index());
 }
 
@@ -488,7 +548,7 @@ fn ordered_generic_param_ids_inner(
     arena: &TypeArena,
     type_id: TypeId,
     out: &mut Vec<crate::types::TypeParameterId>,
-    visited: &mut Vec<TypeId>,
+    visited: &mut SmallVec<[TypeId; 16]>,
 ) {
     if visited.contains(&type_id) {
         return;
@@ -523,7 +583,7 @@ fn ordered_generic_param_ids_inner(
 
 pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
     let mut outermost_cut = usize::MAX;
-    scan_for_type_param(arena, type_id, &mut Vec::new(), &mut outermost_cut)
+    scan_for_type_param(arena, type_id, &mut SmallVec::new(), &mut outermost_cut)
 }
 
 // The "does this type mention a type parameter" question. Answers are kept in
@@ -547,7 +607,7 @@ pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
 fn scan_for_type_param(
     arena: &TypeArena,
     type_id: TypeId,
-    open: &mut Vec<TypeId>,
+    open: &mut SmallVec<[TypeId; 8]>,
     lowest_cut: &mut usize,
 ) -> bool {
     if let Some(known) = arena.cached_mentions_type_param(type_id) {
@@ -629,7 +689,7 @@ pub(crate) fn collect_generic_param_constraints(
     if !contains_type_param(arena, type_id) {
         return;
     }
-    collect_generic_param_constraints_inner(arena, type_id, constraints, &mut Vec::new());
+    collect_generic_param_constraints_inner(arena, type_id, constraints, &mut SmallVec::new());
 }
 
 // Same walk as ordered_generic_param_ids_inner, and the same choice of guard: a
@@ -641,7 +701,7 @@ fn collect_generic_param_constraints_inner(
     arena: &TypeArena,
     type_id: TypeId,
     constraints: &mut Vec<(crate::types::TypeParameterId, String, TypeId)>,
-    visited: &mut Vec<TypeId>,
+    visited: &mut SmallVec<[TypeId; 16]>,
 ) {
     if visited.contains(&type_id) {
         return;

@@ -131,8 +131,8 @@ pub mod messages {
         )
     }
 
-    // tsc's TS2344 names only the constraint, never the type parameter, so the
-    // parameter name is no longer part of the text.
+    // tsc's TS2344 names only the constraint, never the type parameter, so the message
+    // carries no parameter name.
     pub fn type_argument_constraint_violation(
         arena: &TypeArena,
         actual: TypeId,
@@ -387,6 +387,13 @@ pub mod messages {
             )
         };
         DiagnosticMessage::new(DiagnosticCode::TypeArgumentCountMismatch, text)
+    }
+
+    pub fn duplicate_type_declaration(name: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::DuplicateTypeDeclaration,
+            format!("Duplicate identifier '{name}'."),
+        )
     }
 
     pub fn type_is_not_generic(name: &str) -> DiagnosticMessage {

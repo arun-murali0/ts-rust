@@ -404,6 +404,9 @@ fixture, total allocation fell about 4.9% in bytes and 2.1% in blocks, and peak 
   detection uses.
 - Known edge in the instantiation memo: the names of arguments are baked in at first use,
   so an argument renamed later keeps its old text in reused instantiations.
+- `structurally_equal_cached` is not connected to `alloc_union`. Connecting it changed
+  diagnostic counts once and the cause was not established, so the uncached form stays
+  until it is. See section 11 for what was ported alongside it.
 
 ## 9. Invariants to keep
 
@@ -414,10 +417,11 @@ These are the rules the design depends on. Break one and the failure is usually 
    to its holder. Get it from `alloc_fresh`, `alloc_object_placeholder` or `make_unique`.
 3. A digest match is a hint. Confirm against the slot before reuse.
 4. Placeholders and completed placeholders never enter an intern table.
-5. The subtype cache is keyed on `TypeId` alone, so no query may run while a placeholder
-   is still empty. Resolution bypasses the cache today, which is why this holds. Revisit
-   it before the arena is shared across files, along with a growth policy for the intern
-   tables.
+5. The relation cache is scoped to an arena generation (section 11), so an answer from
+   before a placeholder was filled in, or before the arena was cleared, cannot be read
+   back. Resolution still bypasses the cache; the generation check would make caching
+   there safe, it just has not been needed. A growth policy for the intern tables is still
+   open.
 6. Fast paths in front of a cache must use the same rule as the real check.
 
 ## 10. Reproducing the measurements
@@ -435,3 +439,48 @@ cargo bench --bench checker_benchmark
 
 Keep one toolchain for a comparison, do not run `cargo clean` between the two iai runs,
 and check that every workload's diagnostic count is unchanged.
+
+## 11. Reuse across files: generation, `clear`, sessions
+
+Everything above treats one arena as living for one file. Checking the same file again, as
+an editor does, can reuse the allocation, but only if nothing from the previous check can
+be seen by the next one.
+
+**`clear()` returns to the primitive baseline.** It truncates the type vector to the ten
+fixed primitive slots, so `number()` and the rest return the same ids as in a fresh arena,
+and keeps the vector's allocation. Every side table is cleared with it: display names,
+record value types, both intern tables, the parameter-scan memo and the equality cache.
+A table that survived would let the next file see a stale name or a stale intern entry,
+which fails silently.
+
+**A generation counter instead of an invalidation rule.** `generation` advances whenever
+an id that already exists changes meaning: `set()` filling in a placeholder, and
+`clear()`. New ids do not advance it, since an id nobody has asked about has no stale
+answer. `RelationCache` remembers the generation it was filled under, and
+`SemanticQueries::new` drops every entry from an older one. The alternative, telling each
+caller "invalidate after `set`", puts a rule in every call site that has to be remembered
+forever; comparing one integer makes the cache correct by construction. It also lifts the
+old restriction that no query may run while a placeholder is empty.
+
+**`CheckSession` is the explicit mutable boundary.** The reusable state lives in a session,
+not inside `TypeChecker`, so the checker keeps no interior mutability and independent
+sessions can run side by side, one per file. The arena is moved into each check and moved
+back at the end, with its capacity.
+
+**Recursion guards are `SmallVec`s.** The pair stacks used by structural equality,
+subtyping and inference, and the visited lists in the generic helpers, hold sixteen or
+eight entries inline. Real comparisons are shallow, so they almost never reach the heap,
+and a lookup over so few entries is a handful of integer compares, cheaper than hashing.
+A pathologically deep type still works: the vector moves to the heap. A test builds a chain
+forty levels deep to cover that path.
+
+**The instantiation memo is keyed on a fingerprint.** `(generic shape, 64-bit fingerprint
+of the bindings)` means a lookup hashes two integers and never allocates a `Vec` to ask.
+The fingerprint only picks a bucket; a hit is confirmed by comparing the stored bindings, so
+two different binding lists that collide can never be mistaken for each other.
+
+**Counters, not guesses.** `TypeArena::stats`, `RelationCache::stats` and
+`TypeNamespace::stats` report sizes and hit counts, and a session keeps the last check's
+copy. They are plain counts of structures the code already maintains, so asking costs
+nothing. No performance figures are claimed for this section: the counters make a
+regression observable, and the numbers belong to the next benchmark run.

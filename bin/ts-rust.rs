@@ -156,7 +156,7 @@ fn print_help() {
          OPTIONS:\n    \
          --project <path>    Locate the project root from a tsconfig.json path.\n                         \
          Its contents are not parsed; every .ts/.tsx file under\n                         \
-         that directory is checked directly. See src/bin/ts-rust.rs\n                         \
+         that directory is checked directly. See bin/ts-rust.rs\n                         \
          for the exact scoping.\n    \
          -h, --help          Show this message.\n\n\
          EXIT CODES:\n    \

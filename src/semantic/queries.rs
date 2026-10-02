@@ -13,12 +13,75 @@ use crate::subtyping;
 /// allocate types or otherwise mutate the arena. The `&mut` is purely to let
 /// repeated identical questions be answered from a cache instead of
 /// re-walking the type structure.
-// Named once so the places that thread the cache by hand (generic inference, which
-// cannot hold a SemanticQueries across its arena mutations) spell the type the same
-// way the owner does. One map serves every relation, with the relation in the key,
-// so adding is_disjoint did not mean threading a second map through every place
-// that already carries this one.
-pub type RelationCache = FxHashMap<(Relation, TypeId, TypeId), bool>;
+// One cache serves every relation, with the relation in the key, so adding
+// is_disjoint did not mean threading a second map through every place that already
+// carries this one. Generic inference cannot hold a SemanticQueries across its arena
+// mutations, so it carries the cache by hand and spells the type the same way the
+// owner does.
+//
+// The cache is scoped to one arena generation. Finishing a recursive declaration
+// (TypeArena::set) or starting a new file (TypeArena::clear) changes what an existing
+// TypeId means, and an answer computed against the old meaning must not survive. The
+// generation check makes that automatic: the next query through SemanticQueries::new
+// drops every entry from an older generation, so no caller has to remember a rule.
+#[derive(Default)]
+pub struct RelationCache {
+    generation: u64,
+    values: FxHashMap<(Relation, TypeId, TypeId), bool>,
+    hits: u64,
+    misses: u64,
+}
+
+/// Cache counters for benchmarks and regression reports. Hits and misses are
+/// cumulative over the cache's life, including across generation resets, so a report
+/// shows total reuse and not just reuse since the last reset.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct QueryStats {
+    pub relation_hits: u64,
+    pub relation_misses: u64,
+    pub relation_entries: usize,
+}
+
+impl RelationCache {
+    fn prepare(&mut self, generation: u64) {
+        if self.generation != generation {
+            self.values.clear();
+            self.generation = generation;
+        }
+    }
+
+    fn get(&mut self, key: &(Relation, TypeId, TypeId)) -> Option<bool> {
+        let found = self.values.get(key).copied();
+        if found.is_some() {
+            self.hits += 1;
+        } else {
+            self.misses += 1;
+        }
+        found
+    }
+
+    fn insert(&mut self, key: (Relation, TypeId, TypeId), value: bool) {
+        self.values.insert(key, value);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+
+    pub(crate) fn stats(&self) -> QueryStats {
+        QueryStats {
+            relation_hits: self.hits,
+            relation_misses: self.misses,
+            relation_entries: self.values.len(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Relation {
@@ -37,6 +100,7 @@ pub struct SemanticQueries<'a> {
 
 impl<'a> SemanticQueries<'a> {
     pub(crate) fn new(arena: &'a TypeArena, cache: &'a mut RelationCache) -> Self {
+        cache.prepare(arena.generation());
         Self { arena, cache }
     }
 
@@ -74,7 +138,7 @@ impl<'a> SemanticQueries<'a> {
         }
 
         let key = (Relation::Subtype, source, target);
-        if let Some(&cached) = self.cache.get(&key) {
+        if let Some(cached) = self.cache.get(&key) {
             return cached;
         }
 
@@ -98,7 +162,7 @@ impl<'a> SemanticQueries<'a> {
             (b, a)
         };
         let key = (Relation::Disjoint, first, second);
-        if let Some(&cached) = self.cache.get(&key) {
+        if let Some(cached) = self.cache.get(&key) {
             return cached;
         }
 
@@ -110,15 +174,14 @@ impl<'a> SemanticQueries<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::SemanticQueries;
+    use super::{RelationCache, SemanticQueries};
     use crate::arena::TypeArena;
-    use crate::fxhash::FxHashMap;
     use crate::subtyping;
 
     #[test]
     fn assignability_delegates_to_the_central_type_relation() {
         let arena = TypeArena::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = RelationCache::default();
         let mut queries = SemanticQueries::new(&arena, &mut cache);
 
         assert!(queries.is_assignable(arena.string(), arena.unknown()));
@@ -128,7 +191,7 @@ mod tests {
     #[test]
     fn disjointness_is_symmetric_and_shares_one_cache_entry() {
         let arena = TypeArena::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = RelationCache::default();
         let mut queries = SemanticQueries::new(&arena, &mut cache);
 
         assert!(queries.is_disjoint(arena.string(), arena.number()));
@@ -140,7 +203,7 @@ mod tests {
     #[test]
     fn disjointness_and_subtyping_do_not_share_answers() {
         let arena = TypeArena::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = RelationCache::default();
         let mut queries = SemanticQueries::new(&arena, &mut cache);
 
         assert!(!queries.is_subtype(arena.number(), arena.string()));
@@ -153,7 +216,7 @@ mod tests {
     #[test]
     fn cached_result_matches_the_uncached_answer() {
         let arena = TypeArena::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = RelationCache::default();
         let mut queries = SemanticQueries::new(&arena, &mut cache);
 
         // First call computes and caches; second call must hit the cache and
@@ -171,7 +234,7 @@ mod tests {
         // map again, the bypass has silently stopped doing its job, and nothing else
         // would notice because the answers stay correct either way.
         let arena = TypeArena::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = RelationCache::default();
         let mut queries = SemanticQueries::new(&arena, &mut cache);
 
         assert!(queries.is_subtype(arena.number(), arena.number()));
@@ -181,11 +244,71 @@ mod tests {
     }
 
     #[test]
+    fn filling_a_placeholder_discards_answers_computed_against_the_empty_one() {
+        use crate::types::{ObjectType, PropertyEntry, Type};
+
+        let mut arena = TypeArena::new();
+        let placeholder = arena.alloc_object_placeholder();
+        let shape = |arena: &TypeArena| {
+            Type::Object(ObjectType::new(vec![PropertyEntry {
+                name: "value".into(),
+                type_id: arena.number(),
+                optional: false,
+                is_method: false,
+            }]))
+        };
+        let target = {
+            let ty = shape(&arena);
+            arena.alloc(ty)
+        };
+        let mut cache = RelationCache::default();
+
+        {
+            let mut queries = SemanticQueries::new(&arena, &mut cache);
+            assert!(!queries.is_subtype(placeholder, target));
+        }
+        assert_eq!(cache.len(), 1);
+
+        let filled = shape(&arena);
+        arena.set(placeholder, filled);
+
+        let mut queries = SemanticQueries::new(&arena, &mut cache);
+        assert!(
+            queries.is_subtype(placeholder, target),
+            "the answer from the empty placeholder must not survive set()"
+        );
+        assert_eq!(cache.len(), 1, "the old generation's entry was dropped");
+    }
+
+    #[test]
+    fn stats_count_hits_and_misses_across_a_generation_reset() {
+        let mut arena = TypeArena::new();
+        let mut cache = RelationCache::default();
+        let number = arena.number();
+        let string = arena.string();
+
+        {
+            let mut queries = SemanticQueries::new(&arena, &mut cache);
+            assert!(!queries.is_subtype(number, string));
+            assert!(!queries.is_subtype(number, string));
+        }
+        let before = cache.stats();
+        assert_eq!((before.relation_misses, before.relation_hits), (1, 1));
+
+        arena.clear();
+        let mut queries = SemanticQueries::new(&arena, &mut cache);
+        assert!(!queries.is_subtype(number, string));
+        let after = cache.stats();
+        assert_eq!(after.relation_misses, 2, "counters keep accumulating");
+        assert_eq!(after.relation_entries, 1);
+    }
+
+    #[test]
     fn non_trivial_pairs_still_populate_the_cache() {
         // The other half of the guard above: the bypass must stay narrow, otherwise
         // the cache would quietly stop caching the questions it exists for.
         let arena = TypeArena::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = RelationCache::default();
         let mut queries = SemanticQueries::new(&arena, &mut cache);
 
         assert!(!queries.is_subtype(arena.number(), arena.string()));
@@ -199,7 +322,7 @@ mod tests {
         // silently make is_subtype(b, a) return whatever is_subtype(a, b)
         // returned. This must not happen.
         let mut arena = TypeArena::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = RelationCache::default();
 
         let five = arena.alloc(crate::types::Type::NumberLiteral(5.0));
         let number = arena.number();
@@ -222,7 +345,7 @@ mod tests {
         // how many other entries have been inserted since, or in what order
         // pairs are revisited.
         let mut arena = TypeArena::new();
-        let mut cache = FxHashMap::default();
+        let mut cache = RelationCache::default();
 
         let mut ids = vec![
             arena.number(),

@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use crate::arena::{TypeArena, TypeId};
+use crate::arena::{PairStack, TypeArena, TypeId};
 use crate::types::{ObjectType, Param, Type};
 
 // Structural subtyping: is sub usable wherever sup is expected. The identity check
@@ -10,7 +10,7 @@ use crate::types::{ObjectType, Param, Type};
 // that already failed to check, would need its own arm in every single case of that
 // match instead of one shared escape hatch here.
 pub fn is_subtype(arena: &TypeArena, sub: TypeId, sup: TypeId) -> bool {
-    is_subtype_inner(arena, sub, sup, &mut Vec::new())
+    is_subtype_inner(arena, sub, sup, &mut PairStack::new())
 }
 
 // A recursive type (Node { next: Node }, built by namespace::resolve's
@@ -20,12 +20,7 @@ pub fn is_subtype(arena: &TypeArena, sub: TypeId, sup: TypeId) -> bool {
 // as true (coinductively: two types that only differ by "going in circles"
 // are equivalent) rather than as a fresh comparison to keep making -- this is
 // the standard rule for equirecursive subtyping and is what breaks the loop.
-fn is_subtype_inner(
-    arena: &TypeArena,
-    sub: TypeId,
-    sup: TypeId,
-    seen: &mut Vec<(TypeId, TypeId)>,
-) -> bool {
+fn is_subtype_inner(arena: &TypeArena, sub: TypeId, sup: TypeId, seen: &mut PairStack) -> bool {
     if is_trivial_subtype(arena, sub, sup) {
         return true;
     }
@@ -40,12 +35,7 @@ fn is_subtype_inner(
     result
 }
 
-fn is_subtype_uncached(
-    arena: &TypeArena,
-    sub: TypeId,
-    sup: TypeId,
-    seen: &mut Vec<(TypeId, TypeId)>,
-) -> bool {
+fn is_subtype_uncached(arena: &TypeArena, sub: TypeId, sup: TypeId, seen: &mut PairStack) -> bool {
     match (arena.get(sub), arena.get(sup)) {
         (_, Type::Unknown) => true,
 
@@ -108,7 +98,7 @@ fn function_is_subtype(
     arena: &TypeArena,
     sub: &crate::types::FunctionType,
     sup: &crate::types::FunctionType,
-    seen: &mut Vec<(TypeId, TypeId)>,
+    seen: &mut PairStack,
 ) -> bool {
     function_is_subtype_with(arena, sub, sup, false, seen)
 }
@@ -121,7 +111,7 @@ fn function_is_subtype_with(
     sub: &crate::types::FunctionType,
     sup: &crate::types::FunctionType,
     bivariant_params: bool,
-    seen: &mut Vec<(TypeId, TypeId)>,
+    seen: &mut PairStack,
 ) -> bool {
     // sub cannot require more arguments than callers of sup are guaranteed to
     // supply. It is free to require fewer; its extra optional or rest slots simply
@@ -178,7 +168,7 @@ fn object_is_subtype(
     arena: &TypeArena,
     sub: &ObjectType,
     sup: &ObjectType,
-    seen: &mut Vec<(TypeId, TypeId)>,
+    seen: &mut PairStack,
 ) -> bool {
     // The merge-join below silently gives wrong answers on unsorted input, so an
     // unsorted ObjectType reaching here is a construction bug elsewhere, not
@@ -228,7 +218,7 @@ fn property_is_subtype(
     arena: &TypeArena,
     sub_type: TypeId,
     sup_property: &crate::types::PropertyEntry,
-    seen: &mut Vec<(TypeId, TypeId)>,
+    seen: &mut PairStack,
 ) -> bool {
     if sup_property.is_method
         && let (Type::Function(sub_function), Type::Function(sup_function)) =

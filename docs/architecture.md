@@ -231,6 +231,26 @@ The goal is to prevent generic inference from becoming a collection of call-expr
 
 As generic semantics grow, this file can become a `semantic/generics/` module without changing the bridge contract.
 
+## Sessions, file identity and metrics
+
+`TypeChecker::check_source` is the one-shot entry point: it owns a throwaway arena. A
+caller that re-checks a file keeps a `CheckSession` (`TypeChecker::session(file_id)`),
+which holds the reusable arena and moves it into each check and back, with its capacity.
+The arena is cleared at the start of every check, so no type, name, intern entry or cached
+answer from the previous file is visible to the next one. The reusable state is in the
+session and not in `TypeChecker`, so the checker has no interior mutability and
+independent sessions can run side by side.
+
+`FileId` is a plain index. It is part of `TypeParameterId`, so two files' generic
+parameters at the same byte offset stay distinct once they share semantic state.
+`ProjectFiles` owns the path-to-`FileId` mapping and does nothing else: no parsing, no
+resolution, and it never canonicalizes a path, because that would make handing out an id a
+filesystem operation. Module resolution attaches to it from the outside.
+
+After a successful check the session keeps `CheckMetrics`: arena sizes, relation-cache hits
+and misses, and the namespace's instantiation counts. They are counts of structures the
+code already maintains, read after the fact, so collecting them costs nothing.
+
 ## CheckContext
 
 `CheckContext` represents one mutable checking session.

@@ -22,6 +22,8 @@ Expression and Program Checking
 Parameters and Destructuring
     ↓
 Generics (functions, interfaces, aliases, classes, recursion, builtins) ← current baseline, substantially complete
+    ↓
+Narrowing completion, sessions and file identity (joins, discriminated unions, `in`/`instanceof`, `CheckSession`)
 ```
 
 These names describe capabilities. They are not release versions and should not be interpreted as a versioning scheme.
@@ -39,9 +41,15 @@ For the full, item-by-item picture of what's checked and what isn't across the e
 | Classes and Inheritance | Model class members, constructors, inheritance, static state, and `this`. | `tests/classes_inheritance.rs` | [classes-inheritance](classes-inheritance.md) |
 | Expression and Program Checking | Expand expression inference, calls, members, logical operations, loops, switches, assertions, and program-level checking. | `tests/expression_program_checking.rs` | [expression-program-checking](expression-program-checking.md) |
 | Parameters and Destructuring | Model parameter metadata and binding/destructuring semantics. | `tests/parameters_destructuring.rs` | [parameters-destructuring](parameters-destructuring.md) |
-| Generics | Type parameters on functions, interfaces, aliases, and classes: inference, substitution, constraints, defaults, explicit type arguments, recursive generic shapes, and builtin generics (`Array<T>`, opaque `Promise<T>`). One consolidated document, not split by tier — see it for why. | `tests/generics_tier1.rs`, `tests/generics_tier2.rs`, `tests/generic_classes.rs`, `tests/recursive_types.rs`, `tests/builtin_generics.rs`, `tests/interface_methods.rs` | [generics](generics.md) |
+| Generics | Type parameters on functions, interfaces, aliases, and classes: inference, substitution, constraints, defaults, explicit type arguments, recursive generic shapes, and builtin generics (`Array<T>`, opaque `Promise<T>`). One consolidated document, not split by tier — see it for why. | `tests/generics_tier1.rs`, `tests/generics_tier2.rs`, `tests/generic_classes.rs`, `tests/recursive_types.rs`, `tests/builtin_generics.rs`, `tests/interface_methods.rs` | [generics](generics-tier.md) |
+
+Later work extends these milestones rather than adding a tier: `tests/narrowing_advanced.rs` and `tests/narrowing_complete.rs` (switch, `&&`/`||`, loops, joins, `in`, `instanceof`), `tests/generics_bounds.rs` (literal-preserving inference, explicit type arguments), `tests/declaration_collisions.rs`, `tests/union_member_access.rs` and `tests/check_session.rs` (sessions, metrics, file identity).
 
 A handful of smaller, cross-cutting suites support these milestones rather than being their own tier: `tests/call_arity.rs`, `tests/void_and_never.rs`, `tests/unreachable_code.rs`, `tests/named_types_in_messages.rs`, `tests/diagnostic_codes.rs`, `tests/misc_fixes.rs`, and `tests/subtype_cache_stress.rs` (a performance/correctness regression suite, not a feature milestone).
+
+## Why it is built this way
+
+[case-study.md](case-study.md) collects the design decisions in one place: the problem each solves, what was rejected, and how it was checked. Start there when a choice looks odd.
 
 ## Architecture
 

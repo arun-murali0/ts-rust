@@ -1,10 +1,18 @@
 use crate::fxhash::{FxHashMap, FxHasher};
 use crate::types::{ObjectType, Type};
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
+
+// The (left, right) pairs a recursive comparison is in the middle of. It is a
+// SmallVec, not a Vec or a hash set: real comparisons are shallow, so the sixteen
+// inline slots almost never spill to the heap and a lookup is a handful of integer
+// compares, cheaper than hashing. A pathologically deep type still works, because
+// the vector simply moves to the heap.
+pub(crate) type PairStack = SmallVec<[(TypeId, TypeId); 16]>;
 
 impl TypeId {
     // The slot number, for a caller that needs to put two ids in a fixed order, for
@@ -33,6 +41,18 @@ fn content_hash<T: Hash + ?Sized>(content: &T) -> u64 {
     let mut hasher = FxHasher::default();
     content.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Counters for benchmarks and regression reports. They are snapshots of sizes the
+/// arena already tracks, so asking for them does not walk the type graph.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TypeArenaStats {
+    pub type_count: usize,
+    pub capacity: usize,
+    pub interned_types: usize,
+    pub interned_unions: usize,
+    pub named_types: usize,
+    pub record_types: usize,
 }
 
 pub struct TypeArena {
@@ -114,10 +134,17 @@ pub struct TypeArena {
     // placeholder is completed: set() is the one operation that changes what an
     // existing id means, so it empties this table, same as param_scan above.
     equality_cache: FxHashMap<(TypeId, TypeId), bool>,
+
+    // Advances whenever an id that already exists changes meaning: set() filling in a
+    // placeholder, or clear() starting over. Anything that remembers an answer about
+    // a TypeId (the relation cache) compares generations instead of relying on each
+    // caller to remember an invalidation rule. New ids do not advance it, since an id
+    // nobody has asked about has no stale answer.
+    generation: u64,
 }
 
 impl TypeArena {
-    // The nine primitives are allocated in this fixed order so their ids are known
+    // The ten primitives are allocated in this fixed order so their ids are known
     // constants below (number(), string(), and so on). Any part of the checker that
     // needs "the number type" calls arena.number() directly instead of having to
     // thread a TypeId through from wherever that primitive was first resolved.
@@ -130,6 +157,7 @@ impl TypeArena {
             interned_unions: FxHashMap::default(),
             param_scan: RefCell::new(Vec::new()),
             equality_cache: FxHashMap::default(),
+            generation: 0,
         };
 
         arena.alloc(Type::Number);
@@ -422,6 +450,7 @@ impl TypeArena {
              the intern table pointing at the wrong type"
         );
         self.types[id.0 as usize] = ty;
+        self.generation = self.generation.wrapping_add(1);
         self.param_scan.get_mut().clear();
         // Two unfinished placeholders compare equal (both are empty objects), and that
         // answer stops being true the moment either one is filled in.
@@ -494,15 +523,10 @@ impl TypeArena {
     // equal only to the same declared parameter (its TypeParameterId), never to
     // another `T` that merely has the same name or bound.
     pub fn structurally_equal(&self, a: TypeId, b: TypeId) -> bool {
-        self.structurally_equal_inner(a, b, &mut Vec::new())
+        self.structurally_equal_inner(a, b, &mut PairStack::new())
     }
 
-    fn structurally_equal_inner(
-        &self,
-        a: TypeId,
-        b: TypeId,
-        seen: &mut Vec<(TypeId, TypeId)>,
-    ) -> bool {
+    fn structurally_equal_inner(&self, a: TypeId, b: TypeId, seen: &mut PairStack) -> bool {
         if a == b {
             return true;
         }
@@ -578,6 +602,50 @@ impl TypeArena {
             (Type::GenericParameter(x, _, _), Type::GenericParameter(y, _, _)) => x == y,
 
             _ => false,
+        }
+    }
+
+    // Starts over for the next file in a session. Truncating instead of replacing the
+    // vectors keeps their allocations, and the ten primitive slots survive untouched,
+    // so number() and friends return the same ids as in a fresh arena. Every side
+    // table is cleared with the type graph: a table that survived would let the next
+    // file see a stale display name, a stale intern entry or a stale cached answer.
+    // The generation moves forward so a relation cache built before the reset
+    // discards its answers on its next use.
+    pub fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.types.truncate(FIXED_SLOTS as usize);
+        self.display_names.clear();
+        self.record_value_types.clear();
+        self.interned.clear();
+        self.interned_unions.clear();
+        self.param_scan.get_mut().clear();
+        self.equality_cache.clear();
+        debug_assert_eq!(self.types.len() as u32, FIXED_SLOTS);
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.types.len()
+    }
+
+    /// Sizes for benchmarks and heap-regression reports. Capacity is included on
+    /// purpose: after a large file a reused arena keeps its allocation, so the type
+    /// count alone understates what it holds. The maps report entry counts, not
+    /// allocator capacity, which keeps this a semantic measure and not a detail of the
+    /// hash table.
+    pub fn stats(&self) -> TypeArenaStats {
+        TypeArenaStats {
+            type_count: self.types.len(),
+            capacity: self.types.capacity(),
+            interned_types: self.interned.len(),
+            interned_unions: self.interned_unions.len(),
+            named_types: self.display_names.len(),
+            record_types: self.record_value_types.len(),
         }
     }
 
@@ -1142,6 +1210,106 @@ mod tests {
             "order-sensitive key: reordering is a different id"
         );
         assert!(arena.structurally_equal(one, two));
+    }
+
+    #[test]
+    fn clear_returns_to_the_primitive_baseline_and_keeps_capacity() {
+        use crate::types::PropertyEntry;
+
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let object = arena.alloc_fresh(Type::Object(ObjectType::new(vec![PropertyEntry {
+            name: "value".into(),
+            type_id: number,
+            optional: false,
+            is_method: false,
+        }])));
+        arena.set_display_name(object, "Wide");
+        let capacity_before = arena.stats().capacity;
+        assert!(arena.len() > FIXED_SLOTS as usize);
+
+        arena.clear();
+
+        assert_eq!(arena.len(), FIXED_SLOTS as usize);
+        assert!(arena.stats().capacity >= capacity_before);
+        assert_eq!(arena.number(), TypeId(0));
+        assert_eq!(arena.void(), TypeId(9));
+        assert_eq!(arena.stats().named_types, 0);
+        assert_eq!(arena.stats().interned_types, 0);
+        assert_eq!(arena.display_name(object), None);
+
+        let fresh = arena.alloc(Type::Array(arena.number()));
+        assert_eq!(
+            fresh,
+            TypeId(FIXED_SLOTS),
+            "ids restart right after the primitives"
+        );
+    }
+
+    #[test]
+    fn generation_moves_only_when_an_existing_id_changes_meaning() {
+        let mut arena = TypeArena::new();
+        let start = arena.generation();
+
+        arena.alloc(Type::Array(arena.number()));
+        assert_eq!(arena.generation(), start, "a new id has no stale answers");
+
+        let placeholder = arena.alloc_object_placeholder();
+        assert_eq!(arena.generation(), start);
+
+        arena.set(placeholder, Type::Object(ObjectType::new(Vec::new())));
+        assert_ne!(
+            arena.generation(),
+            start,
+            "filling a placeholder changes an id"
+        );
+
+        let after_set = arena.generation();
+        arena.clear();
+        assert_ne!(
+            arena.generation(),
+            after_set,
+            "clear() starts a new generation"
+        );
+    }
+
+    #[test]
+    fn stats_count_interned_and_named_types() {
+        let mut arena = TypeArena::new();
+        let before = arena.stats();
+        let array = arena.alloc(Type::Array(arena.number()));
+        let again = arena.alloc(Type::Array(arena.number()));
+        assert_eq!(array, again);
+
+        let after = arena.stats();
+        assert_eq!(after.type_count, before.type_count + 1);
+        assert_eq!(after.interned_types, before.interned_types + 1);
+    }
+
+    #[test]
+    fn deep_recursive_comparison_spills_past_the_inline_stack() {
+        use crate::types::PropertyEntry;
+
+        // A chain deeper than PairStack's sixteen inline slots, so the recursion
+        // guard has to move to the heap and still give the right answer.
+        let mut arena = TypeArena::new();
+        let mut left = arena.number();
+        let mut right = arena.number();
+        for _ in 0..40 {
+            left = arena.alloc(Type::Object(ObjectType::new(vec![PropertyEntry {
+                name: "next".into(),
+                type_id: left,
+                optional: false,
+                is_method: false,
+            }])));
+            right = arena.alloc(Type::Object(ObjectType::new(vec![PropertyEntry {
+                name: "next".into(),
+                type_id: right,
+                optional: false,
+                is_method: false,
+            }])));
+        }
+        assert!(arena.structurally_equal(left, right));
     }
 
     #[test]

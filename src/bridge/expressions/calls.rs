@@ -19,10 +19,13 @@ use super::{
 // with no such list (`call.type_arguments`/`new_expr.type_arguments` being the
 // ordinary, common case: a bare `identity(x)`), so callers don't need to
 // special-case "none given" separately from "given but unresolvable".
-// An individual type argument this checker cannot resolve (e.g. it names
-// something not in scope) is dropped rather than aborting the whole list, the
-// same graceful-degradation stance taken everywhere else in this checker for a
-// single unresolved piece of an otherwise-checkable construct.
+// An individual type argument this checker cannot resolve (it names something not in
+// scope) becomes the error type instead of being dropped. The arguments are matched to
+// the type parameters by position, so dropping one would shift every later argument onto
+// the wrong parameter: `two<Nope, string>(1, "x")` would bind `string` to the first
+// parameter and report a bogus mismatch on the first argument. The error type is
+// compatible with everything, so the parameter it lands on stops constraining its
+// arguments without causing a second diagnostic.
 fn resolve_explicit_type_arguments(
     type_arguments: Option<&oxc_ast::ast::TSTypeParameterInstantiation>,
     ctx: &mut CheckContext<'_, '_>,
@@ -30,13 +33,14 @@ fn resolve_explicit_type_arguments(
     let Some(type_arguments) = type_arguments else {
         return Vec::new();
     };
-    type_arguments
-        .params
-        .iter()
-        .filter_map(|ty| {
+    let mut resolved = Vec::with_capacity(type_arguments.params.len());
+    for ty in &type_arguments.params {
+        let type_id =
             crate::type_annotation::resolve_ts_type(ty, &mut ctx.namespace, &mut ctx.arena)
-        })
-        .collect()
+                .unwrap_or_else(|| ctx.arena.error());
+        resolved.push(type_id);
+    }
+    resolved
 }
 
 // Everything about one call or `new` site that check_callable needs besides the

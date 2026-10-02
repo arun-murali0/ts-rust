@@ -84,26 +84,15 @@ When a condition cannot be understood safely, the implementation prefers to reta
 
 ## 8. Why this design scales
 
-The same state mechanism can later handle:
+The same state mechanism handles `!`, assignments, early returns, loops, switch
+discrimination, discriminated unions, `&&` / `||`, `in` and `instanceof`. Sections 10
+to 15 describe each. No new global type environment was needed for any of them: every
+one is an operator-specific handler that returns a pair of overlays, plus, for control
+flow, a rule for how overlays are joined.
 
-- `!`
-- assignments
-- early returns
-- loops
-- switch discrimination
-- discriminated unions
-- property and alias narrowing
+What the mechanism does not yet cover is listed in section 16.
 
-No new global type environment is required for each operator.
-
-(Richer `&&`/`||` narrowing, listed here as future work when this document was
-written, shipped in the Expression and Program Checking milestone — see
-`docs/expression-program-checking.md` §8. It's a good example of this
-mechanism scaling the way this section predicted: no new state layer was
-needed, just a new operator-specific handler built on the same `NarrowState`
-overlay.)
-
-## 9. What Control-Flow Narrowing completed
+## 9. What the first Control-Flow Narrowing milestone completed
 
 - symbol-aware flow state
 - branch-local narrowing
@@ -114,3 +103,115 @@ overlay.)
 - preservation of declared types
 
 The key lesson is: **flow semantics belong in a separate layer over the normal symbol/type environment.**
+
+## 10. Joins: what the code after a branch sees
+
+An overlay that is only saved and restored forgets everything a branch learned. That is
+safe but loses real information: after `if (x === null) { x = "d"; }`, `x` is a string
+on every path, and a restore-only design reports it as `string | null`.
+
+`check_if_statement` therefore walks each way through the statement from the state the
+condition gives it, keeps the state each way ends in, and decides the state after the
+statement from which ways can actually fall out the bottom:
+
+| Consequent exits | Alternate exits | State after |
+| --- | --- | --- |
+| yes | no | the alternate's end state (the guard clause: `if (x === null) return;`) |
+| no | yes | the consequent's end state |
+| no | no | the join of the two end states |
+| yes | yes | the state from before (the code after is unreachable) |
+
+With no `else`, the missing alternate is the condition's false side alone.
+
+`join_states` is the one operation behind this. A symbol narrowed on both paths becomes
+the union of the two narrowed types. A symbol narrowed on only one path is dropped,
+because the other path still holds whatever it had before, and the union of that with
+the narrowed type is no narrower than before. Dropping is therefore always safe and
+never wrong; it only gives up precision. The same function serves the false side of
+`a && b`, the true side of `a || b` and the exit of a loop.
+
+## 11. Discriminated unions: narrowing the parent by one property
+
+`shape.kind === "circle"` narrows `shape`, not `shape.kind`. The narrowing key stays a
+`SymbolId`: the handler filters the members of `shape`'s union by whether their `kind`
+property can be that literal. Equality keeps members whose property type can equal the
+literal (the exact literal, or a wider type that contains it). Inequality removes a member
+only when its property is exactly that one literal, since a property typed `"a" | "b"`
+could still be `"b"`. A member that is not an object, or has no such property, is kept:
+this cannot decide it, and a kept member can only cost precision.
+
+A lone object type, as opposed to a union, is returned unchanged.
+
+## 12. `switch`
+
+`switch (k)`, `switch (shape.kind)` and `switch (typeof x)` narrow the variable in each
+case body, using the same per-member filters as `if`.
+
+- **Grouped labels** (`case "a": case "b": body`) fall into the next body, so the body is
+  narrowed to the union of its labels, not just the last one. If any label in the group
+  cannot be resolved to a literal, nothing is narrowed.
+- **`default`** is the complement of every other case's test. A test that cannot be
+  resolved is left out of the exclusion, which keeps more members than strictly needed
+  and is always safe. A `default` grouped with other labels can be reached with any value
+  and narrows nothing.
+- Each case starts from the state the switch started with, not from the previous case's
+  end state. Cases are checked in textual order, and without the reset one case's guard
+  clause would narrow the next case's code and escape the switch.
+- Fallthrough out of a non-empty body is not modelled: each such case is narrowed as if
+  reached directly, which matches `tsc` for the usual `break` / `return` style.
+
+## 13. `&&` and `||`
+
+A condition can itself be a logical expression. `a && b` is true when both hold, so its
+true overlay is `a`'s true overlay extended by `b`'s, with `b` narrowed against the state
+`a` establishes (it only runs when `a` held). It is false when `a` was false, or when `a`
+held and `b` did not, so its false overlay is the join of those two paths. `a || b` is the
+mirror image. `??` narrows nothing here.
+
+This is what makes `if (a === null || b === null) return;` leave both variables non-null
+afterwards: the false side of an `||` is the extension of both false sides, not a join.
+
+## 14. `in` and `instanceof`
+
+`"radius" in shape` keeps the union members that have, or may have, the property. The
+false side drops a member only where the property is required, since an optional or
+missing property can still be absent. A lone object, or a union where no member has the
+property, is left alone, because `tsc` would intersect with a record of the key and this
+checker cannot express that.
+
+`pet instanceof Dog` keeps the members assignable to the class's instance type, so a
+subclass counts as its parent. A member that is a supertype of the class (declared
+`Animal`, tested against `Dog`) becomes the class on the true side. Types are structural,
+so two classes with identical shapes cannot be told apart by `instanceof`, in `tsc`
+either. `any` and `unknown` become the class on the true side only; the error type and
+generic parameters are left alone on both.
+
+## 15. Literals, `unknown` and non-union types
+
+Equality against a literal narrows a wider member to the literal: a lone `string`
+compared with `"a"` is `"a"` in the true branch, `unknown` becomes the literal, and
+`boolean` is treated as `true | false`, so excluding `true` leaves `false`. Before this,
+a lone non-union type compared against a literal collapsed to `never`. That is the
+dangerous failure mode of narrowing: `never` is assignable to everything, so the bug
+produces no error at all. The fixtures that pin this behaviour assign the narrowed value
+to an incompatible type and expect exactly one error, which is the only way a `never`
+would show up.
+
+Loops follow the same overlay rules. A loop test narrows the body. After the loop the state
+is the join of the state from before and the body's end state. If nothing in the body can
+`break`, the loop is only left by its test failing, so the test's false side also holds
+afterwards: after `while (x !== null) { ... }`, `x` is null. The `break` scan is
+deliberately generous (a `try` is assumed to hide one), because a false "there is a
+break" only skips a narrowing.
+
+## 16. Still not narrowed
+
+- Property paths. `a.b.kind === "x"` and `a.b !== null` need the narrowing key to become a
+  path instead of a `SymbolId`, which is a change to `NarrowState`, not another handler.
+- User-defined type predicates (`x is T`) and assertion functions. These need a predicate
+  on function types.
+- Optional chaining (`x?.kind === "a"`), `switch (true)`, equality between two variables.
+- A join after `switch`. After the switch the state is the one from before it.
+- Captured variables. A closure starts with a copy of the surrounding narrowing, which is
+  right for a variable that is never reassigned and wrong for one that is.
+- Loop fixed points. The body is walked once.

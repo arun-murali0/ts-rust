@@ -1,10 +1,12 @@
 use oxc_ast::ast::{
-    BinaryOperator, Expression, IdentifierReference, LogicalOperator, UnaryOperator,
+    BinaryExpression, BinaryOperator, Expression, IdentifierReference, LogicalOperator,
+    UnaryOperator,
 };
 use oxc_semantic::{Scoping, SymbolId};
 
 use crate::arena::{TypeArena, TypeId};
 use crate::bridge::context::CheckContext;
+use crate::namespace::Resolution;
 use crate::types::Type;
 
 // A narrow overlay on top of the declared symbol types in CheckContext.symbols: a
@@ -83,6 +85,14 @@ pub fn narrow_condition(
         }
 
         Expression::BinaryExpression(bin) => {
+            // `in` and `instanceof` are not equality at all, so they are handled before
+            // the equality detection below, which would find nothing to match.
+            match bin.operator {
+                BinaryOperator::In => return narrow_by_in(bin, scoping, ctx),
+                BinaryOperator::Instanceof => return narrow_by_instanceof(bin, scoping, ctx),
+                _ => {}
+            }
+
             // Treats == and != identically to === and !==, just flipping which
             // computed branch (true_type vs false_type) ends up where, so the
             // detection logic below only needs to handle the equality case once.
@@ -498,6 +508,160 @@ fn literal_check(
     let symbol_id = resolve_symbol_id(ident, scoping)?;
     let literal = resolve_literal(maybe_literal, arena)?;
     Some((symbol_id, literal))
+}
+
+// `"radius" in shape`: narrows a union of object types by whether a member has the
+// property. Only a literal key and a plain identifier are recognised.
+fn narrow_by_in(
+    bin: &BinaryExpression,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> (NarrowState, NarrowState) {
+    let Expression::StringLiteral(key) = &bin.left else {
+        return empty_pair();
+    };
+    let Expression::Identifier(ident) = &bin.right else {
+        return empty_pair();
+    };
+    let Some(symbol_id) = resolve_symbol_id(ident, scoping) else {
+        return empty_pair();
+    };
+    let property = key.value.to_string();
+    by_symbol(ctx, symbol_id, move |arena, current, want_present| {
+        narrow_by_property_presence(arena, current, &property, want_present)
+    })
+}
+
+// How a union member relates to a property name, as far as `in` can tell.
+enum Presence {
+    Required,
+    Optional,
+    Absent,
+    // Not an object, or a Record whose keys are not modelled: it may or may not have
+    // the property, so `in` can neither keep nor drop it with confidence.
+    Unknown,
+}
+
+fn property_presence(arena: &TypeArena, member: TypeId, property: &str) -> Presence {
+    let Type::Object(object) = arena.get(member) else {
+        return Presence::Unknown;
+    };
+    if arena.record_value_type(member).is_some() {
+        return Presence::Unknown;
+    }
+    match object
+        .properties
+        .iter()
+        .find(|entry| &*entry.name == property)
+    {
+        Some(entry) if entry.optional => Presence::Optional,
+        Some(_) => Presence::Required,
+        None => Presence::Absent,
+    }
+}
+
+// The true branch keeps the members that have, or may have, the property; the false
+// branch drops only the members where it is required, since an optional or missing
+// property can still be absent. A lone object type is returned unchanged: tsc would
+// intersect it with a record of the key, which this checker has no way to express.
+// If no member could have the property the union is also left alone, for the same
+// reason, rather than collapsing to never.
+fn narrow_by_property_presence(
+    arena: &mut TypeArena,
+    id: TypeId,
+    property: &str,
+    want_present: bool,
+) -> TypeId {
+    let Some(members) = union_members(arena, id) else {
+        return id;
+    };
+    let presences: Vec<Presence> = members
+        .iter()
+        .map(|&member| property_presence(arena, member, property))
+        .collect();
+
+    if want_present && presences.iter().all(|p| matches!(p, Presence::Absent)) {
+        return id;
+    }
+
+    let mut kept = Vec::with_capacity(members.len());
+    for (member, presence) in members.iter().zip(&presences) {
+        let keep = if want_present {
+            !matches!(presence, Presence::Absent)
+        } else {
+            !matches!(presence, Presence::Required)
+        };
+        if keep {
+            kept.push(*member);
+        }
+    }
+    arena.alloc_union(kept)
+}
+
+// `pet instanceof Dog`: keeps the members that are instances of the class, using the
+// checker's own assignability, so a subclass counts as its parent. A member that is a
+// supertype of the class (declared `Animal`, tested against `Dog`) becomes the class in
+// the true branch. Types are structural here, as in TypeScript, so two classes with
+// identical shapes cannot be told apart by instanceof, in tsc either.
+//
+// `any` and `unknown` become the class in the true branch and stay as they are in the
+// false one. The error type and a generic parameter are left alone on both sides,
+// because narrowing them would turn a gap in this checker's model into errors on valid
+// code. The right-hand side must resolve to a declared type; anything else (a
+// variable, a call, an unknown name) narrows nothing.
+fn narrow_by_instanceof(
+    bin: &BinaryExpression,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> (NarrowState, NarrowState) {
+    let Expression::Identifier(value) = &bin.left else {
+        return empty_pair();
+    };
+    let Expression::Identifier(class) = &bin.right else {
+        return empty_pair();
+    };
+    let Some(symbol_id) = resolve_symbol_id(value, scoping) else {
+        return empty_pair();
+    };
+    let Resolution::Resolved(target) = ctx.namespace.resolve(&class.name, &mut ctx.arena) else {
+        return empty_pair();
+    };
+    let Some(current) = current_type(ctx, symbol_id) else {
+        return empty_pair();
+    };
+
+    let members = union_members(&ctx.arena, current).unwrap_or_else(|| vec![current]);
+    let mut true_members = Vec::with_capacity(members.len());
+    let mut false_members = Vec::with_capacity(members.len());
+    for member in members {
+        let (open_ended, unknowable) = {
+            let ty = ctx.arena.get(member);
+            (
+                matches!(ty, Type::Any | Type::Unknown),
+                matches!(ty, Type::Error | Type::GenericParameter(..)),
+            )
+        };
+        if unknowable {
+            true_members.push(member);
+            false_members.push(member);
+        } else if open_ended {
+            true_members.push(target);
+            false_members.push(member);
+        } else if ctx.semantic().is_assignable(member, target) {
+            true_members.push(member);
+        } else {
+            false_members.push(member);
+            if ctx.semantic().is_assignable(target, member) {
+                true_members.push(target);
+            }
+        }
+    }
+    let true_type = ctx.arena.alloc_union(true_members);
+    let false_type = ctx.arena.alloc_union(false_members);
+    (
+        NarrowState::from_single(symbol_id, true_type),
+        NarrowState::from_single(symbol_id, false_type),
+    )
 }
 
 // `ident.property === <literal>` (either order) is how a discriminated union is

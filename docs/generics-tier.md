@@ -64,7 +64,9 @@ The walk recurses through arrays, object properties, and function parameter/retu
 
 **Multiple candidates resolve through subtyping, not unioning.** A second argument resolving to an already-bound parameter doesn't just keep the first binding and reject the rest, and it doesn't union the two candidates either — checked against real TypeScript first: `pair<T>(a: T, b: T)` called as `pair(1, "x")` is a genuine TypeScript error, not an inferred `T = number | string`. Instead each new candidate is resolved against the existing binding through ordinary subtyping: if one is a supertype of the other, the binding widens to it (`pick(dog, animal)` infers `T = Animal`); if neither is, the binding is left alone and the real mismatch still surfaces through the ordinary per-argument assignability check.
 
-**Explicit type arguments are locked, not just another inference input.** `identity<string>(x)` matches its type arguments positionally against the type parameters in *declaration order* (recovered separately, since a resolved `FunctionType` itself doesn't remember declaration order) and locks them — inference can't override an explicitly given argument, only fill in ones left unspecified.
+**Literals are widened unless the bound asks for them.** A bare `identity(5)` binds `T` to `number`, because a generic call is expected to give the widened type. A bound that is, or contains, a primitive or a literal (`T extends "a" | "b"`, `T extends number`) changes that: the bound is asking for the narrow type, and widening would bind `T` to `string` and then reject its own argument. TypeScript keeps the literal in exactly this case, so inference does too. Two literals of the same primitive under such a bound combine (`pair(1, 2)` gives `T = 1 | 2`); literals of different primitives do not, and the first binding stays so the second argument is reported by the ordinary assignability check. A bound with no primitive in it (`T extends { n: number }`) still widens.
+
+**Explicit type arguments are locked, not just another inference input.** `identity<string>(x)` matches its type arguments positionally against the type parameters in *declaration order* (recovered separately, since a resolved `FunctionType` itself doesn't remember declaration order) and locks them — inference can't override an explicitly given argument, only fill in ones left unspecified. A type argument that cannot be resolved becomes the error type in its position instead of being dropped. The arguments are matched to parameters by position, so dropping one would shift every later argument onto the wrong parameter; the error type is compatible with everything, so the parameter it lands on stops constraining its arguments without causing a second diagnostic.
 
 ## 5. Substitution rebuilds the shape, never the declaration
 
@@ -108,9 +110,9 @@ What's still limited here: this protects *declaration*-level recursion (a type r
 
 ## 10. What's still genuinely missing
 
-- **Instantiation memoization.** Every generic reference substitutes fresh from its own cached generic shape; the same `Box<number>` appearing many times in one file recomputes rather than reusing a cached instantiation. Not yet a demonstrated performance problem at current fixture scale.
+- **Contextual inference is still missing, and it is the largest gap for everyday code.** Callbacks passed to generic functions (`map`, `reduce`) do not get their parameter types from the call, and callback parameters are inferred covariantly.
+- **Inference walks arrays, objects, functions and unions only.** Tuples and `Promise<T>` contribute no bindings.
 - **`const` type parameters** and **variance modifiers (`in`/`out`)** on declared type parameters.
-- **Higher-order and contextual generic inference** — inferring a generic callback's parameter types from the context it's passed into, rather than only from arguments already given.
 - **Full coinductive subtyping** for recursive types compared against each other (see §8).
 - **`Awaited<T>` and real `Promise<T>` modeling** (see §9) — blocked on `async`/`await` support existing first.
 
