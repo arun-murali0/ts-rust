@@ -7,6 +7,7 @@ use crate::namespace::TypeNamespace;
 use crate::semantic::SemanticQueries;
 use crate::semantic::queries::RelationCache;
 use crate::symbol_map::SymbolTypeMap;
+use crate::types::FileId;
 
 use super::narrow::NarrowState;
 
@@ -25,27 +26,29 @@ pub struct CheckContext<'ast, 'src> {
 
     pub narrow: NarrowState,
 
-    // Memoizes is_subtype/is_assignable results by the exact (source, target)
-    // TypeId pair asked about, for the lifetime of this one file's check. Keyed
-    // on the pair in order, never symmetrized: subtyping is not symmetric (see
-    // subtyping.rs), so (a, b) and (b, a) are cached as independent entries.
+    // Memoizes is_subtype, is_assignable and is_disjoint answers by relation and the
+    // exact TypeId pair asked about, for the lifetime of this one file's check. The
+    // pair is ordered, never symmetrized for subtyping: subtyping is not symmetric
+    // (see subtyping.rs), so (a, b) and (b, a) are independent entries.
     //
-    // This only catches repeats of the *same* TypeId pair. alloc() reuses one
-    // TypeId for identical anonymous composites (so the same-shaped object
-    // literal at two call sites shares an entry here), but a named type, a union,
-    // or a placeholder-originated type still has its own id and its own,
-    // uncached entries even when it matches another by shape. Concrete case this
-    // does catch: repeated re-checks of the
-    // same subterm pair reached from different branches of one recursive
-    // object/union comparison, which all go through ctx.semantic().
+    // The cache is tied to the arena's generation (see RelationCache). Filling in a
+    // recursive placeholder with TypeArena::set changes what an existing id means,
+    // and the next query drops every answer from before it, so nothing stale can be
+    // read back.
     //
-    // NOT caught: type_annotation::check_type_argument_constraint, on purpose. It
-    // runs while a declaration is still being resolved, when a placeholder can still
-    // be empty, and this cache is keyed on TypeId alone. A result stored against an
-    // empty placeholder would stay after set() fills it in, and nothing invalidates
-    // it. Generic inference does go through this cache (it runs after every
-    // declaration is complete), so a call like `allSame(1, 2, ..., 8)` computes each
-    // (candidate, existing) pair once.
+    // This only catches repeats of the *same* TypeId pair. alloc() reuses one TypeId
+    // for identical anonymous composites (so the same-shaped object literal at two
+    // call sites shares an entry here), but a named type, a union or a
+    // placeholder-originated type has its own id and its own entries even when it
+    // matches another by shape. What it does catch: the same subterm pair reached from
+    // different branches of one recursive object or union comparison, and the
+    // (candidate, existing) pairs generic inference compares, so a call like
+    // `allSame(1, 2, ..., 8)` computes each pair once.
+    //
+    // type_annotation::check_type_argument_constraint does not use it, because that
+    // function receives only the namespace and the arena, not this context. The
+    // generation check would make a cached answer safe there too; it stays uncached
+    // because threading the cache through a resolution-time call has not been needed.
     pub relation_cache: RelationCache,
 
     pub current_return_type: Option<TypeId>,
@@ -67,10 +70,13 @@ pub struct CheckContext<'ast, 'src> {
 }
 
 impl<'ast, 'src> CheckContext<'ast, 'src> {
-    pub fn new(file_name: &'src str) -> Self {
+    // Takes an arena the caller already owns, so a session can hand the same
+    // allocation to each check in turn. The arena must already be cleared: this does
+    // not reset it, because the caller is the one who knows whether it is reusing one.
+    pub fn with_arena_and_file_id(file_name: &'src str, file_id: FileId, arena: TypeArena) -> Self {
         Self {
-            arena: TypeArena::new(),
-            namespace: TypeNamespace::new(),
+            arena,
+            namespace: TypeNamespace::with_file_id(file_id),
             symbols: SymbolTypeMap::new(),
             diagnostics: Vec::new(),
             file_name,

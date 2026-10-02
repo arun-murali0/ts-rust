@@ -5,12 +5,13 @@ use oxc_ast::ast::{
 use oxc_span::{GetSpan, Span};
 
 use crate::arena::{TypeArena, TypeId};
-use crate::fxhash::FxHashMap;
+use crate::fxhash::{FxHashMap, FxHasher};
 use crate::semantic::substitute_type_params;
 use crate::type_annotation::{
     resolve_function_params, resolve_object_members, resolve_ts_type, resolve_type_annotation,
 };
-use crate::types::{ObjectType, PropertyEntry, Type, TypeParameterId};
+use crate::types::{FileId, ObjectType, PropertyEntry, Type, TypeParameterId};
+use std::hash::{Hash, Hasher};
 
 // The arguments an instantiation was made with, one (parameter, argument) pair per
 // declared type parameter, in declaration order.
@@ -25,6 +26,16 @@ type Instantiation = (Bindings, TypeId);
 // interface, type alias, and class shares one namespace. Generic type parameters
 // are fit into this same flat model by temporarily shadowing a name (see
 // push_type_params below) rather than motivating a real scope-tree rewrite.
+// What kind of declaration is being added, for duplicate detection. A separate enum
+// from DeclKind because a new declaration has no resolved form yet.
+#[derive(Clone, Copy)]
+enum NewKind {
+    Alias,
+    Interface,
+    Class,
+    Enum,
+}
+
 #[derive(Clone, Copy)]
 enum DeclKind<'a> {
     TypeAlias(
@@ -62,10 +73,28 @@ pub struct TypeArgumentIssue {
     pub span: Span,
 }
 
+/// Counts of what a namespace holds and how often its instantiation memo answered, for
+/// benchmarks and regression reports. Counts only: the maps' allocator capacity is a
+/// property of the hash table, better measured with a heap profiler.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NamespaceStats {
+    pub entries: usize,
+    pub type_parameters: usize,
+    pub merged_interfaces: usize,
+    pub instantiations: usize,
+    pub instantiation_hits: u64,
+    pub instantiation_misses: u64,
+}
+
 pub struct TypeNamespace<'a> {
+    // The file whose names this namespace resolves. Every generic parameter the
+    // namespace declares carries it (see TypeParameterId), so two files checked against
+    // shared semantic state cannot mistake each other's parameters for their own.
+    file_id: FileId,
+
     entries: FxHashMap<String, TypeEntry<'a>>,
 
-    // Keyed by TypeParameterId (source-position-derived, see that type in types.rs)
+    // Keyed by TypeParameterId (file and source position, see that type in types.rs)
     // rather than by name or by an AST pointer, so a generic function's signature,
     // resolved once up front, and its body, resolved later in a separate pass,
     // agree on the exact same GenericParameter node for T. Without this, a T[]
@@ -101,6 +130,20 @@ pub struct TypeNamespace<'a> {
     // merging does not address.
     merged_interface_parts: FxHashMap<String, Vec<&'a TSInterfaceDeclaration<'a>>>,
 
+    // Names declared twice in a way TypeScript rejects, one entry per declaration
+    // involved: the first declaration once, then every later one. tsc reports the
+    // error on each occurrence, so reporting on both keeps the two checkers' output
+    // comparable line for line. Kept here, not reported, because resolving names has no
+    // access to the diagnostics list; bridge::declare drains it into real diagnostics.
+    // Only collisions that are certainly illegal are recorded. See note_collision.
+    declaration_collisions: Vec<(String, Span)>,
+
+    // Where each name was first declared, so a later collision can point back at it,
+    // and which names have already had that first declaration reported (a third
+    // declaration must not report the first one again).
+    declaration_spans: FxHashMap<String, Span>,
+    reported_first_declaration: Vec<String>,
+
     // See TypeArgumentIssue. Deduplicated by source position, since the same
     // annotation can be resolved more than once.
     type_argument_issues: Vec<TypeArgumentIssue>,
@@ -117,11 +160,15 @@ pub struct TypeNamespace<'a> {
     // and rebuild the display name, however many times the same instantiation was
     // written. See cache_instantiation for what may go in and why.
     //
-    // A list per shape, searched by comparing slices, rather than one map keyed on
-    // (TypeId, Vec): a lookup on a Vec key would have to allocate a Vec just to ask,
-    // which is a good part of what the memo is meant to save. A generic declaration
-    // rarely has more than a handful of distinct instantiations, so the scan is short.
-    instantiations: FxHashMap<TypeId, Vec<Instantiation>>,
+    // Keyed by the shape and a fingerprint of the bindings, so a lookup hashes two
+    // integers and never allocates a Vec to ask. The fingerprint only picks a bucket:
+    // a hit is confirmed by comparing the stored bindings slice, so two different
+    // binding lists that collide in 64 bits can never be mistaken for each other. The
+    // bucket is still a list because of exactly that case, and in practice holds one
+    // entry.
+    instantiations: FxHashMap<(TypeId, u64), Vec<Instantiation>>,
+    instantiation_hits: u64,
+    instantiation_misses: u64,
 }
 
 pub enum Resolution {
@@ -131,32 +178,63 @@ pub enum Resolution {
     NotFound,
 }
 
+fn binding_fingerprint(bindings: &[(TypeParameterId, TypeId)]) -> u64 {
+    let mut hasher = FxHasher::default();
+    bindings.hash(&mut hasher);
+    hasher.finish()
+}
+
 impl<'a> TypeNamespace<'a> {
     pub fn new() -> Self {
+        Self::with_file_id(FileId::ROOT)
+    }
+
+    pub fn with_file_id(file_id: FileId) -> Self {
         Self {
+            file_id,
             entries: FxHashMap::default(),
             merged_interface_parts: FxHashMap::default(),
+            declaration_collisions: Vec::new(),
+            declaration_spans: FxHashMap::default(),
+            reported_first_declaration: Vec::new(),
             type_param_cache: FxHashMap::default(),
             implicit_any_params: Vec::new(),
             unresolved_constraints: Vec::new(),
             type_argument_issues: Vec::new(),
             constraint_violations: Vec::new(),
             instantiations: FxHashMap::default(),
+            instantiation_hits: 0,
+            instantiation_misses: 0,
         }
+    }
+
+    pub fn file_id(&self) -> FileId {
+        self.file_id
     }
 
     // The private, never-handed-out copy stored for this instantiation, if any. The
     // caller must take a duplicate_named of it rather than use it directly.
     pub fn cached_instantiation(
-        &self,
+        &mut self,
         base: TypeId,
         bindings: &[(TypeParameterId, TypeId)],
     ) -> Option<TypeId> {
-        self.instantiations
-            .get(&base)?
-            .iter()
-            .find(|(stored, _)| stored.as_slice() == bindings)
-            .map(|&(_, pristine)| pristine)
+        let key = (base, binding_fingerprint(bindings));
+        let hit = self
+            .instantiations
+            .get(&key)
+            .and_then(|bucket| {
+                bucket
+                    .iter()
+                    .find(|(stored, _)| stored.as_slice() == bindings)
+            })
+            .map(|&(_, pristine)| pristine);
+        if hit.is_some() {
+            self.instantiation_hits += 1;
+        } else {
+            self.instantiation_misses += 1;
+        }
+        hit
     }
 
     // Only a finished, named instantiation belongs here, and the caller owns that
@@ -171,10 +249,23 @@ impl<'a> TypeNamespace<'a> {
         bindings: Vec<(TypeParameterId, TypeId)>,
         pristine: TypeId,
     ) {
+        let key = (base, binding_fingerprint(&bindings));
         self.instantiations
-            .entry(base)
+            .entry(key)
             .or_default()
             .push((bindings, pristine));
+    }
+
+    /// Counts for performance reports; see NamespaceStats.
+    pub fn stats(&self) -> NamespaceStats {
+        NamespaceStats {
+            entries: self.entries.len(),
+            type_parameters: self.type_param_cache.len(),
+            merged_interfaces: self.merged_interface_parts.len(),
+            instantiations: self.instantiations.values().map(Vec::len).sum(),
+            instantiation_hits: self.instantiation_hits,
+            instantiation_misses: self.instantiation_misses,
+        }
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -351,12 +442,61 @@ impl<'a> TypeNamespace<'a> {
         std::mem::take(&mut self.type_argument_issues)
     }
 
+    pub fn take_declaration_collisions(&mut self) -> Vec<(String, Span)> {
+        std::mem::take(&mut self.declaration_collisions)
+    }
+
+    // Records `name` as declared twice when what is already registered under it cannot
+    // legally coexist with the new declaration. TypeScript allows an interface to merge
+    // with another interface or with a class, and an enum with another enum; this
+    // checker does not model the last two merges (the later declaration still replaces
+    // the earlier entry), so flagging them would report an error tsc does not. Only
+    // pairs that are an error in TypeScript are recorded: an alias on either side, two
+    // classes, or an enum against anything but an enum.
+    fn note_collision(&mut self, name: &str, new_kind: NewKind, span: Span) {
+        let Some(existing) = self.entries.get(name) else {
+            return;
+        };
+        let illegal = match (existing.kind, new_kind) {
+            (DeclKind::TypeAlias(..), _) | (_, NewKind::Alias) => true,
+            (DeclKind::Class(_), NewKind::Class) => true,
+            (DeclKind::Resolved, NewKind::Enum) => false,
+            (DeclKind::Resolved, _) | (_, NewKind::Enum) => true,
+            (DeclKind::Interface(_), NewKind::Interface | NewKind::Class) => false,
+            (DeclKind::Class(_), NewKind::Interface) => false,
+        };
+        if !illegal {
+            return;
+        }
+        if let Some(&first) = self.declaration_spans.get(name)
+            && !self
+                .reported_first_declaration
+                .iter()
+                .any(|seen| seen == name)
+        {
+            self.declaration_collisions.push((name.to_string(), first));
+            self.reported_first_declaration.push(name.to_string());
+        }
+        self.declaration_collisions.push((name.to_string(), span));
+    }
+
+    // Remembers where `name` was first declared. Called after note_collision, so the
+    // declaration being added is never mistaken for the earlier one it collides with.
+    fn remember_declaration(&mut self, name: &str, span: Span) {
+        self.declaration_spans
+            .entry(name.to_string())
+            .or_insert(span);
+    }
+
     pub fn insert_type_alias(
         &mut self,
         name: &str,
         body: &'a TSType<'a>,
         type_parameters: Option<&'a oxc_ast::ast::TSTypeParameterDeclaration<'a>>,
+        span: Span,
     ) {
+        self.note_collision(name, NewKind::Alias, span);
+        self.remember_declaration(name, span);
         self.entries.insert(
             name.to_string(),
             TypeEntry {
@@ -384,6 +524,8 @@ impl<'a> TypeNamespace<'a> {
                 .push(decl);
             return;
         }
+        self.note_collision(name, NewKind::Interface, decl.id.span);
+        self.remember_declaration(name, decl.id.span);
         self.entries.insert(
             name.to_string(),
             TypeEntry {
@@ -395,6 +537,9 @@ impl<'a> TypeNamespace<'a> {
     }
 
     pub fn insert_class(&mut self, name: &str, class: &'a Class<'a>) {
+        let span = class.id.as_ref().map_or_else(|| class.span(), |id| id.span);
+        self.note_collision(name, NewKind::Class, span);
+        self.remember_declaration(name, span);
         self.entries.insert(
             name.to_string(),
             TypeEntry {
@@ -403,6 +548,15 @@ impl<'a> TypeNamespace<'a> {
                 resolving: false,
             },
         );
+    }
+
+    // An enum is registered already resolved, since its member types are built
+    // eagerly. Unlike insert_resolved it is a user-written declaration, so it takes
+    // part in duplicate detection.
+    pub fn insert_enum(&mut self, name: &str, type_id: TypeId, span: Span) {
+        self.note_collision(name, NewKind::Enum, span);
+        self.remember_declaration(name, span);
+        self.insert_resolved(name, type_id);
     }
 
     pub fn insert_resolved(&mut self, name: &str, type_id: TypeId) {
@@ -456,7 +610,7 @@ impl<'a> TypeNamespace<'a> {
         let mut saved = Vec::with_capacity(decl.params.len());
         for (index, param) in decl.params.iter().enumerate() {
             let name = param.name.name.to_string();
-            let id = TypeParameterId::new(param.span().start, index as u32);
+            let id = TypeParameterId::with_file(self.file_id, param.span().start, index as u32);
 
             // Resolved before touching the cache entry, not inside its
             // or_insert_with closure: resolving a constraint needs a full &mut
@@ -691,8 +845,11 @@ impl<'a> TypeNamespace<'a> {
                         Some(decl) => {
                             let mut bindings: Bindings = Vec::with_capacity(decl.params.len());
                             for (index, param) in decl.params.iter().enumerate() {
-                                let parameter_id =
-                                    TypeParameterId::new(param.span().start, index as u32);
+                                let parameter_id = TypeParameterId::with_file(
+                                    self.file_id,
+                                    param.span().start,
+                                    index as u32,
+                                );
                                 let bound = heritage
                                     .type_arguments
                                     .as_ref()

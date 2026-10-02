@@ -152,21 +152,52 @@ impl Hash for Type {
     }
 }
 
-// Identifies a declared type parameter by where it is written in source, not by an
-// arena slot and not by an AST pointer. Two distinct resolutions of the same declared
-// `T` (once while resolving a function's signature, again while checking its body)
-// must agree on this value so both reuse the same `TypeId` for it. A source-derived
-// key is stable across separate parses of unchanged source; a pointer or arena slot
-// is only guaranteed stable within the one parse/allocation that produced it.
+// Names one file of a project. It exists so that identity derived from a source
+// position (below) stays unambiguous once several files share semantic state: byte
+// offset 40 in `a.ts` and byte offset 40 in `b.ts` are different declarations. It is a
+// plain index, not a path, so type identity never depends on a filesystem or an Oxc
+// allocation; ProjectFiles owns the path-to-id mapping.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FileId(u32);
+
+impl FileId {
+    /// The id every single-file check uses.
+    pub const ROOT: Self = Self(0);
+
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
+// Identifies a declared type parameter by the file and position where it is written,
+// not by an arena slot and not by an AST pointer. Two distinct resolutions of the same
+// declared `T` (once while resolving a function's signature, again while checking its
+// body) must agree on this value so both reuse the same `TypeId` for it. A
+// source-derived key is stable across separate parses of unchanged source; a pointer
+// or arena slot is only guaranteed stable within the one parse that produced it. The
+// file component keeps two files' parameters apart when their offsets coincide.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TypeParameterId {
+    file_id: FileId,
     declaration_span_start: u32,
     parameter_index: u32,
 }
 
 impl TypeParameterId {
+    /// A parameter of the root file, for unit tests that build parameters directly.
+    /// The checker itself always uses with_file, because it knows its file.
+    #[cfg(test)]
     pub fn new(declaration_span_start: u32, parameter_index: u32) -> Self {
+        Self::with_file(FileId::ROOT, declaration_span_start, parameter_index)
+    }
+
+    pub fn with_file(file_id: FileId, declaration_span_start: u32, parameter_index: u32) -> Self {
         Self {
+            file_id,
             declaration_span_start,
             parameter_index,
         }

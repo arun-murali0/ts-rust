@@ -18,6 +18,7 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
                     &decl.id.name,
                     &decl.type_annotation,
                     decl.type_parameters.as_deref(),
+                    decl.id.span,
                 );
             }
             Statement::TSInterfaceDeclaration(decl) => {
@@ -31,6 +32,13 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
             Statement::TSEnumDeclaration(decl) => declare_enum(decl, ctx),
             _ => {}
         }
+    }
+
+    for (name, span) in ctx.namespace.take_declaration_collisions() {
+        ctx.error(
+            crate::diagnostic_messages::messages::duplicate_type_declaration(&name),
+            span,
+        );
     }
 
     for stmt in &program.body {
@@ -191,7 +199,8 @@ fn declare_enum(decl: &oxc_ast::ast::TSEnumDeclaration, ctx: &mut CheckContext<'
     // Prints as `Weird`, not the union of its member literals, in a message.
     ctx.arena
         .set_display_name(type_position, decl.id.name.to_string());
-    ctx.namespace.insert_resolved(&decl.id.name, type_position);
+    ctx.namespace
+        .insert_enum(&decl.id.name, type_position, decl.id.span);
 
     let properties = members
         .into_iter()

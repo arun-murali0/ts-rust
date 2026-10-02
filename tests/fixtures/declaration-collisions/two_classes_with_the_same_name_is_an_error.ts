@@ -1,0 +1,2 @@
+class Box {}
+class Box {}

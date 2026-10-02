@@ -39,6 +39,7 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 dhat = { version = "0.3", optional = true }
+smallvec = "1.16"
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
@@ -89,6 +90,12 @@ codegen-units = 1
 # build with cargo and run wasm-bindgen on the result:
 #   cargo build --profile wasm-release --lib --target wasm32-unknown-unknown --features wasm
 #   wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/wasm-release/ts_rust.wasm
+# Release speed with symbols kept, for heap and CPU profilers that need to name frames.
+#   cargo run --profile profiling --features dhat-heap --example dhat_heap
+[profile.profiling]
+inherits = "release"
+debug = true
+
 [profile.wasm-release]
 inherits = "release"
 opt-level = "s"

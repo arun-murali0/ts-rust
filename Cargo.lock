@@ -1403,6 +1403,7 @@ dependencies = [
  "oxc_span",
  "serde",
  "serde-wasm-bindgen",
+ "smallvec",
  "thiserror",
  "tracing",
  "tracing-subscriber",

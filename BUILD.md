@@ -13,7 +13,10 @@ import-cycle handling) is still ts-rust's own work.
 
 ## Stage 1 - Generics completion
 
-Section 6, remaining items (most of §6 is already `[x]`):
+Section 6, remaining items (most of §6 is already `[x]`). Shipped since: inference
+that keeps literals under a primitive or literal bound, explicit type arguments that
+stay in position when one cannot be resolved, and a fingerprint-keyed instantiation
+memo.
 - Inference from return positions (full)
 - Inference priority / multiple candidates (full algorithm)
 - Contextual inference into generic calls
@@ -78,23 +81,26 @@ Dependencies: none.
 
 ## Stage 4 - Narrowing upgrades
 
-Section 9:
-- `instanceof`
-- `in` operator narrowing
-- Discriminated unions
+Section 9. Shipped: `instanceof`, `in`, discriminated unions (a property of an
+identifier, in `if` and `switch`), `switch` grouped labels / default / `typeof`,
+`&&` / `||` conditions, assignment narrowing, branch joins and loop exit
+narrowing. See docs/control-flow-narrowing.md.
+
+Remaining:
 - Switch exhaustiveness
 - User-defined type predicates
 - Assertion functions (`asserts x is T`)
-- Equality narrowing (general)
-- Assignment / property / element narrowing
+- Property-path narrowing (`a.b.kind`, `a.b !== null`), which needs the narrowing
+  key to become a path instead of a symbol
+- Equality between two variables, optional-chain narrowing, `switch (true)`
+- A join after `switch`, and narrowing of captured variables inside closures
 
-Why here: discriminated unions and `instanceof` are everyday patterns
-(error handling, API response shapes, class hierarchies). Self-contained in
-`bridge/narrow.rs` - can run in parallel with Stage 3, since discriminated
-unions benefit from Stage 3's union/intersection reduction but nothing else
-here depends on it.
+Why here: the shipped forms cover the everyday patterns (error handling, API
+response shapes, class hierarchies). The remaining items each need something new
+(a path-shaped key, a predicate type on function types, an exhaustiveness check
+against `never`) so they are separate pieces of work, not more handlers.
 
-Dependencies: loosely Stage 3 (discriminated unions only).
+Dependencies: property paths and predicates are independent of Stage 3.
 
 ---
 

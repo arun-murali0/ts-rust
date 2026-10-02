@@ -135,7 +135,11 @@ pub fn resolve_ts_type(
             let mut bindings: Vec<(TypeParameterId, TypeId)> =
                 Vec::with_capacity(decl.params.len());
             for (index, param) in decl.params.iter().enumerate() {
-                let parameter_id = TypeParameterId::new(param.span().start, index as u32);
+                let parameter_id = TypeParameterId::with_file(
+                    namespace.file_id(),
+                    param.span().start,
+                    index as u32,
+                );
                 let bound = match reference
                     .type_arguments
                     .as_ref()

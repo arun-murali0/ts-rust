@@ -62,6 +62,8 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 - [x] Interfaces
 - [x] Interface extension (`extends`)
 - [x] Interface declaration merging (same file)
+- [x] Duplicate type declarations reported (alias, class and enum collisions; interface and class merges are accepted)
+- [ ] Class and interface merging, enum merging (accepted without error, but the later declaration replaces the earlier one)
 - [ ] Interface merging across files / packages
 - [x] Classes as types (instance type)
 - [ ] Class static side vs instance side (full)
@@ -166,6 +168,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 ### 6.2 Inference
 - [x] Inference from arguments
 - [x] Multi-candidate inference (basic widen)
+- [x] Literal-preserving inference under a primitive or literal bound
 - [~] Inference from union positions
 - [ ] Inference from return positions (full)
 - [ ] Inference priority / multiple candidates (full algorithm)
@@ -177,7 +180,8 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 ### 6.3 Instantiation
 - [x] Substitution into structure
 - [~] Recursive generic forms (guards; not full)
-- [ ] Instantiation cache / canonicalization
+- [x] Instantiation cache (fingerprint key, exact comparison on a hit)
+- [ ] Instantiation canonicalization
 - [ ] Generic type parameters as type arguments
 - [ ] Constraint checking under substitution (full)
 
@@ -237,18 +241,22 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 - [x] `typeof` narrowing
 - [x] Nullish equality narrowing
 - [x] Truthiness narrowing
-- [ ] Equality narrowing (general)
-- [ ] `instanceof`
-- [ ] `in` operator narrowing
-- [ ] Discriminated unions
+- [~] Equality narrowing (literals, booleans and `unknown`; not variable against variable)
+- [x] `instanceof` (identifier against a declared class)
+- [x] `in` operator narrowing (string-literal key on an identifier)
+- [x] Discriminated unions (a property of an identifier, in `if` and `switch`)
+- [x] `switch` narrowing (grouped labels, default as the complement, `switch (typeof x)`)
+- [x] `&&` / `||` condition narrowing
 - [ ] Switch exhaustiveness
 - [ ] User-defined type predicates
 - [ ] Assertion functions (`asserts x is T`)
-- [ ] Assignment narrowing
+- [x] Assignment narrowing (identifier targets)
+- [x] Branch joins (after `if`/`else`, after loops)
+- [~] Loop test and exit narrowing (the body, and after a loop with no `break`)
 - [ ] Property / element narrowing
 - [ ] Aliasing / CFA of captured variables
 - [ ] Control-flow graph type propagation (full)
-- [ ] Loop fixed-point analysis
+- [ ] Loop fixed-point analysis (the body is walked once)
 - [ ] Unreachable code analysis `[~]`
 - [ ] Definite assignment analysis
 - [ ] `this` narrowing
@@ -324,7 +332,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 - [x] Core type errors (assignability, arity, constraints)
 - [~] Error recovery without cascades (`Error` type)
 - [ ] Related information / error chains
-- [ ] Exact `tsc` error codes / messages
+- [~] Exact `tsc` error codes / messages (wording matches for the strict fixture set)
 - [ ] Suppression (`@ts-ignore` / `@ts-expect-error`)
 - [ ] Suggestion diagnostics
 
@@ -337,7 +345,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 | Core primitives / unions / objects / functions | High |
 | Generics (functions, interfaces, aliases, classes) | High |
 | Classes / structural subtyping | Medium–high |
-| Narrowing | Medium (limited forms) |
+| Narrowing | Medium–high (property discriminants, `in`, `instanceof`, joins; no property paths or predicates) |
 | Tuples / intersections / index signatures | Low / none |
 | `keyof` / indexed / mapped / conditional / template | None |
 | Overloads / full contextual typing | None / low |

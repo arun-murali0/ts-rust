@@ -42,6 +42,7 @@ pub enum DiagnosticCode {
     // 1500s -- generics
     TypeArgumentCountMismatch,
     TypeIsNotGeneric,
+    DuplicateTypeDeclaration,
 
     // 1400s -- implicit any
     ImplicitAnyParameter,
@@ -92,6 +93,7 @@ impl DiagnosticCode {
 
             TypeArgumentCountMismatch => "TSR1501",
             TypeIsNotGeneric => "TSR1502",
+            DuplicateTypeDeclaration => "TSR1503",
 
             ImplicitAnyParameter => "TSR1401",
             ImplicitAnyElement => "TSR1402",
