@@ -195,7 +195,9 @@ pub(super) fn check_class_declaration(
                     {
                         if !ctx.semantic().is_assignable(actual, declared) {
                             ctx.error(
-                                crate::diagnostic_messages::messages::static_field_initializer_mismatch(),
+                                crate::diagnostic_messages::messages::static_field_initializer_mismatch(
+                                    &ctx.arena, actual, declared,
+                                ),
                                 initializer.span(),
                             );
                         }

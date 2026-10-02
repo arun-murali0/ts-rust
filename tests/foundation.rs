@@ -69,7 +69,7 @@ fn function_return_mismatch_is_caught() {
         1,
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
-    assert!(diagnostics[0].message.contains("Return type"));
+    assert!(diagnostics[0].message.contains("is not assignable to type"));
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn binary_operator_mismatch_is_caught() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.message.contains("cannot be applied")),
+            .any(|d| d.message.contains("arithmetic operation")),
         "expected an operator-mismatch diagnostic, got: {diagnostics:?}"
     );
 }

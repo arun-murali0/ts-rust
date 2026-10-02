@@ -120,7 +120,7 @@ fn bare_generic_reference_without_type_arguments_is_reported_as_an_error() {
     assert!(
         diagnostics[0]
             .message
-            .contains("requires 1 type argument(s), but 0 were given"),
+            .contains("requires 1 type argument(s)"),
         "got: {diagnostics:?}"
     );
 }
@@ -139,7 +139,7 @@ fn too_few_type_arguments_is_reported_as_an_error() {
     assert!(
         diagnostics[0]
             .message
-            .contains("requires 2 type argument(s), but 1 were given"),
+            .contains("requires 2 type argument(s)"),
         "got: {diagnostics:?}"
     );
 }
@@ -157,7 +157,7 @@ fn too_many_type_arguments_is_reported_as_an_error() {
     assert!(
         diagnostics[0]
             .message
-            .contains("requires 1 type argument(s), but 2 were given"),
+            .contains("requires 1 type argument(s)"),
         "got: {diagnostics:?}"
     );
 }
@@ -198,7 +198,7 @@ fn type_argument_violating_an_interface_constraint_is_reported() {
     assert!(
         diagnostics[0]
             .message
-            .contains("does not satisfy the constraint of type parameter 'T'"),
+            .contains("does not satisfy the constraint"),
         "got: {diagnostics:?}"
     );
 }
@@ -217,7 +217,7 @@ fn type_argument_violating_an_alias_constraint_is_reported() {
     assert!(
         diagnostics[0]
             .message
-            .contains("does not satisfy the constraint of type parameter 'T'"),
+            .contains("does not satisfy the constraint"),
         "got: {diagnostics:?}"
     );
 }
@@ -310,7 +310,7 @@ fn constraint_is_checked_with_the_other_parameters_substituted() {
     assert!(
         errors[0]
             .message
-            .contains("does not satisfy the constraint of type parameter 'U'"),
+            .contains("does not satisfy the constraint"),
         "got: {diagnostics:?}"
     );
 }
@@ -337,7 +337,7 @@ fn type_parameter_argument_is_checked_through_its_bound() {
         diagnostics[0].message.contains("Type 'V'")
             && diagnostics[0]
                 .message
-                .contains("does not satisfy the constraint of type parameter 'T'"),
+                .contains("does not satisfy the constraint"),
         "got: {diagnostics:?}"
     );
 }

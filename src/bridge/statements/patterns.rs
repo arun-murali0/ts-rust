@@ -116,7 +116,9 @@ fn bind_array_pattern(
         Type::Any | Type::Error => (type_id, false),
         _ => {
             ctx.error(
-                crate::diagnostic_messages::messages::array_destructuring_requires_array(),
+                crate::diagnostic_messages::messages::array_destructuring_requires_array(
+                    &ctx.arena, type_id,
+                ),
                 array.span(),
             );
             (ctx.arena.error(), false)

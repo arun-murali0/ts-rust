@@ -59,7 +59,6 @@ pub struct TypeArgumentIssue {
     pub required: usize,
     // Most it may give: every declared parameter.
     pub expected: usize,
-    pub given: usize,
     pub span: Span,
 }
 
@@ -297,7 +296,6 @@ impl<'a> TypeNamespace<'a> {
         name: &str,
         required: usize,
         expected: usize,
-        given: usize,
         span: Span,
     ) {
         if self
@@ -311,7 +309,6 @@ impl<'a> TypeNamespace<'a> {
             name: name.to_string(),
             required,
             expected,
-            given,
             span,
         });
     }

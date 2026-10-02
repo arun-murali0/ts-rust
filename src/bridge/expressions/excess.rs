@@ -46,7 +46,9 @@ pub(crate) fn check_excess_properties(
             .find(|p| *p.name == *key.name.as_str())
         {
             None => ctx.error(
-                crate::diagnostic_messages::messages::excess_property(&key.name),
+                crate::diagnostic_messages::messages::excess_property(
+                    &ctx.arena, &key.name, target,
+                ),
                 key.span,
             ),
             Some(target_property) => {
