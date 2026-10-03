@@ -312,7 +312,7 @@ fn a_rewrite_with_the_same_bytes_is_not_a_change_but_new_bytes_are() {
     let path = dir.join("a.ts");
     fs::write(&path, "const a: number = 1;").expect("write should succeed");
 
-    let graph = ModuleGraph::build(&[path.clone()], &ModuleResolver::new())
+    let graph = ModuleGraph::build(std::slice::from_ref(&path), &ModuleResolver::new())
         .expect("scratch graph should build");
     assert!(graph.changed_files().is_empty());
 
@@ -336,7 +336,7 @@ fn a_deleted_file_counts_as_changed() {
     let path = dir.join("a.ts");
     fs::write(&path, "const a: number = 1;").expect("write should succeed");
 
-    let graph = ModuleGraph::build(&[path.clone()], &ModuleResolver::new())
+    let graph = ModuleGraph::build(std::slice::from_ref(&path), &ModuleResolver::new())
         .expect("scratch graph should build");
     fs::remove_file(&path).expect("remove should succeed");
     assert_eq!(graph.changed_files(), vec![FileId::new(0)]);
