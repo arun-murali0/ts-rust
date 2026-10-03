@@ -87,7 +87,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 - [ ] Property renaming / excess property checking (full freshness rules) `[~]`
 - [ ] Private / protected fields (type checking)
 - [ ] `#private` fields (type side)
-- [ ] Parameter properties in constructors
+- [x] Parameter properties in constructors (`public` / `private` / `protected` / `readonly` parameters become instance properties)
 - [ ] Auto-accessors (type side)
 
 ### 3.2 Index signatures
@@ -252,12 +252,13 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 - [ ] Assertion functions (`asserts x is T`)
 - [x] Assignment narrowing (identifier targets)
 - [x] Branch joins (after `if`/`else`, after loops)
+- [x] Truthiness of a property narrows its parent union (`if (result.ok)`)
 - [~] Loop test and exit narrowing (the body, and after a loop with no `break`)
 - [ ] Property / element narrowing
 - [ ] Aliasing / CFA of captured variables
 - [ ] Control-flow graph type propagation (full)
 - [ ] Loop fixed-point analysis (the body is walked once)
-- [ ] Unreachable code analysis `[~]`
+- [x] Unreachable code analysis (every statement list, literal `true` / `false` conditions; matches tsc on the probe set)
 - [ ] Definite assignment analysis
 - [ ] `this` narrowing
 
@@ -329,6 +330,9 @@ These are regression-tested in `tests/module_resolution.rs`. They are about find
 ---
 
 ## 14. Standard library & builtins (typing)
+
+- [x] Empty array literal typed `never[]` (assignable to any array type); an unannotated `const xs = []` is `any[]`
+- [ ] Array methods (`push`, `map`, `filter`, ...). Only `length` is modelled, so a call to any array method is reported as a missing property. This is the largest remaining source of false errors on everyday code, and it needs generic method typing with contextual callback inference
 
 - [~] `Array` / `ReadonlyArray`
 - [~] `Promise` (opaque / partial)

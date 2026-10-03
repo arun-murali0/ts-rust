@@ -436,7 +436,7 @@ fn optional_flags(params: &FormalParameters) -> Vec<bool> {
 
 // None for a destructured pattern, which has no single name -- treated as
 // unnamed rather than guessed.
-fn binding_name(pattern: &BindingPattern) -> Option<std::rc::Rc<str>> {
+pub(crate) fn binding_name(pattern: &BindingPattern) -> Option<std::rc::Rc<str>> {
     match pattern {
         BindingPattern::BindingIdentifier(id) => Some(id.name.as_str().into()),
         BindingPattern::AssignmentPattern(assignment) => binding_name(&assignment.left),

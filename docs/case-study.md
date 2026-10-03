@@ -211,3 +211,56 @@ checks each file there alone, where every import would be an error.
 5. Keep a deliberate non-decision written down, with the reason, so it is not reopened by
    accident.
 6. A fact that could not be resolved is data. Keep it where a later phase can report it.
+
+## 11. Unreachable code: cover the container, not the construct
+
+**Problem.** The first walker looked for dead statements by descending into the constructs
+it knew: function declarations, `if`, loops, `switch`. A comparison against `tsc` on a
+probe set showed the checker never produced a false report but missed one in every
+construct the walker had not been taught: arrow bodies, callbacks, class methods,
+constructors and getters, `try`/`catch`/`finally`, `for-of`/`for-in`, `do-while`, labels.
+On real code those are most of the code, so most of the differences against `tsc` were
+this one diagnostic.
+
+**Choice.** Dead code is a property of a statement *list*, so the walker hooks the list
+itself through the AST visitor and checks every list the visitor reaches. No construct has
+to be named, and a construct added to the language later is covered for free. The control
+flow graph still answers "can this statement run", so reachability is not re-derived.
+
+**Constant conditions are the exception, and a deliberately small one.** tsc treats a
+literal `true` or `false` condition as known; oxc's graph does not. The walker adds
+exactly that rule for literals, and nothing cleverer, so a condition it does not recognise
+costs a missed report and never a false one.
+
+**What tsc skips, this skips.** Function, interface and type alias declarations, empty
+statements, `var` without an initializer and `const enum`. A dead block is not reported
+itself, only its first executable statement, as in tsc.
+
+**Checked how.** 72 fixtures, each compared with `tsc` line for line, split into dead code
+in every construct and valid code that must stay silent. The first run of the new walker
+disagreed on one fixture, which turned out to be the block rule above.
+
+## 12. Type parameters in scope are fixed, not inferred
+
+**Problem.** Inside `function map<T, U>(v: T, fn: (x: T) => U): U`, the call `fn(v)` was
+treated as a call to a generic function: every type parameter found in the callee's type
+was inferred, so `U` was never bound and the call returned `unknown`.
+
+**Choice.** The namespace records which declarations the checker is currently inside. A
+parameter of such a declaration that appears in a callee's type is bound to itself, which
+makes substitution leave it alone. The exception is a call written as the name of a
+function or class declaration: that instantiates the declaration afresh even from inside
+its own body, so a recursive call and `new Box(x)` inside `Box` still infer.
+
+## 13. Four patterns that were wrong on almost every file
+
+These were found by probing everyday code against the checker, not by reading it, and each
+was a false error: an empty array literal where an array is expected (typed `unknown[]`,
+now `never[]`), constructor parameter properties (`constructor(public x: T)` declared no
+property), a boolean discriminant tested by truthiness (`if (r.ok)`), and the generic
+callback call above. The lesson is the one in section 0: the cheapest way to find false
+errors is to run the code people actually write, and keep each such case as a fixture.
+
+Array methods (`push`, `map`, `filter`) are the largest false-error source still open,
+because only `length` is modelled; it needs generic method typing with callback inference
+and is the next piece of work, not a patch.

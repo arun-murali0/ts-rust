@@ -142,6 +142,8 @@ this cannot decide it, and a kept member can only cost precision.
 
 A lone object type, as opposed to a union, is returned unchanged.
 
+A property tested by truthiness narrows the same way: `if (result.ok)` keeps the members whose `ok` can be truthy, and the `else` side keeps those where it can be falsy. A boolean discriminant (`ok: true` against `ok: false`) is therefore narrowed without a comparison. A plain `number` or `string` property is neither always truthy nor always falsy, so it never removes a member.
+
 ## 12. `switch`
 
 `switch (k)`, `switch (shape.kind)` and `switch (typeof x)` narrow the variable in each
