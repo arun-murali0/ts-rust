@@ -7,6 +7,8 @@ mod diagnostics;
 mod error;
 mod fxhash;
 mod line_index;
+#[cfg(feature = "module-resolution")]
+mod module_resolution;
 mod namespace;
 mod project;
 mod semantic;
@@ -27,6 +29,12 @@ pub use diagnostics::{Diagnostic, Severity};
 pub use error::CheckerError;
 
 pub use line_index::LineIndex;
+
+#[cfg(feature = "module-resolution")]
+pub use module_resolution::{
+    FileFingerprint, FileOutcome, FileReport, ModuleEdge, ModuleError, ModuleGraph, ModuleRequest,
+    ModuleResolver, ModuleScan, ProjectReport, check_project, content_hash, scan_module_requests,
+};
 
 pub use arena::TypeArenaStats;
 pub use bridge::CheckMetrics;

@@ -289,7 +289,22 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 - [ ] Module augmentation
 - [ ] Global augmentation
 - [ ] UMD / global scripts vs modules
-- [ ] Path mapping / package types (`.d.ts`)
+- [~] Path mapping / package types (`.d.ts`): package `types` and `exports` resolve; tsconfig `paths` and `baseUrl` do not
+
+### 11.1 Project graph (resolution layer, `module-resolution` feature)
+
+These are regression-tested in `tests/module_resolution.rs`. They are about finding and ordering files, so they are not part of the tsc diagnostic comparison, and none of them binds a name across files.
+
+- [x] Extensionless, directory (`index`) and `.js`-to-`.ts` specifiers
+- [x] Package `exports` with the `types` condition, subpath exports and `#imports`
+- [x] Nested `node_modules` shadowing a hoisted package
+- [x] Type-only imports and re-exports recorded as distinct edges
+- [x] Unresolved imports kept as edges, syntax errors flagged
+- [x] Import cycles (including a file importing itself) and dependency layers
+- [x] Parallel project check with a report for every file, in `FileId` order
+- [x] Changed-file detection (fingerprint, then content hash)
+- [ ] tsconfig `paths` / `baseUrl`
+- [ ] Re-check only changed files and their dependents
 
 ---
 
@@ -349,7 +364,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 | Tuples / intersections / index signatures | Low / none |
 | `keyof` / indexed / mapped / conditional / template | None |
 | Overloads / full contextual typing | None / low |
-| Modules / project / `.d.ts` | None |
+| Modules / project / `.d.ts` | Resolution and project graph only (opt-in feature); no cross-file binding |
 | Lib utility types | Minimal |
 
 **To “cover all TS types”:** every unchecked item above is in scope.  

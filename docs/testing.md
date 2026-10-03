@@ -74,6 +74,7 @@ The repository shortcut is:
 The repository contains:
 
 - Criterion benchmarks in `benches/checker_benchmark.rs`;
+- module graph benchmarks in `benches/module_graph_benchmark.rs` (graph build, layers, cycles, change detection and the parallel project check), which only build with `--features module-resolution`;
 - cache and memo counters, readable from a `CheckSession` after a check (`last_metrics`), for regressions that wall-clock time hides;
 - IAI callgrind benchmarks in `benches/checker_iai.rs`;
 - shared complex fixtures in `benches/support/complex_fixtures.rs`;

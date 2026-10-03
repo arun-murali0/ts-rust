@@ -40,6 +40,9 @@ serde-wasm-bindgen = { version = "0.6", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 dhat = { version = "0.3", optional = true }
 smallvec = "1.16"
+oxc_resolver = { version = "=11.24.3", optional = true }
+rayon = { version = "1.10", optional = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"], optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
@@ -62,6 +65,11 @@ harness = false
 name = "checker_iai"
 harness = false
 
+[[bench]]
+name = "module_graph_benchmark"
+harness = false
+required-features = ["module-resolution"]
+
 [features]
 default = []
 wasm = [
@@ -71,6 +79,11 @@ wasm = [
     "dep:console_error_panic_hook",
 ]
 dhat-heap = ["dep:dhat"]
+
+# Project-level module resolution and the module graph. Off by default because it
+# reads the filesystem through oxc_resolver, which single-file, in-memory and wasm
+# callers neither have nor want.
+module-resolution = ["dep:oxc_resolver", "dep:rayon", "dep:xxhash-rust"]
 
 # Native build: what `cargo build --release` and the criterion / iai-callgrind
 # benches (cargo's bench profile inherits release) measure. Speed matters here and

@@ -110,6 +110,8 @@ This separation makes semantic algorithms reusable by future tooling and typed-I
 | `diagnostic_view.rs` | Converts raw byte offsets into line/column for display |
 | `fxhash.rs` | In-tree FxHash reimplementation, used where a non-DoS-resistant hasher is acceptable |
 | `line_index.rs` | Source-position conversion |
+| `project.rs` | Path to `FileId` identity for the files of a project |
+| `module_resolution/` | Opt-in project layer: resolver wrapper, import discovery, module graph with cycles and layers, parallel project check, change detection |
 | `wasm.rs` | WASM-facing adaptation |
 
 ## Feature modules
@@ -329,6 +331,8 @@ Project
 Worker-local state should include diagnostics, narrowing, current function/class state, and temporary inference state.
 
 Shared project information should become immutable or snapshot-based after indexing.
+
+The first part of this exists behind the `module-resolution` feature: `ModuleGraph` is built synchronously (it assigns `FileId`s and edges), and `check_project` then checks each dependency layer in parallel, one `CheckSession` per file, sorting the report by `FileId`. The graph is not yet shared with the checker, so files are still checked independently. See [module-resolution.md](module-resolution.md).
 
 The eventual parallel boundary is the file/program/session, not individual AST nodes. Do not add locks to the semantic hot path merely to prepare for multithreading.
 

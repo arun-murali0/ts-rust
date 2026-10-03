@@ -3,6 +3,9 @@ dhat-heap.json
 .harness/
 cfg_dump.txt
 node_modules
+# The module resolution fixtures are packages on disk by design.
+!tests/module-resolution-fixtures/**/node_modules
+!tests/module-resolution-fixtures/**/node_modules/**
 
 # wasm-pack build output (see pkg-template/ for the shipped package.json)
 /pkg/

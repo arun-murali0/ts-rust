@@ -108,6 +108,8 @@ immutable project index
   └── file C → CheckContext
 ```
 
+The graph, layering and parallel project check are in place behind the `module-resolution` feature (see [module-resolution.md](module-resolution.md)). What remains is the part that makes the graph matter to the checker: an export table per checked file and import sites that look into it.
+
 Parallelism belongs at the file/program/session boundary. The current checker should not gain locks merely in anticipation of this future.
 
 ## Performance
