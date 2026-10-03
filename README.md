@@ -112,6 +112,8 @@ src/
 ├── diagnostic_view.rs
 ├── fxhash.rs
 ├── line_index.rs
+├── project.rs
+├── module_resolution/     # opt-in `module-resolution` feature
 ├── error.rs
 ├── wasm.rs
 ├── semantic/
@@ -150,7 +152,8 @@ tests/
 ├── classes_inheritance.rs
 ├── expression_program_checking.rs
 ├── parameters_destructuring.rs
-└── generics_tier1.rs
+├── generics_tier1.rs
+└── module_resolution.rs   # needs --features module-resolution
 
 tests/fixtures/
 ├── foundation/
@@ -167,6 +170,8 @@ tests/fixtures/
 ├── builtin-generics/
 ├── interface-methods/
 └── unreachable-code/
+
+tests/module-resolution-fixtures/   # small projects on disk, not checked by the tsc comparison
 
 docs/
 ├── README.md
@@ -262,6 +267,7 @@ Start with the [documentation index](docs/README.md), then inspect the relevant 
 | Classes and Inheritance | `tests/classes_inheritance.rs` | `tests/fixtures/classes-inheritance/` | [Classes and Inheritance](docs/classes-inheritance.md) |
 | Expression and Program Checking | `tests/expression_program_checking.rs` | `tests/fixtures/expression-program-checking/` | [Expression and Program Checking](docs/expression-program-checking.md) |
 | Parameters and Destructuring | `tests/parameters_destructuring.rs` | `tests/fixtures/parameters-destructuring/` | [Parameters and Destructuring](docs/parameters-destructuring.md) |
+| Module Resolution | `tests/module_resolution.rs` (feature `module-resolution`) | `tests/module-resolution-fixtures/` | [Module Resolution](docs/module-resolution.md) |
 | Generics | `tests/generics_tier1.rs`, `tests/generics_tier2.rs`, `tests/generic_classes.rs`, `tests/recursive_types.rs`, `tests/builtin_generics.rs`, `tests/interface_methods.rs` | `tests/fixtures/generics-tier1/`, `generics-tier2/`, `generic-classes/`, `recursive-types/`, `builtin-generics/`, `interface-methods/` | [Generics](docs/generics.md) |
 
 
@@ -271,6 +277,7 @@ Start with [docs/README.md](docs/README.md) for the milestone map and architectu
 
 - [Architecture](docs/architecture.md): ownership, dependencies, semantic boundaries, and future scaling.
 - [Roadmap](docs/roadmap.md): the next semantic capabilities and their intended order.
+- [Module Resolution](docs/module-resolution.md): the opt-in project layer (resolver, module graph, cycles, layers, parallel project check).
 - [Testing](docs/testing.md): fixture conventions, regression policy, benchmarks, and compatibility harness.
 - [Purpose and boundaries](docs/purpose-and-overdesign.md): why the project exists and what it deliberately does not rebuild.
 
