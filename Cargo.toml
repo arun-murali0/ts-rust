@@ -70,6 +70,11 @@ name = "module_graph_benchmark"
 harness = false
 required-features = ["module-resolution"]
 
+[[bench]]
+name = "module_graph_iai"
+harness = false
+required-features = ["module-resolution"]
+
 [features]
 default = []
 wasm = [
@@ -105,6 +110,7 @@ codegen-units = 1
 #   wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/wasm-release/ts_rust.wasm
 # Release speed with symbols kept, for heap and CPU profilers that need to name frames.
 #   cargo run --profile profiling --features dhat-heap --example dhat_heap
+# Add module-resolution to the features to include the multi-file project workloads.
 [profile.profiling]
 inherits = "release"
 debug = true
