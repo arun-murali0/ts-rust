@@ -9,7 +9,7 @@ use super::super::narrow::{
     NarrowState, join_states, narrow_condition, narrow_switch_case, narrow_switch_default,
     switch_discriminant,
 };
-use super::{check_statement, check_variable_declaration, statement_always_exits};
+use super::{check_statement, check_variable_declaration, contains_break, statement_always_exits};
 
 // Where control flow joins after an `if`. What the code after the statement sees
 // depends on which branches can fall out the bottom, because a branch that always
@@ -54,34 +54,6 @@ pub(super) fn check_if_statement(
         (false, false) => join_states(&consequent_end, &alternate_end, &mut ctx.arena),
         (true, true) => outer_narrow,
     };
-}
-
-// Whether a `break` appears anywhere inside `stmt`. Deliberately generous: a break
-// that belongs to a nested loop or switch is counted too, and a `try` or `with` is
-// assumed to hide one, because the only use of this answer is to decide that a loop
-// can only be left by its test failing, and a false "yes there is a break" merely
-// skips a narrowing. A function body is not entered: a break cannot cross it.
-fn contains_break(stmt: &Statement) -> bool {
-    match stmt {
-        Statement::BreakStatement(_) => true,
-        Statement::BlockStatement(block) => block.body.iter().any(contains_break),
-        Statement::IfStatement(if_stmt) => {
-            contains_break(&if_stmt.consequent)
-                || if_stmt.alternate.as_ref().is_some_and(contains_break)
-        }
-        Statement::WhileStatement(inner) => contains_break(&inner.body),
-        Statement::DoWhileStatement(inner) => contains_break(&inner.body),
-        Statement::ForStatement(inner) => contains_break(&inner.body),
-        Statement::ForInStatement(inner) => contains_break(&inner.body),
-        Statement::ForOfStatement(inner) => contains_break(&inner.body),
-        Statement::LabeledStatement(inner) => contains_break(&inner.body),
-        Statement::SwitchStatement(inner) => inner
-            .cases
-            .iter()
-            .any(|case| case.consequent.iter().any(contains_break)),
-        Statement::TryStatement(_) | Statement::WithStatement(_) => true,
-        _ => false,
-    }
 }
 
 // What the code after a loop sees. The loop test narrows the body (`while (x !== null)

@@ -51,7 +51,12 @@ enum DeclKind<'a> {
 // Opaque token returned by push_type_params and consumed by pop_type_params.
 // Carries whatever each shadowed name previously pointed to, so restoring is
 // self-contained and does not need the caller to remember which names were pushed.
-pub struct TypeParamScope<'a>(Vec<(String, Option<TypeEntry<'a>>)>);
+pub struct TypeParamScope<'a> {
+    saved: Vec<(String, Option<TypeEntry<'a>>)>,
+    // How many entries this scope added to active_type_params, so popping it removes
+    // exactly those and leaves any enclosing scope's in place.
+    activated: usize,
+}
 
 struct TypeEntry<'a> {
     kind: DeclKind<'a>,
@@ -93,6 +98,14 @@ pub struct TypeNamespace<'a> {
     file_id: FileId,
 
     entries: FxHashMap<String, TypeEntry<'a>>,
+
+    // The type parameters whose declaration the checker is currently inside: those of
+    // the function, class, interface or alias whose signature or body is being
+    // resolved or checked, innermost last. A call made inside such a body may mention
+    // them in the callee's type (calling a parameter typed `(x: T) => U` inside
+    // `map<T, U>`), and they must stay as they are there instead of being inferred as
+    // if the callee had declared them. See is_type_param_in_scope.
+    active_type_params: Vec<TypeParameterId>,
 
     // Keyed by TypeParameterId (file and source position, see that type in types.rs)
     // rather than by name or by an AST pointer, so a generic function's signature,
@@ -193,6 +206,7 @@ impl<'a> TypeNamespace<'a> {
         Self {
             file_id,
             entries: FxHashMap::default(),
+            active_type_params: Vec::new(),
             merged_interface_parts: FxHashMap::default(),
             declaration_collisions: Vec::new(),
             declaration_spans: FxHashMap::default(),
@@ -206,6 +220,19 @@ impl<'a> TypeNamespace<'a> {
             instantiation_hits: 0,
             instantiation_misses: 0,
         }
+    }
+
+    /// Whether `id` belongs to a declaration the checker is currently inside. Inference
+    /// treats such a parameter as a fixed type, not something to solve for: `T` inside
+    /// `map<T, U>` is one particular unknown type for the whole body.
+    pub fn is_type_param_in_scope(&self, id: TypeParameterId) -> bool {
+        self.active_type_params.contains(&id)
+    }
+
+    /// The GenericParameter node already allocated for `id`, if its declaration has been
+    /// pushed before.
+    pub fn type_param_node(&self, id: TypeParameterId) -> Option<TypeId> {
+        self.type_param_cache.get(&id).copied()
     }
 
     pub fn file_id(&self) -> FileId {
@@ -604,7 +631,10 @@ impl<'a> TypeNamespace<'a> {
         decl: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
     ) -> TypeParamScope<'a> {
         let Some(decl) = decl else {
-            return TypeParamScope(Vec::new());
+            return TypeParamScope {
+                saved: Vec::new(),
+                activated: 0,
+            };
         };
 
         let mut saved = Vec::with_capacity(decl.params.len());
@@ -644,12 +674,19 @@ impl<'a> TypeNamespace<'a> {
 
             saved.push((name.clone(), self.entries.remove(&name)));
             self.insert_resolved(&name, type_id);
+            self.active_type_params.push(id);
         }
-        TypeParamScope(saved)
+        let activated = saved.len();
+        TypeParamScope { saved, activated }
     }
 
     pub fn pop_type_params(&mut self, scope: TypeParamScope<'a>) {
-        for (name, saved_entry) in scope.0 {
+        let keep = self
+            .active_type_params
+            .len()
+            .saturating_sub(scope.activated);
+        self.active_type_params.truncate(keep);
+        for (name, saved_entry) in scope.saved {
             match saved_entry {
                 Some(entry) => {
                     self.entries.insert(name, entry);
@@ -920,6 +957,32 @@ impl<'a> TypeNamespace<'a> {
                         false,
                         true,
                     );
+                }
+
+                // `constructor(public x: number, readonly y: string)` declares the
+                // instance properties `x` and `y` as well as the parameters. A parameter
+                // with no modifier is only a parameter. As with a field, a parameter
+                // property this checker cannot type (no annotation, or a destructured
+                // pattern) makes the class unresolvable instead of silently dropping a
+                // property the source plainly declares.
+                ClassElement::MethodDefinition(method)
+                    if method.kind == MethodDefinitionKind::Constructor =>
+                {
+                    for param in &method.value.params.items {
+                        if param.accessibility.is_none() && !param.readonly {
+                            continue;
+                        }
+                        let name = crate::type_annotation::binding_name(&param.pattern)?;
+                        let annotation = param.type_annotation.as_ref()?;
+                        let type_id = resolve_type_annotation(annotation, self, arena)?;
+                        upsert_property(
+                            &mut properties,
+                            name.to_string(),
+                            type_id,
+                            param.optional,
+                            false,
+                        );
+                    }
                 }
 
                 _ => {}

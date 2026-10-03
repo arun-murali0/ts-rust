@@ -92,7 +92,10 @@ fn upsert_property(properties: &mut Vec<PropertyEntry>, entry: PropertyEntry) {
 // Each element's type is widened (a literal 5 becomes number) before being added
 // to the element-type union, matching how [1, 2, 3] should infer as number[], not
 // a union of three numeric literal types. An empty array literal has nothing to
-// infer an element type from, so it defaults to unknown[] rather than guessing.
+// infer an element type from, so it is never[]: the type with no elements, assignable to
+// an array of anything, which is what makes `const xs: number[] = []`, `return []` and
+// `f([])` valid. A variable declared without an annotation widens it to any[] (see
+// types::widen), because tsc treats `const xs = []` as an array that fills up later.
 pub(super) fn infer_array_expression_type(
     array: &oxc_ast::ast::ArrayExpression,
     scoping: &Scoping,
@@ -113,7 +116,7 @@ pub(super) fn infer_array_expression_type(
     }
 
     let element_type = match element_types.len() {
-        0 => ctx.arena.unknown(),
+        0 => ctx.arena.never(),
         1 => element_types[0],
         _ => ctx.arena.alloc_union(element_types),
     };
