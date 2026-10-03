@@ -231,6 +231,22 @@ pub fn narrow_condition(
             by_symbol(ctx, symbol_id, narrow_truthy)
         }
 
+        // `if (result.ok)`: the truthiness of a property narrows the object itself when it
+        // is a union whose members disagree about that property, which is how a boolean
+        // discriminant (`ok: true` against `ok: false`) is tested without a comparison.
+        Expression::StaticMemberExpression(member) if !member.optional => {
+            let Expression::Identifier(ident) = &member.object else {
+                return empty_pair();
+            };
+            let Some(symbol_id) = resolve_symbol_id(ident, scoping) else {
+                return empty_pair();
+            };
+            let property = member.property.name.to_string();
+            by_symbol(ctx, symbol_id, move |arena, current, want_truthy| {
+                narrow_by_property_truthiness(arena, current, &property, want_truthy)
+            })
+        }
+
         _ => empty_pair(),
     }
 }
@@ -995,6 +1011,51 @@ fn narrow_truthy(arena: &mut TypeArena, id: TypeId, want_truthy: bool) -> TypeId
             if keep { id } else { arena.never() }
         }
     }
+}
+
+// Narrows a union of object types by whether one of their properties is truthy. Only a
+// union narrows; a member that is not an object, or has no such property, is kept. A
+// member stays on the truthy side unless its property is always falsy, and on the falsy
+// side unless its property is always truthy, using the same conservative notions as
+// narrow_truthy: a plain `number` or `string` can be either, so it is never dropped.
+fn narrow_by_property_truthiness(
+    arena: &mut TypeArena,
+    id: TypeId,
+    property: &str,
+    want_truthy: bool,
+) -> TypeId {
+    let Some(members) = union_members(arena, id) else {
+        return id;
+    };
+    let mut kept = Vec::with_capacity(members.len());
+    for member in members {
+        let property_type = match arena.get(member) {
+            Type::Object(object) => object
+                .properties
+                .iter()
+                .find(|entry| &*entry.name == property)
+                .map(|entry| entry.type_id),
+            _ => None,
+        };
+        let keep = match property_type {
+            None => true,
+            Some(property_type) => {
+                let candidates =
+                    union_members(arena, property_type).unwrap_or_else(|| vec![property_type]);
+                candidates.iter().any(|&candidate| {
+                    if want_truthy {
+                        !is_definitely_falsy(arena, candidate)
+                    } else {
+                        !is_definitely_truthy(arena, candidate)
+                    }
+                })
+            }
+        };
+        if keep {
+            kept.push(member);
+        }
+    }
+    arena.alloc_union(kept)
 }
 
 fn union_members(arena: &TypeArena, id: TypeId) -> Option<Vec<TypeId>> {

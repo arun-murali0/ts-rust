@@ -6,6 +6,7 @@ use crate::arena::TypeId;
 use crate::types::Type;
 
 use super::super::context::CheckContext;
+use super::super::narrow::resolve_symbol_id;
 use super::infer_expression_type;
 use super::{
     check_excess_properties, collect_generic_param_constraints, contains_type_param,
@@ -52,6 +53,12 @@ struct CallSite<'s, 'ast> {
     span: Span,
     callee_name: &'s str,
     is_new: bool,
+    // True when the callee is written as the name of a function or class declaration.
+    // Such a call instantiates the declaration afresh, even from inside its own body,
+    // so every type parameter in its type is the callee's own to infer. For any other
+    // callee (a parameter, a variable, a method) a parameter of an enclosing
+    // declaration that appears in its type is not.
+    callee_is_declaration: bool,
     explicit_type_args: &'s [TypeId],
 }
 
@@ -60,11 +67,16 @@ pub(super) fn infer_call_expression_type(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
+    let mut callee_is_declaration = false;
     let (callee_type, callee_name) = match &call.callee {
-        Expression::Identifier(ident) => (
-            resolve_identifier_type(ident, scoping, ctx),
-            ident.name.to_string(),
-        ),
+        Expression::Identifier(ident) => {
+            callee_is_declaration = resolve_symbol_id(ident, scoping)
+                .is_some_and(|symbol_id| scoping.symbol_flags(symbol_id).is_function());
+            (
+                resolve_identifier_type(ident, scoping, ctx),
+                ident.name.to_string(),
+            )
+        }
         Expression::StaticMemberExpression(member) => {
             let object_type = infer_expression_type(&member.object, scoping, ctx);
             let property_type =
@@ -89,6 +101,7 @@ pub(super) fn infer_call_expression_type(
             span: call.span(),
             callee_name: &callee_name,
             is_new: false,
+            callee_is_declaration,
             explicit_type_args: &explicit_type_args,
         },
         scoping,
@@ -120,6 +133,7 @@ pub(super) fn infer_new_expression_type(
             span: new_expr.span(),
             callee_name: &callee_ident.name,
             is_new: true,
+            callee_is_declaration: true,
             explicit_type_args: &explicit_type_args,
         },
         scoping,
@@ -138,6 +152,7 @@ fn check_callable(
         span,
         callee_name,
         is_new,
+        callee_is_declaration,
         explicit_type_args,
     } = site;
 
@@ -249,12 +264,37 @@ fn check_callable(
         &mut declared_param_ids,
     );
 
-    let mut bindings: Vec<(crate::types::TypeParameterId, TypeId)> = declared_param_ids
+    // A parameter of a declaration the checker is currently inside is fixed, not
+    // inferred: its binding is itself, so substitution leaves it alone. Explicit type
+    // arguments are zipped against the remaining parameters, the callee's own.
+    let ambient_ids: Vec<crate::types::TypeParameterId> = if callee_is_declaration {
+        Vec::new()
+    } else {
+        declared_param_ids
+            .iter()
+            .copied()
+            .filter(|&id| ctx.namespace.is_type_param_in_scope(id))
+            .collect()
+    };
+    let own_ids: Vec<crate::types::TypeParameterId> = declared_param_ids
+        .iter()
+        .copied()
+        .filter(|id| !ambient_ids.contains(id))
+        .collect();
+
+    let mut bindings: Vec<(crate::types::TypeParameterId, TypeId)> = own_ids
         .iter()
         .zip(explicit_type_args.iter())
         .map(|(&id, &explicit)| (id, explicit))
         .collect();
-    let locked: Vec<crate::types::TypeParameterId> = bindings.iter().map(|(id, _)| *id).collect();
+    let mut locked: Vec<crate::types::TypeParameterId> =
+        bindings.iter().map(|(id, _)| *id).collect();
+    for &id in &ambient_ids {
+        if let Some(node) = ctx.namespace.type_param_node(id) {
+            bindings.push((id, node));
+            locked.push(id);
+        }
+    }
 
     for (index, arg_type) in arg_types.iter().enumerate() {
         let Some(arg_type) = arg_type else { continue };
@@ -284,6 +324,9 @@ fn check_callable(
     collect_generic_param_constraints(&ctx.arena, function_type.return_type, &mut constraints);
 
     for (id, _, constraint) in &constraints {
+        if ambient_ids.contains(id) {
+            continue;
+        }
         let Some(&(_, bound)) = bindings.iter().find(|(bound_id, _)| bound_id == id) else {
             continue;
         };

@@ -4,6 +4,7 @@ use oxc_span::GetSpan;
 
 use crate::arena::TypeId;
 use crate::type_annotation::resolve_type_annotation;
+use crate::types::Type;
 
 use super::super::context::CheckContext;
 use super::super::expressions::{check_excess_properties, infer_expression_type};
@@ -132,6 +133,7 @@ fn check_identifier_declarator(
             } else {
                 crate::types::widen(&ctx.arena, actual)
             };
+            let registered_type = evolve_empty_array(registered_type, ctx);
             if let Some(symbol_id) = id.symbol_id.get() {
                 ctx.symbols.declare(symbol_id, registered_type);
             }
@@ -203,14 +205,34 @@ fn check_destructured_declarator(
         }
         (AnnotationOutcome::Resolved(declared), None) => declared,
         (AnnotationOutcome::Absent, Some(actual)) => {
-            if decl_kind == VariableDeclarationKind::Const {
+            let widened = if decl_kind == VariableDeclarationKind::Const {
                 actual
             } else {
                 crate::types::widen(&ctx.arena, actual)
-            }
+            };
+            evolve_empty_array(widened, ctx)
         }
         (AnnotationOutcome::Absent, None) => return,
     };
 
     bind_pattern(&declarator.id, source_type, scoping, ctx);
+}
+
+// `const xs = []` followed by `xs.push(1)` is ordinary code, and tsc accepts it by letting
+// the array's element type grow as it is assigned to. This checker has no growing types, so
+// an unannotated variable initialised with an empty array literal (typed never[], which
+// nothing can be pushed into) is given any[] instead, the permissive reading. An annotated
+// variable keeps exactly what it was annotated with, and an empty array nested in an
+// object literal stays never[], as it does in tsc.
+fn evolve_empty_array(type_id: TypeId, ctx: &mut CheckContext<'_, '_>) -> TypeId {
+    let is_empty_array = matches!(
+        ctx.arena.get(type_id),
+        Type::Array(element) if *element == ctx.arena.never()
+    );
+    if is_empty_array {
+        let any = ctx.arena.any();
+        ctx.arena.alloc(Type::Array(any))
+    } else {
+        type_id
+    }
 }
