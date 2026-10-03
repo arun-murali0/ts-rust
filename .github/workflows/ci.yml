@@ -5,7 +5,7 @@ on:
   push:
     # `features` is where day-to-day work lands; auto-merge.yml only promotes a
     # features commit to main after CI has passed on that exact commit.
-    branches: [main, features]
+    branches: [main, features, modules]
   schedule:
     # Once a day on main. It catches what a push never would: a new advisory in an
     # unchanged lockfile. Scheduled workflows never run on forks.

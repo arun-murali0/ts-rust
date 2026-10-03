@@ -134,7 +134,40 @@ lives in a `CheckSession`, not in `TypeChecker`: the checker stays free of inter
 mutability, and independent sessions can run in parallel. `FileId` is a plain index, not a
 path, so type identity never depends on a filesystem.
 
-## 8. Considered and not done
+## 8. The project graph: reuse the resolver, keep every edge
+
+**Problem.** A project is many files, and the checker only knows one. Something has to
+decide which file an import means, the order to check in, and which files changed.
+
+**Resolver.** `oxc_resolver` stays the resolver. Writing a second one means owning
+`exports` maps, extension probing and `node_modules` lookup for no gain, and the two would
+drift. The wrapper picks TypeScript's options (`types` first, NodeNext extension aliases)
+and hides the dependency's error type.
+
+**Keep what failed.** An import that does not resolve stays in the graph as an edge with
+no target, and a file with a syntax error is flagged instead of reporting zero imports.
+Dropping either makes a broken file look like a file with nothing to say. The report
+follows the same rule: a file that could not be read or checked is listed as such, never
+left out.
+
+**No recursion, no locks.** Cycle detection is Tarjan with an explicit stack, so import
+depth is bounded by memory and not by the call stack, and a test builds a 50,000-file
+chain. Parallelism is one `CheckSession` per file inside a layer, so nothing mutable is
+shared and the checker gained no locks. The report is sorted by `FileId`, which is why
+`FileId` is now ordered.
+
+**Two-step change detection.** A stat call (length and mtime) answers the common case. A
+hash of the bytes is taken only when the stat moved, so a touched file with the same
+contents is not a change. The fingerprint is taken before the read, and an unreadable
+file counts as changed, because the wrong answer to "unchanged" is a stale result.
+
+**Opt-in.** Everything here reads the filesystem, so it is behind the
+`module-resolution` feature and the in-memory and WASM builds do not carry it.
+
+**Fixtures.** The projects live outside `tests/fixtures/` because the tsc comparison
+checks each file there alone, where every import would be an error.
+
+## 9. Considered and not done
 
 - **Ignoring parameter names in the intern key.** Two functions that differ only in
   parameter names would share an id, which speeds equality. But diagnostics print
@@ -143,13 +176,17 @@ path, so type identity never depends on a filesystem.
   `structurally_equal` already ignores names where equality is asked directly.
 - **Caching union de-duplication.** Connecting `structurally_equal_cached` to `alloc_union`
   changed diagnostic counts once and the cause was not found. It stays disconnected.
-- **Module resolution and `oxc_resolver`.** Left to the module-resolution work in
-  progress, to avoid two competing implementations. `ProjectFiles` and `FileId` are the
-  seam it can attach to.
+- **A second resolver.** Resolving a specifier is `oxc_resolver`'s job and it does it
+  well, so `ModuleResolver` only chooses options and converts errors. Section 8 has the
+  rest.
+- **tsconfig `paths` and cross-file name lookup.** The graph is built and checked in a
+  safe order, but an imported name is not yet looked up in the file it comes from, and
+  the resolver is built without a tsconfig. Both are the next stage, not gaps hidden
+  behind the graph.
 - **Baseline-first benchmarking.** No speed figures are claimed for the reuse work. The
   counters make a regression observable; the numbers belong to a measured run.
 
-## 9. How the decisions were checked
+## 10. How the decisions were checked
 
 - **Fixtures first, in pairs.** A fixture that must stay clean, and one that must produce
   exactly one error, so both a false positive and a silent over-narrowing show up.
@@ -159,10 +196,12 @@ path, so type identity never depends on a filesystem.
 - **Tests for what must not survive.** Reuse code is tested by asserting what is gone (a
   name from the previous file, a cached answer from before a placeholder was filled), not
   by asserting the happy path twice.
+- **A long chain for the algorithm that could overflow.** The graph test builds 50,000
+  files in a row, because a recursive cycle search passes every smaller test.
 - **Counters over opinions.** Hit and miss counts and arena sizes are exposed so a claim
   such as "the memo answers repeats" is a test assertion.
 
-## 10. Rules of thumb that fell out of this
+## 11. Rules of thumb that fell out of this
 
 1. If a wrong answer is silent, write the test that makes it loud.
 2. Prefer the data structure that cannot be misused to the rule that must be remembered.
@@ -171,3 +210,4 @@ path, so type identity never depends on a filesystem.
 4. Report an error only when sure the other checker would too.
 5. Keep a deliberate non-decision written down, with the reason, so it is not reopened by
    accident.
+6. A fact that could not be resolved is data. Keep it where a later phase can report it.

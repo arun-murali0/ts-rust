@@ -45,9 +45,11 @@ Section 11, core subset:
 
 Path/specifier resolution delegated to `oxc_resolver`. Remaining work is
 checker-side:
-1. Module graph/driver: resolve each import via `oxc_resolver`, decide check
-   order, handle import cycles (file-level cycle-guard, parallel to the
-   existing type-level `seen` stack pattern).
+1. Module graph/driver - DONE, behind the `module-resolution` feature (see
+   docs/module-resolution.md): `ModuleGraph` resolves each import via
+   `oxc_resolver`, keeps unresolved edges, finds cycles, orders files into
+   dependency layers, and `check_project` checks the layers in parallel. Files
+   are still checked one at a time; nothing is looked up across files yet.
 2. Extend `namespace.rs`'s symbol-table concept so each checked file exposes
    an export table, and import sites look into another file's table instead
    of only their own scope.
@@ -56,6 +58,10 @@ checker-side:
 Why here: unblocks every other stage from being single-file-only, which is
 the single biggest realism gap in real-world usage - almost no real
 TypeScript project is one file.
+
+Not done in the first part: tsconfig `paths`/`baseUrl` (the resolver is built
+without a tsconfig), ambient modules, and re-checking only changed files and
+their dependents.
 
 Dependencies: none structurally, but benefits from Stage 1 being stable so
 generic types resolve correctly once they can cross file boundaries.
