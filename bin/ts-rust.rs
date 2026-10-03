@@ -3,7 +3,45 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use ts_rust::TypeChecker;
+use ts_rust::{Diagnostic, LineIndex, Severity, TypeChecker};
+
+// `flat` and `cycles` only change behavior in a build with the `module-resolution`
+// feature; a build without it always checks each file on its own.
+#[cfg_attr(not(feature = "module-resolution"), allow(dead_code))]
+struct Options {
+    project: String,
+    flat: bool,
+    cycles: bool,
+}
+
+// What a run found, kept apart from printing so both ways of checking (file by file,
+// or through the module graph) report in the same shape.
+#[derive(Default)]
+struct Tally {
+    files: usize,
+    errors: usize,
+    warnings: usize,
+    fatal: bool,
+    note: Option<String>,
+}
+
+impl Tally {
+    fn print(&mut self, diagnostics: &[Diagnostic], source: &str) {
+        let line_index = LineIndex::new(source);
+        for diagnostic in diagnostics {
+            match diagnostic.severity {
+                Severity::Error => self.errors += 1,
+                Severity::Warning => self.warnings += 1,
+            }
+            println!("{}", diagnostic.format_with_position(&line_index, source));
+        }
+    }
+
+    fn fail(&mut self, message: &str) {
+        eprintln!("error: {message}");
+        self.fatal = true;
+    }
+}
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -13,13 +51,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let Some(project_arg) = parse_project_arg(&args) else {
+    let Some(options) = parse_options(&args) else {
         eprintln!("error: expected --project <path-to-tsconfig.json>");
         print_help();
         return ExitCode::from(2);
     };
 
-    let tsconfig_path = PathBuf::from(&project_arg);
+    let tsconfig_path = PathBuf::from(&options.project);
     if !tsconfig_path.is_file() {
         eprintln!("error: no such tsconfig file: {}", tsconfig_path.display());
         return ExitCode::from(2);
@@ -28,7 +66,8 @@ fn main() -> ExitCode {
     // tsconfig.json's contents are never parsed; the path is only used to locate
     // the project root, and every .ts/.tsx file under that root is then checked
     // directly. There is no include/exclude/paths handling and no support for
-    // multiple projects yet.
+    // multiple projects yet. Those files are the entries of the module graph when
+    // it is used; files they import are added to the graph from there.
     let Some(project_root) = tsconfig_path.parent() else {
         eprintln!(
             "error: could not determine a project root from {}",
@@ -49,59 +88,163 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let checker = TypeChecker::new();
-    let mut error_count = 0usize;
-    let mut warning_count = 0usize;
-    let mut had_fatal = false;
+    let tally = match run(&source_files, &options) {
+        Ok(tally) => tally,
+        Err(message) => {
+            eprintln!("error: {message}");
+            return ExitCode::from(2);
+        }
+    };
 
-    for file_path in &source_files {
+    println!();
+    println!(
+        "Checked {} file(s): {} error(s), {} warning(s).",
+        tally.files, tally.errors, tally.warnings
+    );
+    if let Some(note) = &tally.note {
+        println!("{note}");
+    }
+
+    if tally.fatal {
+        // A file that failed to read or parse at all is distinguished from a file
+        // that parsed fine but reported type errors, so a caller (a CI script,
+        // for instance) can tell "the checker itself hit a problem" apart from
+        // "the checker ran fine and found real issues."
+        ExitCode::from(2)
+    } else if tally.errors > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+#[cfg(feature = "module-resolution")]
+fn run(files: &[PathBuf], options: &Options) -> Result<Tally, String> {
+    if options.flat {
+        return Ok(check_flat(files));
+    }
+    check_with_modules(files, options)
+}
+
+#[cfg(not(feature = "module-resolution"))]
+fn run(files: &[PathBuf], _options: &Options) -> Result<Tally, String> {
+    Ok(check_flat(files))
+}
+
+// One file at a time with no knowledge of the others, which is what every build did
+// before the module graph and is all a build without `module-resolution` can do.
+fn check_flat(files: &[PathBuf]) -> Tally {
+    let checker = TypeChecker::new();
+    let mut tally = Tally {
+        files: files.len(),
+        ..Tally::default()
+    };
+
+    for file_path in files {
         let source = match fs::read_to_string(file_path) {
             Ok(source) => source,
             Err(read_err) => {
-                eprintln!("error: could not read {}: {read_err}", file_path.display());
-                had_fatal = true;
+                tally.fail(&format!(
+                    "could not read {}: {read_err}",
+                    file_path.display()
+                ));
                 continue;
             }
         };
 
         let file_name = file_path.to_string_lossy().into_owned();
         match checker.check_source(&source, &file_name) {
-            Ok(result) => {
-                let line_index = ts_rust::LineIndex::new(&source);
-                for diagnostic in &result.diagnostics {
-                    match diagnostic.severity {
-                        ts_rust::Severity::Error => error_count += 1,
-                        ts_rust::Severity::Warning => warning_count += 1,
-                    }
-                    println!("{}", diagnostic.format_with_position(&line_index, &source));
-                }
-            }
-            Err(parse_err) => {
-                eprintln!("error: {file_name}: {parse_err}");
-                had_fatal = true;
-            }
+            Ok(result) => tally.print(&result.diagnostics, &source),
+            Err(parse_err) => tally.fail(&format!("{file_name}: {parse_err}")),
+        }
+    }
+    tally
+}
+
+// Builds the module graph from the project's files, then checks the graph layer by
+// layer with the files of a layer in parallel. Each file is still checked on its own:
+// the graph orders the work and finds imports that resolve to nothing, but what a file
+// imports is not yet visible to the checker.
+#[cfg(feature = "module-resolution")]
+fn check_with_modules(files: &[PathBuf], options: &Options) -> Result<Tally, String> {
+    use ts_rust::{FileOutcome, ModuleGraph, ModuleResolver, check_project};
+
+    // The graph wants absolute entry paths so a file reached by an import and the same
+    // file named as an entry are one node.
+    let mut entries = Vec::with_capacity(files.len());
+    for file in files {
+        let absolute = fs::canonicalize(file)
+            .map_err(|error| format!("could not resolve {}: {error}", file.display()))?;
+        entries.push(absolute);
+    }
+
+    let resolver = ModuleResolver::new();
+    let graph = ModuleGraph::build(&entries, &resolver).map_err(|error| error.to_string())?;
+    let report = check_project(&graph);
+
+    let mut tally = Tally::default();
+    for file_report in &report.files {
+        let Some(path) = graph.files().path(file_report.file_id) else {
+            continue;
+        };
+        tally.files += 1;
+        match &file_report.outcome {
+            FileOutcome::Checked(diagnostics) => match fs::read_to_string(path) {
+                Ok(source) => tally.print(diagnostics, &source),
+                Err(error) => tally.fail(&format!("could not read {}: {error}", path.display())),
+            },
+            FileOutcome::ReadFailed(message) => tally.fail(message),
+            FileOutcome::CheckFailed(error) => tally.fail(&format!("{}: {error}", path.display())),
         }
     }
 
-    println!();
-    println!(
-        "Checked {} file(s): {} error(s), {} warning(s).",
-        source_files.len(),
-        error_count,
-        warning_count
-    );
-
-    if had_fatal {
-        // A file that failed to read or parse at all is distinguished from a file
-        // that parsed fine but reported type errors, so a caller (a CI script,
-        // for instance) can tell "the checker itself hit a problem" apart from
-        // "the checker ran fine and found real issues."
-        ExitCode::from(2)
-    } else if error_count > 0 {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
+    // A warning and not an error: tsconfig's `paths` and `baseUrl` are not read, so an
+    // import they would resolve shows up here although tsc would find it.
+    let mut unresolved = 0usize;
+    for (id, edge) in graph.unresolved() {
+        if !graph.is_checkable(id) {
+            continue;
+        }
+        let Some(path) = graph.files().path(id) else {
+            continue;
+        };
+        unresolved += 1;
+        tally.warnings += 1;
+        println!(
+            "{}: warning: cannot find module '{}'",
+            path.display(),
+            edge.specifier
+        );
     }
+
+    let cycles = graph.cycles();
+    if options.cycles {
+        for cycle in &cycles {
+            let members: Vec<String> = cycle
+                .iter()
+                .filter_map(|id| graph.files().path(*id))
+                .map(|path| path.display().to_string())
+                .collect();
+            println!("cycle: {}", members.join(", "));
+        }
+    }
+
+    tally.note = Some(format!(
+        "Module graph: {} file(s), {} cycle(s), {} unresolved import(s).",
+        graph.len(),
+        cycles.len(),
+        unresolved
+    ));
+    Ok(tally)
+}
+
+fn parse_options(args: &[String]) -> Option<Options> {
+    let project = parse_project_arg(args)?;
+    Some(Options {
+        project,
+        flat: args.iter().any(|arg| arg == "--flat"),
+        cycles: args.iter().any(|arg| arg == "--cycles"),
+    })
 }
 
 fn parse_project_arg(args: &[String]) -> Option<String> {
@@ -152,12 +295,16 @@ fn print_help() {
     println!(
         "ts-rust: a from-scratch TypeScript type checker (experimental CLI)\n\n\
          USAGE:\n    \
-         ts-rust --project <path-to-tsconfig.json>\n\n\
+         ts-rust --project <path-to-tsconfig.json> [--flat] [--cycles]\n\n\
          OPTIONS:\n    \
          --project <path>    Locate the project root from a tsconfig.json path.\n                         \
          Its contents are not parsed; every .ts/.tsx file under\n                         \
          that directory is checked directly. See bin/ts-rust.rs\n                         \
          for the exact scoping.\n    \
+         --flat              Check each file on its own, without the module graph.\n                         \
+         The only mode in a build without the `module-resolution`\n                         \
+         feature.\n    \
+         --cycles            Print each import cycle (module graph builds only).\n    \
          -h, --help          Show this message.\n\n\
          EXIT CODES:\n    \
          0    no errors (warnings may still have been printed)\n    \

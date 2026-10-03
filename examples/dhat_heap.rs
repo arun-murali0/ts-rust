@@ -4,6 +4,10 @@
 //     CARGO_PROFILE_RELEASE_DEBUG=true \
 //       cargo run --release --example dhat_heap --features dhat-heap
 //
+//     # the same, plus the multi-file project workloads:
+//     CARGO_PROFILE_RELEASE_DEBUG=true \
+//       cargo run --release --example dhat_heap --features dhat-heap,module-resolution
+//
 //     # one workload only, so dhat-heap.json and the peak are about it alone:
 //     CARGO_PROFILE_RELEASE_DEBUG=true \
 //       cargo run --release --example dhat_heap --features dhat-heap -- class_hierarchy
@@ -13,8 +17,15 @@
 // their diagnostic counts, which is the cheap way to check that a change to the
 // arena did not change what the checker reports.
 //
+// With `module-resolution` there are also project workloads, which write a project
+// to the temp directory and report two lines each: `<label>/graph` for discovering and
+// resolving every import, and `<label>/check` for checking every file in parallel.
+// dhat counts allocations on every thread, so a `/check` line is the whole pool's
+// total and its peak is the pool's combined peak, not one file's.
+//
 // Debug info (the CARGO_PROFILE_RELEASE_DEBUG above) is what lets dhat resolve
-// stack frames to function names; release is opt-level "s" with no symbols.
+// stack frames to function names; the release profile is otherwise stripped of
+// symbols for the frames' sake.
 
 use std::hint::black_box;
 use std::process;
@@ -23,6 +34,10 @@ use ts_rust::TypeChecker;
 
 #[path = "../benches/support/complex_fixtures.rs"]
 mod complex_fixtures;
+
+#[cfg(feature = "module-resolution")]
+#[path = "../benches/support/project_fixtures.rs"]
+mod project_fixtures;
 
 use complex_fixtures::{
     class_hierarchy_source, complex_source, connected_application_source,
@@ -58,24 +73,86 @@ fn run_and_report(checker: &TypeChecker, label: &str, source: &str, report_peak:
     };
 
     #[cfg(feature = "dhat-heap")]
-    {
-        let blocks = after.total_blocks - before.total_blocks;
-        let bytes = after.total_bytes - before.total_bytes;
-        if report_peak {
-            println!(
-                "{label:<34} {blocks:>9} blocks {bytes:>12} bytes  peak {:>11} bytes  {diagnostics:>4} diagnostics",
-                after.max_bytes
-            );
-        } else {
-            println!(
-                "{label:<34} {blocks:>9} blocks {bytes:>12} bytes  {diagnostics:>4} diagnostics"
-            );
-        }
-    }
+    print_stats(label, &before, &after, report_peak, diagnostics);
     #[cfg(not(feature = "dhat-heap"))]
-    println!("{label:<34} {diagnostics:>4} diagnostics");
+    println!("{label:<40} {diagnostics:>4} diagnostics");
 
     let _ = black_box(result);
+}
+
+#[cfg(feature = "dhat-heap")]
+fn print_stats(
+    label: &str,
+    before: &dhat::HeapStats,
+    after: &dhat::HeapStats,
+    report_peak: bool,
+    diagnostics: usize,
+) {
+    let blocks = after.total_blocks - before.total_blocks;
+    let bytes = after.total_bytes - before.total_bytes;
+    if report_peak {
+        println!(
+            "{label:<40} {blocks:>9} blocks {bytes:>12} bytes  peak {:>11} bytes  {diagnostics:>4} diagnostics",
+            after.max_bytes
+        );
+    } else {
+        println!("{label:<40} {blocks:>9} blocks {bytes:>12} bytes  {diagnostics:>4} diagnostics");
+    }
+}
+
+// Graph discovery and the project check are measured separately, so a change that moves
+// allocation from one to the other shows up. The resolver is created before the first
+// reading and dropped after the last, so the resolver's own caches belong to `/graph`.
+#[cfg(feature = "module-resolution")]
+#[cfg_attr(not(feature = "dhat-heap"), allow(unused_variables))]
+fn run_project_and_report(label: &str, project: &project_fixtures::Project, report_peak: bool) {
+    use ts_rust::{ModuleGraph, ModuleResolver, check_project};
+
+    let resolver = ModuleResolver::new();
+
+    #[cfg(feature = "dhat-heap")]
+    let before_graph = dhat::HeapStats::get();
+
+    let graph = match ModuleGraph::build(black_box(&project.entries), &resolver) {
+        Ok(graph) => graph,
+        Err(error) => panic!("heap workload `{label}` could not build its graph: {error}"),
+    };
+
+    #[cfg(feature = "dhat-heap")]
+    let after_graph = dhat::HeapStats::get();
+
+    let report = check_project(black_box(&graph));
+
+    #[cfg(feature = "dhat-heap")]
+    let after_check = dhat::HeapStats::get();
+
+    // A file that could not be read or checked is not a diagnostic, so it is counted on
+    // its own: a project workload that starts failing is not doing the same work.
+    assert_eq!(
+        report.failure_count(),
+        0,
+        "heap workload `{label}` had files that failed to check"
+    );
+    let diagnostics = report.diagnostic_count();
+    let files = graph.len();
+
+    #[cfg(feature = "dhat-heap")]
+    {
+        let graph_label = format!("{label}/graph ({files} files)");
+        print_stats(&graph_label, &before_graph, &after_graph, report_peak, 0);
+        let check_label = format!("{label}/check");
+        print_stats(
+            &check_label,
+            &after_graph,
+            &after_check,
+            report_peak,
+            diagnostics,
+        );
+    }
+    #[cfg(not(feature = "dhat-heap"))]
+    println!("{label:<40} {diagnostics:>4} diagnostics ({files} files)");
+
+    let _ = black_box(report);
 }
 
 fn main() {
@@ -113,21 +190,59 @@ fn main() {
         ),
     ];
 
+    // Written to disk up front for the same reason. Each project removes its directory
+    // when it is dropped at the end of `main`.
+    #[cfg(feature = "module-resolution")]
+    let projects: Vec<(&str, project_fixtures::Project)> = vec![
+        (
+            "project_layered_201_files",
+            project_fixtures::Project::new("heap-layered").layered(20, 10, 3),
+        ),
+        (
+            "project_independent_200_files",
+            project_fixtures::Project::new("heap-independent").independent(200, 20),
+        ),
+        (
+            "project_generic_200_files",
+            project_fixtures::Project::new("heap-generic").independent_generic(200, 10),
+        ),
+        (
+            "project_ring_50_files",
+            project_fixtures::Project::new("heap-ring").ring(50),
+        ),
+        (
+            "project_chain_100_files",
+            project_fixtures::Project::new("heap-chain").chain(100),
+        ),
+    ];
+
+    let wanted = |label: &str| {
+        filter
+            .as_deref()
+            .is_none_or(|wanted| label.contains(wanted))
+    };
+
     let selected: Vec<&(&str, String)> = workloads
         .iter()
-        .filter(|(label, _)| {
-            filter
-                .as_deref()
-                .is_none_or(|wanted| label.contains(wanted))
-        })
+        .filter(|(label, _)| wanted(label))
         .collect();
 
-    if selected.is_empty() {
+    #[cfg(feature = "module-resolution")]
+    let selected_projects: Vec<&(&str, project_fixtures::Project)> =
+        projects.iter().filter(|(label, _)| wanted(label)).collect();
+    #[cfg(not(feature = "module-resolution"))]
+    let selected_projects: Vec<&(&str, ())> = Vec::new();
+
+    if selected.is_empty() && selected_projects.is_empty() {
         eprintln!(
             "no workload label contains {:?}; available:",
             filter.unwrap_or_default()
         );
         for (label, _) in &workloads {
+            eprintln!("  {label}");
+        }
+        #[cfg(feature = "module-resolution")]
+        for (label, _) in &projects {
             eprintln!("  {label}");
         }
         process::exit(2);
@@ -141,6 +256,13 @@ fn main() {
     for (label, source) in selected {
         run_and_report(&checker, label, source, single);
     }
+
+    #[cfg(feature = "module-resolution")]
+    for (label, project) in selected_projects {
+        run_project_and_report(label, project, single);
+    }
+    #[cfg(not(feature = "module-resolution"))]
+    let _ = selected_projects;
 }
 
 fn large_source(function_count: usize) -> String {
