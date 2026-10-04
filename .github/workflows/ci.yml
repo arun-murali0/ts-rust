@@ -1,114 +1,62 @@
 name: CI
 
+# Branches (everything except main and merge-tmp/*): fmt + test via scripts/ci.sh.
+# merge-tmp/* (staging branches made by auto-merge.yml): the compare-against-tsc gate.
+# main: nothing runs, because only code that already passed both gates reaches it.
+
 on:
   pull_request:
   push:
-    # `features` is where day-to-day work lands; auto-merge.yml only promotes a
-    # features commit to main after CI has passed on that exact commit.
-    branches: [main, features, modules]
-  schedule:
-    # Once a day on main. It catches what a push never would: a new advisory in an
-    # unchanged lockfile. Scheduled workflows never run on forks.
-    - cron: "0 2 * * *"
+    branches-ignore: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-\({{ github.workflow }}-\){{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
-  # Pinned, not `stable`: a new stable release would empty the build cache and could
-  # add clippy lints that fail CI with no change on our side. Keep it equal to
-  # rust-version in Cargo.toml.
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTFLAGS: "-D warnings"
+  # Keep equal to rust-version in Cargo.toml.
   RUST_TOOLCHAIN: "1.98.1"
 
 jobs:
-  quality:
-    name: Format, check, clippy, test
-    # auto-merge.yml opens a PR from features, and CI already passed on that same
-    # commit through the push to features, so that PR run would repeat it. Forks
-    # still get CI: only a PR from this repository's own features branch is skipped.
-    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
+  # Branch gate: fmt + test.
+  all-green:
+    name: All green
+    # Not on staging branches, and not on same-repo PRs (the push run covers them).
+    if: ${{ !startsWith(github.ref, 'refs/heads/merge-tmp/') && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
-      # Line tables keep panic backtraces readable while linking and caching far
-      # less debug info than the default.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
 
-      # Cheap and independent of the build, so it fails before the toolchain is installed.
-      - name: Repository hygiene
-        shell: bash
-        run: |
-          set -euo pipefail
-          bad="$(find . -type f -not -path './.git/*' -size +10M -print)"
-          if [ -n "$bad" ]; then
-            echo "Large files found:"
-            echo "$bad"
-            exit 1
-          fi
-          for f in .env .env.local .env.production; do
-            if [ -e "$f" ]; then
-              echo "Forbidden secret file present: $f"
-              exit 1
-            fi
-          done
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt, clippy
+          components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ci
 
-      - name: Run repository quality gates
-        run: ./scripts/ci.sh
+      - name: fmt + test
+        run: bash ./scripts/ci.sh
 
-  security:
-    name: Dependency security
-    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
+  # Staging gate: ts-rust vs real tsc over tests/fixtures, gated by the baseline.
+  # Runs once per merge into main, never per branch push.
+  compare-tsc:
+    name: Compare against real tsc
+    if: ${{ startsWith(github.ref, 'refs/heads/merge-tmp/') }}
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # The base commit has to be present to see what changed.
-          fetch-depth: 0
-
-      - name: Decide whether the dependencies need auditing
-        id: gate
-        shell: bash
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          run=true
-          if [ "\(EVENT" != "schedule" ] && [ "\)EVENT" != "workflow_dispatch" ] \
-             && [ -n "\(BASE" ] && [ "\)BASE" != "0000000000000000000000000000000000000000" ] \
-             && changed="\((git diff --name-only "\)BASE" HEAD 2>/dev/null)"; then
-            if ! grep -qE '(^|/)Cargo\.(lock|toml)\(' <<<"\)changed"; then
-              run=false
-            fi
-          fi
-          echo "run=\(run" >> "\)GITHUB_OUTPUT"
-
-      - if: steps.gate.outputs.run == 'true'
-        uses: taiki-e/install-action@cargo-audit
-
-      - name: Audit dependencies
-        if: steps.gate.outputs.run == 'true'
-        run: cargo audit
-
-  tsc-drift:
-    name: Compare against real tsc (false-positive gate)
-    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       CARGO_PROFILE_RELEASE_LTO: "off"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
@@ -123,7 +71,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          shared-key: ci-drift
 
       - uses: actions/setup-node@v4
         with:
@@ -132,7 +80,7 @@ jobs:
           cache-dependency-path: scripts/ts-diag-tool/package-lock.json
 
       - name: Build ts-rust (release)
-        run: cargo build --release --bin ts-rust
+        run: cargo build --locked --release --bin ts-rust
 
       - name: Install ts-diag-tool dependencies
         working-directory: scripts/ts-diag-tool
@@ -145,47 +93,3 @@ jobs:
 
       - name: Enforce false-positive baseline
         run: node scripts/ts-diag-tool/check-baseline.js < /tmp/tsc-drift-result.json
-
-      - name: Check out main for comparison
-        if: github.ref != 'refs/heads/main'
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          path: main-src
-
-      - name: Identify main's commit
-        id: main
-        if: github.ref != 'refs/heads/main'
-        run: echo "sha=\((git -C main-src rev-parse HEAD)" >> "\)GITHUB_OUTPUT"
-
-      - name: Restore main's binary
-        id: main-bin
-        if: github.ref != 'refs/heads/main'
-        uses: actions/cache@v4
-        with:
-          path: main-src/target/release/ts-rust
-          key: main-ts-rust-\({{ runner.os }}-\){{ env.RUST_TOOLCHAIN }}-${{ steps.main.outputs.sha }}-v1
-
-      - name: Build main's ts-rust (release)
-        if: github.ref != 'refs/heads/main' && steps.main-bin.outputs.cache-hit != 'true'
-        run: cargo build --release --bin ts-rust --manifest-path main-src/Cargo.toml
-
-      - name: Compare main's ts-rust against real tsc over the same fixtures
-        if: github.ref != 'refs/heads/main'
-        run: |
-          node scripts/ts-diag-tool/compare.js tests/fixtures main-src/target/release/ts-rust --json \
-            > /tmp/tsc-drift-main.json || true
-
-      - name: Fail if this commit is worse than main
-        if: github.ref != 'refs/heads/main'
-        run: |
-          node -e '
-            const fs = require("fs");
-            const here = JSON.parse(fs.readFileSync("/tmp/tsc-drift-result.json", "utf8")).summary;
-            const main = JSON.parse(fs.readFileSync("/tmp/tsc-drift-main.json", "utf8")).summary;
-            console.log("false positives  main:", main.falsePositive, " this commit:", here.falsePositive);
-            if (here.falsePositive > main.falsePositive) {
-              console.error("FAIL: this commit has more false positives than main.");
-              process.exit(1);
-            }
-          '

@@ -5,6 +5,15 @@ use std::process::ExitCode;
 
 use ts_rust::{Diagnostic, LineIndex, Severity, TypeChecker};
 
+// mimalloc runs only in this binary, and only in a build with the `mimalloc` feature. It
+// is set here and not in the library because a library that chose a global allocator
+// would change it for every program that links the crate. WASM has no use for it and
+// keeps the platform allocator. Compare timings only between builds that use the same
+// allocator.
+#[cfg(all(feature = "mimalloc", not(target_arch = "wasm32")))]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 // `flat` and `cycles` only change behavior in a build with the `module-resolution`
 // feature; a build without it always checks each file on its own.
 #[cfg_attr(not(feature = "module-resolution"), allow(dead_code))]

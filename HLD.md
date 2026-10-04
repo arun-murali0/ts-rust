@@ -275,7 +275,7 @@ The ts-rust and tsz columns come from reading their source. The rustc and tsgo c
 
 | Stage | Content | Exit criteria |
 |---|---|---|
-| 0 | Freeze identity, Salsa scope and cycle rules; resolve open decisions below | This pair of documents signed off |
+| 0 | Freeze identity, Salsa scope and cycle rules; resolve open decisions (section 7) | This pair of documents signed off |
 | 1 | Lazy declaration slots and immutable nodes in the single-file checker | All existing fixtures pass unchanged |
 | 2 | Stable ids, portable types, cross-file imports (sequential) | Cross-file fixtures pass; hash tests pass |
 | 3 | Module graph, SCC condensation, project driver | Deterministic multi-file output |
@@ -284,12 +284,16 @@ The ts-rust and tsz columns come from reading their source. The rustc and tsgo c
 
 ---
 
-## 7. Open decisions (need your call)
+## 7. Decisions
 
-1. **Identity versus version:** confirm the split of declaration key (identity) and signature hash (version) from ADR-5.
-2. **Aliases:** transparent alias wrapper nodes (recommended) or display names in a side table (current approach). See LLD 1.8.
-3. **Union display order:** first-writer-wins side table (recommended), or accept canonical order in messages.
-4. **v1 unit of work:** whole SCC (recommended for v1) or declaration-level lazy resolution from the start.
-5. **Hash function:** XXH3-128 (recommended) or truncated blake3.
-6. **When to compute the 128-bit hash:** lazily when a type is exported (recommended) or at intern time.
-7. **Salsa version to pin,** after spike S1.
+Locked at stage 0. Each stays as decided until the spike or measurement named in it says otherwise. The same list, with what would reopen each one, is in `docs/decisions.md`.
+
+1. **Identity versus version: split.** `DeclKey` is identity and `SigHash` is version (ADR-5). A signature inside the id would change the id of every referrer on each edit and defeat early cutoff.
+2. **Aliases: transparent wrapper nodes** (`Named`, LLD 1.8). A side table keyed by id is what forces today's `set()` and `make_unique` guards.
+3. **Union display order: first writer wins, in a side table.** Identity stays canonical, and messages keep the order as written, which is closest to what tsc prints. Accepted limit: two unions written in different orders print in whichever order was seen first.
+4. **v1 unit of work: one SCC.** Cycle members share one arena, so nothing is shared across arenas inside a cycle. Reopen only if S4 shows a single SCC dominating wall time.
+5. **Hash function: XXH3-128.** Already a dependency (`xxhash-rust`, `xxh3`). A truncated cryptographic hash stays available behind a flag for untrusted input.
+6. **When to compute the 128-bit hash: lazily, when a type reaches an export boundary.** Most types never leave their file.
+7. **Salsa: `=0.28.5`, provisional.** Reopen if S1 fails.
+8. **Module key: by the rule in LLD 3.1.1, never by `FileId`.**
+9. **`FileId` is a run-local index, sorted by canonical path.** It orders output and indexes arrays. It is never hashed, stored, or part of any key.

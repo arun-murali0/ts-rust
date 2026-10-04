@@ -6,14 +6,20 @@ mod diagnostic_view;
 mod diagnostics;
 mod error;
 mod fxhash;
+#[cfg(feature = "incremental")]
+mod incremental;
 mod line_index;
 #[cfg(feature = "module-resolution")]
 mod module_resolution;
 mod namespace;
 mod project;
+#[cfg(feature = "scratchpad")]
+mod scratchpad;
 mod semantic;
 mod subtyping;
 mod symbol_map;
+#[cfg(feature = "module-resolution")]
+mod topology;
 mod type_annotation;
 mod type_display;
 mod types;
@@ -29,6 +35,17 @@ pub use diagnostics::{Diagnostic, Severity};
 pub use error::CheckerError;
 
 pub use line_index::LineIndex;
+
+#[cfg(feature = "incremental")]
+pub use incremental::{
+    Database as IncrementalDatabase, IncrementalDb, SourceFile, SourceKind, source_len,
+};
+
+#[cfg(feature = "scratchpad")]
+pub use scratchpad::WorkerScratch;
+
+#[cfg(feature = "module-resolution")]
+pub use topology::ModuleTopology;
 
 #[cfg(feature = "module-resolution")]
 pub use module_resolution::{

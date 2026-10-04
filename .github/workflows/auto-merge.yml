@@ -1,31 +1,43 @@
-name: Auto-merge features into main
+name: Auto-merge branches into main
 
-# Promotes `features` to `main` as soon as CI goes green on it, with the schedule
-# below as a safety net, so main stays one clean commit per batch of work. A run
-# merges only when ALL of these hold:
-#   1. features is ahead of main
-#   2. every commit in the batch is authored by the repository owner
-#   3. CI completed successfully on the exact head commit of features
-# Otherwise it does nothing and tries again on the next trigger.
+# Keeps main clean and every branch current.
 #
-# Note: `workflow_run` triggers always use the workflow file on the default
-# branch (main), so this takes effect once this file has been merged to main.
+# 1. Stage: a branch is eligible when it is ahead of main, every non-merge commit is by
+#    the repository owner, CI (fmt + test) passed on its exact head commit, and it already
+#    contains main. It is squashed on top of main into a temporary branch merge-tmp/<branch>-<sha>.
+# 2. Gate: ci.yml runs the compare-against-tsc check on that temporary branch.
+# 3. Promote: if the gate passed and neither main nor the source branch moved meanwhile,
+#    the temporary branch is merged into main by PR, then deleted. The source branch is
+#    realigned to main. If the gate failed, the temporary branch is deleted and main is
+#    untouched.
+# 4. Sync: every other branch gets main merged in, whatever its own CI state. A merge
+#    conflict is left for a person and one issue is opened.
+#
+# Contributors' branches are never staged (commit author is not the owner), but they are
+# still kept up to date with main.
+#
+# AUTO_MERGE_TOKEN (personal access token or GitHub App token) is required: pushes made
+# with the default GITHUB_TOKEN do not start workflows, so the gate and CI on synced
+# branches would never run. Without it only the sync step runs.
+#
+# `workflow_run` always uses the workflow file on main, so changes here take effect once
+# this file has been merged to main.
 
 on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    branches: [features]
+    branches-ignore: [main]
+  push:
+    branches: [main]
   schedule:
-    # One retry slot (UTC), after ci.yml's daily run. A merge is normally triggered
-    # by CI finishing on features; this only covers a merge that was skipped then.
-    # Scheduled workflows never run on forks, so this is effectively owner-only.
     - cron: "30 3 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   actions: read
 
 concurrency:
@@ -33,73 +45,205 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE: features
   TARGET: main
+  # Never staged or synced. Staging branches (merge-tmp/*) are always excluded.
+  EXCLUDE: "dependabot/.*|gh-pages"
   GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
+  HAS_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
+  REPO: ${{ github.repository }}
+  OWNER: ${{ github.repository_owner }}
 
 jobs:
   merge:
-    name: Merge features into main
+    name: Stage, promote and sync
     runs-on: ubuntu-latest
-    # A failed or cancelled CI run never triggers a merge attempt.
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
 
-      - name: Merge if ready
+      - name: Stage, promote and sync
         shell: bash
         run: |
           set -euo pipefail
-          REPO="${{ github.repository }}"
-          OWNER="${{ github.repository_owner }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin --prune
 
-          git fetch origin "$SOURCE" "$TARGET" || { echo "No $SOURCE branch yet; nothing to do."; exit 0; }
-
-          AHEAD="$(git rev-list --count "origin/$TARGET..origin/$SOURCE")"
-          if [ "$AHEAD" = "0" ]; then
-            echo "$SOURCE has nothing new for $TARGET."
-            exit 0
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::warning::AUTO_MERGE_TOKEN is not set: no staging or merging, branch sync only (and synced branches get no CI run)."
           fi
-          SHA="$(git rev-parse "origin/$SOURCE")"
-          echo "$AHEAD commit(s) to merge, head $SHA"
 
-          # 1. Only the owner's commits are auto-merged.
-          for c in $(git rev-list "origin/$TARGET..origin/$SOURCE"); do
-            login="$(gh api "repos/$REPO/commits/$c" --jq '.author.login // ""')"
-            if [ "${login,,}" != "${OWNER,,}" ]; then
-              echo "Commit $c is authored by '${login:-unlinked email}', not $OWNER. Not auto-merging."
-              exit 0
+          all_remote() {
+            git for-each-ref --format='%(refname)' refs/remotes/origin/ | sed 's#^refs/remotes/origin/##'
+          }
+          # Real branches: not main, not staging branches, not excluded.
+          list_branches() {
+            all_remote | grep -Ev "^(HEAD|$TARGET|merge-tmp/.*|$EXCLUDE)$" || true
+          }
+          list_tmp() {
+            all_remote | grep -E '^merge-tmp/' || true
+          }
+          # "status/conclusion" of the newest CI run on branch $1 at commit $2.
+          ci_state() {
+            gh run list --workflow ci.yml --branch "$1" --commit "$2" --limit 1 \
+              --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' 2>/dev/null || true
+          }
+          open_issue() {
+            if [ -z "$(gh issue list --state open --search "\"$1\" in:title" --json number --jq '.[0].number // empty')" ]; then
+              gh issue create --title "$1" --body "$2" || true
+            fi
+          }
+          delete_tmp() {
+            git push origin --delete "$1" || true
+          }
+          # Put branch $1 on main, only if nobody pushed to it since commit $2.
+          realign() {
+            git fetch origin "$TARGET" "$1" || true
+            git push --force-with-lease="$1:$2" origin "origin/$TARGET:refs/heads/$1" \
+              || echo "$1 moved since the merge; left as is. Run: git fetch && rebase onto origin/main."
+          }
+
+          sync_into() {
+            # Merge main into branch $1. A conflict is left for a person.
+            local branch="$1"
+            git checkout -q -B "$branch" "origin/$branch"
+            if git merge --no-edit "origin/$TARGET" >/dev/null 2>&1; then
+              git push origin "HEAD:refs/heads/$branch"
+              echo "Synced $TARGET into $branch."
+            else
+              git merge --abort || true
+              echo "::warning::$branch conflicts with $TARGET; not synced."
+              open_issue "Branch $branch conflicts with $TARGET" \
+                "Automatic sync of \`$TARGET\` into \`$branch\` hit a conflict. Merge or rebase \`$branch\` onto \`$TARGET\` by hand; syncing resumes afterwards."
+            fi
+          }
+
+          # Merge a staging branch into main if its tsc gate passed and it is still fresh.
+          promote() {
+            local tmp="$1" tip src srcsha state age title body pr
+            tip="$(git rev-parse "origin/$tmp")"
+            src="$(git log -1 --format=%B "$tip" | sed -n 's/^Source-Branch: //p')"
+            srcsha="$(git log -1 --format=%B "$tip" | sed -n 's/^Source-SHA: //p')"
+            if [ -z "$src" ] || [ -z "$srcsha" ]; then
+              echo "$tmp has no Source-Branch/Source-SHA trailers; leaving it alone."
+              return 0
+            fi
+            state="$(ci_state "$tmp" "$tip")"
+            case "$state" in
+              completed/success) ;;
+              completed/failure|completed/timed_out)
+                echo "tsc gate failed for $src at $srcsha. Dropping $tmp; $TARGET is untouched."
+                open_issue "tsc compare failed for $src" \
+                  "The compare-against-tsc check failed on \`$tmp\` (source \`$src\` at \`$srcsha\`). Nothing was merged into \`$TARGET\`. Fix the branch and push; it is staged again automatically once fmt + test pass."
+                delete_tmp "$tmp"
+                return 0 ;;
+              completed/*)
+                echo "Gate on $tmp ended as '$state'. Dropping it so it can be staged again."
+                delete_tmp "$tmp"
+                return 0 ;;
+              *)
+                age=$(( $(date +%s) - $(git log -1 --format=%ct "$tip") ))
+                if [ "$age" -gt 10800 ]; then
+                  echo "$tmp has had no gate result for over 3 hours. Dropping it."
+                  delete_tmp "$tmp"
+                else
+                  echo "Gate on $tmp is still running ('$state')."
+                fi
+                return 0 ;;
+            esac
+
+            # Fresh: still exactly main + one commit, and the source branch is unchanged.
+            if [ "$(git rev-parse "$tip^")" != "$(git rev-parse "origin/$TARGET")" ] \
+               || [ "$(git rev-parse -q --verify "origin/$src" || true)" != "$srcsha" ]; then
+              echo "$tmp is stale ($TARGET or $src moved). Dropping it; it will be staged again."
+              delete_tmp "$tmp"
+              return 0
+            fi
+
+            title="$(git log -1 --format=%s "$tip")"
+            body="$(git log -1 --format=%b "$tip" | grep -v '^Source-' || true)"
+            pr="$(gh pr list --base "$TARGET" --head "$tmp" --state open --json number --jq '.[0].number // empty')"
+            if [ -z "$pr" ]; then
+              pr="$(gh pr create --base "$TARGET" --head "$tmp" --title "$title" --body "$body")"
+            fi
+            # --match-head-commit: abort if anything was pushed after the gate passed.
+            gh pr merge "$pr" --squash --subject "$title" --body "$body" --match-head-commit "$tip"
+            echo "Merged $src into $TARGET through $tmp."
+            delete_tmp "$tmp"
+            git fetch origin --prune
+            realign "$src" "$srcsha"
+          }
+
+          # Build a staging branch for branch $1 if it is eligible.
+          stage() {
+            local src="$1" sha tmp prev n title body c login
+            git rev-parse --verify -q "origin/$src" >/dev/null || return 0
+            sha="$(git rev-parse "origin/$src")"
+
+            if git diff --quiet "origin/$TARGET" "origin/$src"; then
+              echo "$src has nothing new for $TARGET."
+              return 0
+            fi
+            # Only the owner's commits are merged automatically.
+            for c in $(git rev-list --no-merges "origin/$TARGET..origin/$src"); do
+              login="$(gh api "repos/$REPO/commits/$c" --jq '.author.login // ""')"
+              if [ "${login,,}" != "${OWNER,,}" ]; then
+                echo "Commit $c is by '${login:-unlinked email}', not $OWNER. Not merging $src."
+                return 0
+              fi
+            done
+            # fmt + test must have passed on this exact commit.
+            if [ "$(ci_state "$src" "$sha")" != "completed/success" ]; then
+              echo "CI on $src at $sha is not completed/success yet."
+              return 0
+            fi
+            # The branch must contain main, so the tree CI tested is the tree main gets.
+            if ! git merge-base --is-ancestor "origin/$TARGET" "origin/$src"; then
+              echo "$src does not contain $TARGET yet; the sync step brings it in first."
+              return 0
+            fi
+
+            tmp="merge-tmp/$(printf '%s' "$src" | tr -c 'A-Za-z0-9._-' '-')-${sha:0:8}"
+            if git rev-parse --verify -q "origin/$tmp" >/dev/null; then
+              echo "$src at $sha is already staged as $tmp."
+              return 0
+            fi
+            prev="$(gh run list --workflow ci.yml --branch "$tmp" --limit 1 --json conclusion --jq '.[0].conclusion // empty' 2>/dev/null || true)"
+            if [ "$prev" = "failure" ] || [ "$prev" = "timed_out" ]; then
+              echo "tsc gate already failed for $src at $sha. Waiting for a new push."
+              return 0
+            fi
+
+            n="$(git rev-list --no-merges --count "origin/$TARGET..origin/$src")"
+            title="Merge $src: $n change(s)"
+            body="$(git log --no-merges --format='- %s' "origin/$TARGET..origin/$src")"
+            git checkout -q -B "$tmp" "origin/$TARGET"
+            git merge --squash "origin/$src" >/dev/null
+            git commit -q -m "$title" -m "$body" -m "$(printf 'Source-Branch: %s\nSource-SHA: %s' "$src" "$sha")"
+            git push origin "HEAD:refs/heads/$tmp"
+            echo "Staged $src as $tmp; the tsc gate runs there."
+          }
+
+          if [ "$HAS_TOKEN" = "true" ]; then
+            for t in $(list_tmp); do
+              echo "=== promote $t"
+              promote "$t"
+            done
+            git fetch origin --prune
+            for s in $(list_branches); do
+              echo "=== stage $s"
+              stage "$s"
+            done
+          fi
+
+          # Everyone catches up with main, whatever state their own CI is in.
+          git fetch origin --prune
+          for b in $(list_branches); do
+            git rev-parse --verify -q "origin/$b" >/dev/null || continue
+            if ! git merge-base --is-ancestor "origin/$TARGET" "origin/$b"; then
+              sync_into "$b"
             fi
           done
-
-          # 2. CI must have finished green on this exact commit.
-          STATE="$(gh run list --workflow ci.yml --branch "$SOURCE" --commit "$SHA" \
-            --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' || true)"
-          if [ "$STATE" != "completed/success" ]; then
-            echo "CI on $SHA is '${STATE:-not found}', not completed/success. Will retry on the next trigger."
-            exit 0
-          fi
-
-          # 3. One PR, squash-merged: one clean commit on main per batch.
-          TITLE="Merge $SOURCE: $AHEAD change(s) on $(date -u +'%Y-%m-%d %H:%M UTC')"
-          BODY="$(git log --format='- %s' "origin/$TARGET..origin/$SOURCE")"
-
-          PR="$(gh pr list --base "$TARGET" --head "$SOURCE" --state open --json number --jq '.[0].number // empty')"
-          if [ -z "$PR" ]; then
-            PR="$(gh pr create --base "$TARGET" --head "$SOURCE" --title "$TITLE" --body "$BODY")"
-          fi
-          # --match-head-commit: abort if something was pushed after CI was checked.
-          # [skip ci] on the squash commit: main and the realigned features then hold
-          # exactly the tree CI just passed on features, so re-running CI on either
-          # push would repeat that run. The daily CI schedule still covers main.
-          gh pr merge "$PR" --squash --subject "$TITLE [skip ci]" --body "$BODY" --match-head-commit "$SHA"
-
-          # 4. A squash leaves features with different history than main, which
-          # would cause conflicts next time. Realign it to main, but only if nobody
-          # pushed to features since $SHA (force-with-lease).
-          git fetch origin "$TARGET" "$SOURCE" || true
-          git push --force-with-lease="$SOURCE:$SHA" origin "origin/$TARGET:refs/heads/$SOURCE" \
-            || echo "features moved since the merge; left as is. Run: git fetch && rebase onto origin/main."

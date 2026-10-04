@@ -8,7 +8,7 @@ Every earlier milestone checks one source string. A real project is a set of fil
 
 Module Resolution answers those three and nothing else. It does not bind an imported name to its declaration in another file; that is the next consumer of what this milestone builds, and the document says so in section 10 so the gap is not read as a claim.
 
-There are 20 integration tests in `tests/module_resolution.rs`, 10 unit tests next to the code, and 7 small projects under `tests/module-resolution-fixtures/`.
+There are 26 integration tests in `tests/module_resolution.rs` (3 of them cover the petgraph view added later, see [architecture-foundation](architecture-foundation.md)), 10 unit tests next to the code, and 7 small projects under `tests/module-resolution-fixtures/`.
 
 ## 2. An opt-in feature, not a default dependency
 
@@ -47,15 +47,20 @@ A file with a syntax error is the dangerous case. If its requests came back empt
 
 ## 5. The graph is indexed by `FileId`
 
-`ModuleGraph` owns a `ProjectFiles` and several plain vectors indexed by `FileId`: edges, dependencies, dependents, file state and syntax-error flags. `ProjectFiles` hands out ids in discovery order, so a lookup is an array index and never hashes a path.
+`ModuleGraph` owns a `ProjectFiles` and several plain vectors indexed by `FileId`: edges, dependencies, dependents, file state and syntax-error flags. The ids follow path order, so a lookup is an array index and never hashes a path.
 
 ```text
-entries (absolute paths) -> intern -> FileId 0, 1, ...
+entries (absolute paths) -> intern -> discovery ids 0, 1, ...
 walk ids in order:
     read file -> scan requests -> resolve each -> intern the target (a new id at the end)
+then:
+    sort the discovered paths -> the place in that order is the final FileId
+    renumber every edge target to match
 ```
 
-Because new files are interned at the end of the list while it is being walked, visiting ids in order is a breadth-first walk with no queue.
+Because new files are interned at the end of the list while it is being walked, visiting ids in order is a breadth-first walk with no queue. Those discovery ids are used only until the walk ends. They depend on the order the entries were given in and on how the imports were written, so the same project could be numbered two ways, and every list sorted by `FileId` would follow. The renumbering at the end makes the published ids a function of the set of files alone. Paths compare component by component, so the order does not depend on the separator character and a directory's files stay together.
+
+A `FileId` is therefore a place in the order for one run. It is not stored, not hashed and not part of any key; adding one file shifts every id after it (`adding_a_file_shifts_the_ids_after_it_and_nothing_else`). What survives between runs is the module key in LLD 3.1.1. `ids_follow_path_order_whatever_order_the_entries_were_given_in` gives the same project two entry orders and requires the same ids, edges, layers and cycles.
 
 Two decisions are worth stating:
 
@@ -89,7 +94,7 @@ sort the report by FileId
 ```
 
 - **One session per file.** A session reuses its arena across repeated checks of one file, but here each file is checked once. A session per file means the workers share nothing mutable, so no lock is needed anywhere in the checker.
-- **Sorted by `FileId`.** `FileId` derives `Ord` for this. Without the sort, the report order would depend on which thread finished first.
+- **Sorted by `FileId`.** `FileId` derives `Ord` for this, and it follows path order, so the report reads the same whatever order the entries were given in. Without the sort, the order would depend on which thread finished first.
 - **Only checkable files.** TypeScript source outside `node_modules`. Declaration files of dependencies are in the graph because their imports matter, but checking someone else's package is not the project's job. `dependency_declarations_are_in_the_graph_but_are_not_checked` protects that.
 - **No file is left out.** A file that cannot be read is `ReadFailed` and one the checker rejects is `CheckFailed`. A report that silently omits files reads as all clear for exactly the files nobody looked at, which is the same rule that keeps an unresolved import in the graph. `ProjectReport::failure_count` separates files that were not checked from files that were checked and found wrong.
 
