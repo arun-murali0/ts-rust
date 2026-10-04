@@ -43,6 +43,13 @@ smallvec = "1.16"
 oxc_resolver = { version = "=11.24.3", optional = true }
 rayon = { version = "1.10", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"], optional = true }
+petgraph = { version = "=0.8.3", optional = true }
+salsa = { version = "=0.28.5", optional = true }
+bumpalo = { version = "=3.20.3", optional = true }
+
+# The wasm build keeps the platform allocator, so mimalloc is not even resolved for it.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+mimalloc = { version = "=0.1.52", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
@@ -75,6 +82,11 @@ name = "module_graph_iai"
 harness = false
 required-features = ["module-resolution"]
 
+[[bench]]
+name = "foundation_benchmark"
+harness = false
+required-features = ["module-resolution", "incremental", "scratchpad"]
+
 [features]
 default = []
 wasm = [
@@ -88,7 +100,18 @@ dhat-heap = ["dep:dhat"]
 # Project-level module resolution and the module graph. Off by default because it
 # reads the filesystem through oxc_resolver, which single-file, in-memory and wasm
 # callers neither have nor want.
-module-resolution = ["dep:oxc_resolver", "dep:rayon", "dep:xxhash-rust"]
+module-resolution = ["dep:oxc_resolver", "dep:rayon", "dep:xxhash-rust", "dep:petgraph"]
+
+# Salsa inputs and memoized queries over project files. A shell around the checker for
+# now; see docs/architecture-foundation.md.
+incremental = ["dep:salsa"]
+
+# Worker-local bump allocation for scratch data that does not outlive a job.
+scratchpad = ["dep:bumpalo"]
+
+# mimalloc as the global allocator of the ts-rust binary. Off by default so the binary
+# CI builds and compares against tsc does not change; release builds opt in.
+mimalloc = ["dep:mimalloc"]
 
 # Native build: what `cargo build --release` and the criterion / iai-callgrind
 # benches (cargo's bench profile inherits release) measure. Speed matters here and

@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::project::ProjectFiles;
+use crate::topology::ModuleTopology;
 use crate::types::FileId;
 
 use super::discovery::{ModuleRequest, scan_module_requests};
@@ -199,6 +200,20 @@ impl ModuleGraph {
                     .is_none_or(|path| !self.states[index_of(*id)].is_unchanged(path))
             })
             .collect()
+    }
+
+    /// The import edges as a petgraph graph. A snapshot of the graph as it is now; it
+    /// does not follow changes made to the graph later.
+    pub fn topology(&self) -> ModuleTopology {
+        let mut topology = ModuleTopology::new();
+        for position in 0..self.len() {
+            let id = file_id(position);
+            topology.add_file(id);
+            for dependency in self.dependencies(id) {
+                topology.add_dependency(id, *dependency);
+            }
+        }
+        topology
     }
 
     /// Groups of files that import each other, directly or through others. A file that

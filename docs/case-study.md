@@ -264,3 +264,27 @@ errors is to run the code people actually write, and keep each such case as a fi
 Array methods (`push`, `map`, `filter`) are the largest false-error source still open,
 because only `length` is modelled; it needs generic method typing with callback inference
 and is the next piece of work, not a patch.
+
+## 14. Dependencies arrive as pieces, not as a rewrite
+
+**Problem.** The design documents name petgraph, Salsa, Bumpalo and mimalloc. Wiring all
+of them into the checker at once means a change nobody can review and a failure nobody
+can place.
+
+**Choice.** Each one is a small piece behind its own feature, with its own tests, and
+nothing in the checker reads it yet. A default build, the WASM build and the binary CI
+compares against tsc do not change. The stages that need a piece start from something
+already pinned down.
+
+**Where the design said no.** The topology has no "what does a change reach" search,
+because deciding what to recompute is the query layer's job and a second mechanism can
+disagree with it. There is no Salsa-interned name type, because ADR-1 chose per-file
+arenas over Salsa-interned types. The scratchpad takes only `Copy` values, because a bump
+never runs destructors. Each of those is a thing the code does not do, written down with
+the reason.
+
+**Two answers, one result.** petgraph's cycle search sits next to the graph's own, and a
+test holds them to the same answer. The component order is asserted, not assumed.
+
+**Allocator.** mimalloc is set in the binary behind an opt-in feature, since a library
+that chose a global allocator would change it for every program that links the crate.

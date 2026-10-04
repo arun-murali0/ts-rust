@@ -26,6 +26,8 @@ Generics (functions, interfaces, aliases, classes, recursion, builtins) ← curr
 Narrowing completion, sessions and file identity (joins, discriminated unions, `in`/`instanceof`, `CheckSession`)
     ↓
 Module Resolution (opt-in `module-resolution` feature: resolver, module graph, cycles, layers, project check)
+    ↓
+Architecture Foundation (opt-in `incremental`, `scratchpad` and `mimalloc` features; petgraph topology under `module-resolution`)
 ```
 
 These names describe capabilities. They are not release versions and should not be interpreted as a versioning scheme.
@@ -45,6 +47,7 @@ For the full, item-by-item picture of what's checked and what isn't across the e
 | Parameters and Destructuring | Model parameter metadata and binding/destructuring semantics. | `tests/parameters_destructuring.rs` | [parameters-destructuring](parameters-destructuring.md) |
 | Generics | Type parameters on functions, interfaces, aliases, and classes: inference, substitution, constraints, defaults, explicit type arguments, recursive generic shapes, and builtin generics (`Array<T>`, opaque `Promise<T>`). One consolidated document, not split by tier — see it for why. | `tests/generics_tier1.rs`, `tests/generics_tier2.rs`, `tests/generic_classes.rs`, `tests/recursive_types.rs`, `tests/builtin_generics.rs`, `tests/interface_methods.rs` | [generics](generics-tier.md) |
 | Module Resolution | Resolve imports with `oxc_resolver`, build a graph indexed by `FileId`, detect cycles, order files into dependency layers, check a project in parallel, and detect changed files. Behind the `module-resolution` feature. No cross-file name binding yet. | `tests/module_resolution.rs` (run with `--features module-resolution`) | [module-resolution](module-resolution.md) |
+| Architecture Foundation | The dependencies the design documents name, each behind its own feature and not yet used by the checker: a petgraph view of the module graph, a Salsa input and first query, a bump scratchpad that takes only `Copy` values, and mimalloc for the binary. | unit tests in `src/topology.rs`, `src/incremental.rs`, `src/scratchpad.rs`; the topology cases in `tests/module_resolution.rs` | [architecture-foundation](architecture-foundation.md) |
 
 Later work extends these milestones rather than adding a tier: `tests/narrowing_advanced.rs` and `tests/narrowing_complete.rs` (switch, `&&`/`||`, loops, joins, `in`, `instanceof`), `tests/generics_bounds.rs` (literal-preserving inference, explicit type arguments), `tests/declaration_collisions.rs`, `tests/union_member_access.rs` and `tests/check_session.rs` (sessions, metrics, file identity), `tests/unreachable_scopes.rs` (dead code in every construct, checked against tsc line for line) and `tests/everyday_patterns.rs` (empty arrays, parameter properties, boolean discriminants, generic callbacks).
 
