@@ -55,7 +55,7 @@ A handful of smaller, cross-cutting suites support these milestones rather than 
 
 ## Why it is built this way
 
-[case-study.md](case-study.md) collects the design decisions in one place: the problem each solves, what was rejected, and how it was checked. Start there when a choice looks odd.
+[case-study.md](case-study.md) collects the design decisions in one place: the problem each solves, what was rejected, and how it was checked. Start there when a choice looks odd. [decisions.md](decisions.md) is the shorter list of what the design documents left open and how each was closed.
 
 ## Architecture
 

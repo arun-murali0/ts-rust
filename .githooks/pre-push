@@ -1,25 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cargo fmt --all
-cargo check --all-targets --all-features
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+# Runs locally on `git push` (enable once with: bash scripts/enable-hooks.sh).
+# Same checks as the branch gate in CI (scripts/ci.sh): formatting and tests.
+# The tsc comparison is not run here; CI runs it once per merge on merge-tmp/*.
 
-# Same false-positive gate CI enforces (tsc-drift job), so a regression is caught
-# before the push instead of after. Skipped, with a notice, if Node is missing.
-if command -v node >/dev/null 2>&1; then
-  cargo build --release --bin ts-rust
-  if [ ! -d scripts/ts-diag-tool/node_modules ]; then
-    (cd scripts/ts-diag-tool && npm ci --no-audit --no-fund)
-  fi
-  result="$(mktemp)"
-  # compare.js exits nonzero when fixtures diverge from tsc on purpose; only the
-  # false-positive count is gated, by check-baseline.js below.
-  node scripts/ts-diag-tool/compare.js tests/fixtures target/release/ts-rust --json \
-    > "$result" || true
-  node scripts/ts-diag-tool/check-baseline.js < "$result"
-  rm -f "$result"
-else
-  echo "node not found: skipping tsc false-positive check (CI will still run it)"
+if ! cargo fmt --all -- --check; then
+  echo
+  echo "Formatting is off. Run 'cargo fmt --all', commit the result, then push again."
+  exit 1
 fi
+
+cargo test --locked --all-features

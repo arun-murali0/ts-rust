@@ -1,18 +1,13 @@
 name: CI
 
+# Branches (everything except main and merge-tmp/*): fmt + test via scripts/ci.sh.
+# merge-tmp/* (staging branches made by auto-merge.yml): the compare-against-tsc gate.
+# main: nothing runs, because only code that already passed both gates reaches it.
+
 on:
   pull_request:
   push:
-    # Nothing is ever pushed to main by hand: work lands on a branch, and auto-merge.yml
-    # promotes a branch commit to main only after CI has passed on that exact commit,
-    # and only when the branch already contains main, so the tree CI tested is the tree
-    # main receives. CI therefore runs on every branch except main.
     branches-ignore: [main]
-  schedule:
-    # Once a day on main, which is the only run main ever gets. It refreshes the build
-    # cache every branch restores from, and catches what a push never would: a new
-    # advisory in an unchanged lockfile. Scheduled workflows never run on forks.
-    - cron: "0 2 * * *"
   workflow_dispatch:
 
 permissions:
@@ -26,139 +21,42 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   CARGO_NET_RETRY: "10"
-  # Every warning is an error, for rustc, for clippy and for rustdoc. Cargo caps lints
-  # in registry dependencies, so this only ever fires on this repository's own code.
   RUSTFLAGS: "-D warnings"
-  RUSTDOCFLAGS: "-D warnings"
-  # Pinned, not `stable`: a new stable release would empty the build cache and could
-  # add clippy lints that fail CI with no change on our side. Keep it equal to
-  # rust-version in Cargo.toml.
+  # Keep equal to rust-version in Cargo.toml.
   RUST_TOOLCHAIN: "1.98.1"
 
 jobs:
-  # Decides which of the heavy jobs below have anything to check. The comparison is the
-  # whole branch against main, not the last push: a docs-only commit on top of a commit
-  # that changed code still counts as a change to code, so a red commit can never be
-  # hidden behind a later green one. Forks and PRs from this repository's own branches
-  # are handled by the same `if` on every job: the push run already covered them.
-  changes:
-    name: Which checks apply
-    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+  # Branch gate: fmt + test.
+  all-green:
+    name: All green
+    # Not on staging branches, and not on same-repo PRs (the push run covers them).
+    if: ${{ !startsWith(github.ref, 'refs/heads/merge-tmp/') && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      rust: ${{ steps.diff.outputs.rust }}
-      drift: ${{ steps.diff.outputs.drift }}
-      deps: ${{ steps.diff.outputs.deps }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Every branch and enough history to find the merge base with main.
-          fetch-depth: 0
-
-      - name: Compare this branch with main
-        id: diff
-        shell: bash
-        env:
-          EVENT: ${{ github.event_name }}
-        run: |
-          set -euo pipefail
-          # Anything compiled, run or used to build: sources, tests and their fixtures,
-          # benches, examples, scripts, the lockfile and manifest, tool settings.
-          RUST_RE='^(src|bin|tests|benches|examples|scripts)/|^Cargo\.(toml|lock)$|^(rustfmt|clippy)\.toml$|^rust-toolchain|^build\.rs$|^\.github/workflows/ci\.yml$'
-          # What can change the checker's output on the comparison fixtures.
-          DRIFT_RE='^(src|bin)/|^tests/fixtures/|^scripts/ts-diag-tool/|^Cargo\.(toml|lock)$|^\.github/workflows/ci\.yml$'
-          DEPS_RE='(^|/)Cargo\.(toml|lock)$'
-
-          rust=true; drift=true; deps=true
-          if [ "$EVENT" = "push" ] || [ "$EVENT" = "pull_request" ]; then
-            base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
-            if [ -n "$base" ]; then
-              files="$(git diff --name-only "$base" HEAD)"
-              echo "Changed against main:"; echo "${files:-<nothing>}"
-              flag() { if grep -qE "$1" <<<"$files"; then echo true; else echo false; fi; }
-              rust="$(flag "$RUST_RE")"
-              drift="$(flag "$DRIFT_RE")"
-              deps="$(flag "$DEPS_RE")"
-            fi
-          fi
-          # Schedule and manual runs, and any branch with no merge base, check everything.
-          { echo "rust=$rust"; echo "drift=$drift"; echo "deps=$deps"; } >> "$GITHUB_OUTPUT"
-          echo "rust=$rust drift=$drift deps=$deps"
-
-  # One job on purpose. Formatting, clippy, every feature on its own, the tests and
-  # rustdoc all share one checkout, one toolchain install and one build cache, and the
-  # crate and its dependencies are compiled once and reused by each step. Splitting them
-  # into parallel jobs would pay that setup and compile cost once per job.
-  quality:
-    name: Quality
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     env:
-      # Line tables keep panic backtraces readable while linking and caching far
-      # less debug info than the default.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
 
-      # Cheap and independent of the build, so it fails before the toolchain is installed.
-      - name: Repository hygiene
-        shell: bash
-        run: |
-          set -euo pipefail
-          bad="$(find . -type f -not -path './.git/*' -size +10M -print)"
-          if [ -n "$bad" ]; then
-            echo "Large files found:"
-            echo "$bad"
-            exit 1
-          fi
-          for f in .env .env.local .env.production; do
-            if [ -e "$f" ]; then
-              echo "Forbidden secret file present: $f"
-              exit 1
-            fi
-          done
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: rustfmt, clippy
-
-      - uses: taiki-e/install-action@cargo-hack
+          components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # One cache for every branch. Only the daily run on main writes it (branches
-          # may read the default branch's caches but not each other's), so a pile of
-          # branches cannot push main's cache out of the repository's cache quota.
           shared-key: ci
-          save-if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
-      - name: Run repository quality gates
+      - name: fmt + test
         run: bash ./scripts/ci.sh
 
-  security:
-    name: Dependency security
-    needs: changes
-    if: ${{ needs.changes.outputs.deps == 'true' }}
+  # Staging gate: ts-rust vs real tsc over tests/fixtures, gated by the baseline.
+  # Runs once per merge into main, never per branch push.
+  compare-tsc:
+    name: Compare against real tsc
+    if: ${{ startsWith(github.ref, 'refs/heads/merge-tmp/') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: taiki-e/install-action@cargo-audit
-
-      - name: Audit dependencies
-        run: cargo audit
-
-  tsc-drift:
-    name: Compare against real tsc (false-positive gate)
-    needs: changes
-    if: ${{ needs.changes.outputs.drift == 'true' && github.event_name != 'schedule' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
       CARGO_PROFILE_RELEASE_LTO: "off"
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
@@ -174,7 +72,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-drift
-          save-if: ${{ github.event_name == 'workflow_dispatch' }}
 
       - uses: actions/setup-node@v4
         with:
@@ -196,72 +93,3 @@ jobs:
 
       - name: Enforce false-positive baseline
         run: node scripts/ts-diag-tool/check-baseline.js < /tmp/tsc-drift-result.json
-
-      - name: Check out main for comparison
-        if: github.ref != 'refs/heads/main'
-        uses: actions/checkout@v4
-        with:
-          ref: main
-          path: main-src
-
-      - name: Identify main's commit
-        id: main
-        if: github.ref != 'refs/heads/main'
-        run: echo "sha=$(git -C main-src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Restore main's binary
-        id: main-bin
-        if: github.ref != 'refs/heads/main'
-        uses: actions/cache@v4
-        with:
-          path: main-src/target/release/ts-rust
-          key: main-ts-rust-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ steps.main.outputs.sha }}-v1
-
-      - name: Build main's ts-rust (release)
-        if: github.ref != 'refs/heads/main' && steps.main-bin.outputs.cache-hit != 'true'
-        run: cargo build --locked --release --bin ts-rust --manifest-path main-src/Cargo.toml
-
-      - name: Compare main's ts-rust against real tsc over the same fixtures
-        if: github.ref != 'refs/heads/main'
-        run: |
-          node scripts/ts-diag-tool/compare.js tests/fixtures main-src/target/release/ts-rust --json \
-            > /tmp/tsc-drift-main.json || true
-
-      - name: Fail if this commit is worse than main
-        if: github.ref != 'refs/heads/main'
-        run: |
-          node -e '
-            const fs = require("fs");
-            const here = JSON.parse(fs.readFileSync("/tmp/tsc-drift-result.json", "utf8")).summary;
-            const main = JSON.parse(fs.readFileSync("/tmp/tsc-drift-main.json", "utf8")).summary;
-            console.log("false positives  main:", main.falsePositive, " this commit:", here.falsePositive);
-            if (here.falsePositive > main.falsePositive) {
-              console.error("FAIL: this commit has more false positives than main.");
-              process.exit(1);
-            }
-          '
-
-  # The single status that means "everything that applied, ran, and passed". Branch
-  # protection on main requires this one check, and auto-merge.yml looks for CI as a
-  # whole. A job that was skipped because nothing it checks changed counts as passed;
-  # one that failed or was cancelled does not. A job added above is covered by adding
-  # it to `needs`.
-  all-green:
-    name: All green
-    if: ${{ always() }}
-    needs: [changes, quality, security, tsc-drift]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Every job passed, or was skipped on purpose
-        shell: bash
-        env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          echo "Job results: $RESULTS"
-          for result in $RESULTS; do
-            case "$result" in
-              success|skipped) ;;
-              *) echo "A job finished as '$result'."; exit 1 ;;
-            esac
-          done

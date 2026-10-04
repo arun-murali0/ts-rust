@@ -282,6 +282,7 @@ Start with [docs/README.md](docs/README.md) for the milestone map and architectu
 - [Architecture](docs/architecture.md): ownership, dependencies, semantic boundaries, and future scaling.
 - [Roadmap](docs/roadmap.md): the next semantic capabilities and their intended order.
 - [Module Resolution](docs/module-resolution.md): the opt-in project layer (resolver, module graph, cycles, layers, parallel project check).
+- [Decisions](docs/decisions.md): the choices that closed the open questions in `HLD.md`, with what would reopen each.
 - [Architecture Foundation](docs/architecture-foundation.md): the optional dependencies from the design documents (petgraph, Salsa, Bumpalo, mimalloc), each behind its own feature and not yet used by the checker.
 - [Testing](docs/testing.md): fixture conventions, regression policy, benchmarks, and compatibility harness.
 - [Purpose and boundaries](docs/purpose-and-overdesign.md): why the project exists and what it deliberately does not rebuild.

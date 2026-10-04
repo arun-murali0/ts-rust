@@ -304,6 +304,7 @@ These are regression-tested in `tests/module_resolution.rs`. They are about find
 - [x] Import cycles (including a file importing itself) and dependency layers
 - [x] Parallel project check with a report for every file, in `FileId` order
 - [x] Changed-file detection (fingerprint, then content hash)
+- [x] `FileId` follows path order, whatever order the entries are given in
 - [x] petgraph topology agrees with the graph's own cycle search and orders components dependencies first
 - [ ] tsconfig `paths` / `baseUrl`
 - [ ] Re-check only changed files and their dependents

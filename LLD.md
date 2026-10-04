@@ -303,7 +303,7 @@ Diagnostics are rendered to `String` **inside** the unit, while the arena is ali
 
 ```rust
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-pub struct ModuleKey(u128);   // hash of the module's canonical path (or package name and subpath)
+pub struct ModuleKey(u128);   // hash of the module's identity, by the rule in 3.1.1
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub struct DeclKey(u128);     // hash(ENC_VERSION, ModuleKey, local name, disambiguator)
@@ -314,6 +314,28 @@ pub struct SigHash(u128);     // hash of the declaration's own public shape (3.3
 
 - `disambiguator` distinguishes merged declarations (interface + namespace + function with the same name) and overloads: use a stable kind tag plus an index in source order within that merge group.
 - Your earlier "chunk id" is the pair (`DeclKey`, `SigHash`); references between declarations carry the `DeclKey` only (HLD ADR-5).
+- A key is never built from a `FileId`. `FileId` is a run-local index (4.1) and changes when a file is added.
+
+#### 3.1.1 Module key rule
+
+```text
+ModuleKey = XXH3-128( ENC_VERSION:u8 || kind:u8 || fields )
+  0x01 Project  : path
+  0x02 Package  : name || version || subpath
+  0x03 External : path
+  each field    : len:u32le || utf8 bytes
+```
+
+- **Project:** a file under the project root whose canonical path does not pass through a `node_modules` directory. `path` is relative to the root, with `/` separators.
+- **Package:** a file whose canonical path passes through `node_modules`. Its package is the nearest `package.json` at or above its directory, searching upward but not past `node_modules`, that has both a `name` and a `version`. `name` is taken verbatim, scope included. `subpath` is relative to the package directory, with `/` separators.
+- **External:** every other file, including one inside `node_modules` with no such `package.json`. `path` is the absolute canonical path, with `/` separators.
+- A `package.json` without a `name` or without a `version` (a `{"type": "module"}` marker, for example) defines no package, and the search continues upward.
+- Workspace packages and `npm link` targets canonicalize to a path outside `node_modules`, so they are Project or External files.
+- **Never in a key:** a `FileId`, the absolute project root, a modification time, or anything from the host environment.
+- **Why:** an id that survives moving the project directory, installing it at another path, or pnpm's symlinked layout is the point of having a persistent id. A package is named for what it is, not for where it was installed.
+- **Cost:** two copies of the same name and version with different contents, one patched in place, get the same key. That is rare, and it is stated here so it is not discovered later.
+- **Root:** `ModuleGraph` has no project root today. Stage 2 adds it as an input of the graph.
+- **[VERIFY]** On a case-insensitive filesystem the key uses whatever casing `canonicalize` returns. A stage 2 test per platform confirms that two spellings of one file give one key.
 
 ### 3.2 Canonical encoding and the stable hasher
 
@@ -789,4 +811,4 @@ Run the same project many times with 1, 2 and N threads and injected random dela
 | 9 | WASM: threads and allocator | Same scheduler interface with a single-thread implementation; keep separate build profile |
 | 10 | Runtime and typed IR (value representation, cycles, GC) | Out of scope here; decide before any backend work |
 
-**Decisions I need from you (same list as the HLD):** identity/version split; alias wrapper nodes; union display policy; SCC-as-unit for v1; hash function; lazy versus eager stable hashing; pinned Salsa version after S1.
+**Decisions (locked, HLD section 7):** identity/version split; alias wrapper nodes; union display first-writer-wins; SCC as the v1 unit; XXH3-128; lazy stable hashing; Salsa `=0.28.5` provisional until S1; the module key rule (3.1.1); `FileId` as a run-local index sorted by path.

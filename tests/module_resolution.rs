@@ -63,6 +63,12 @@ fn names(graph: &ModuleGraph, ids: &[FileId]) -> Vec<String> {
         .collect()
 }
 
+fn all_ids(graph: &ModuleGraph) -> Vec<FileId> {
+    (0..graph.len())
+        .map(|position| FileId::new(u32::try_from(position).expect("fixture is small")))
+        .collect()
+}
+
 #[test]
 fn an_extensionless_relative_specifier_resolves_to_the_source_file() {
     let graph = build(&["basic/main.ts"]);
@@ -235,7 +241,7 @@ fn a_missing_entry_is_a_read_error() {
 }
 
 #[test]
-fn the_report_names_every_file_including_the_ones_that_could_not_be_checked() {
+fn the_report_is_in_path_order_and_names_every_file() {
     let graph = build(&[
         "project-check/clean.ts",
         "project-check/type_error.ts",
@@ -253,17 +259,25 @@ fn the_report_names_every_file_including_the_ones_that_could_not_be_checked() {
         .collect();
     assert_eq!(ids, [0, 1, 2], "reports are sorted by file id");
 
+    // The entries above were given as clean, type_error, syntax_error. The report follows
+    // path order, so the order they were given in does not show.
+    let reported: Vec<FileId> = report.files.iter().map(|file| file.file_id).collect();
+    assert_eq!(
+        names(&graph, &reported),
+        ["clean.ts", "syntax_error.ts", "type_error.ts"]
+    );
+
     assert!(matches!(
         &report.files[0].outcome,
         FileOutcome::Checked(diagnostics) if diagnostics.is_empty()
     ));
     assert!(matches!(
         &report.files[1].outcome,
-        FileOutcome::Checked(diagnostics) if !diagnostics.is_empty()
+        FileOutcome::CheckFailed(_)
     ));
     assert!(matches!(
         &report.files[2].outcome,
-        FileOutcome::CheckFailed(_)
+        FileOutcome::Checked(diagnostics) if !diagnostics.is_empty()
     ));
     assert_eq!(report.failure_count(), 1);
     assert!(report.diagnostic_count() >= 1);
@@ -284,6 +298,68 @@ fn dependency_declarations_are_in_the_graph_but_are_not_checked() {
         report.files[0].file_id,
         id_of(&graph, "package-exports/app.ts")
     );
+}
+
+#[test]
+fn ids_follow_path_order_whatever_order_the_entries_were_given_in() {
+    let from_entry = build(&["cycles/entry.ts"]);
+    let reordered = build(&["cycles/ring_c.ts", "cycles/leaf.ts", "cycles/entry.ts"]);
+
+    let expected = ["entry.ts", "leaf.ts", "ring_a.ts", "ring_b.ts", "ring_c.ts"];
+    assert_eq!(names(&from_entry, &all_ids(&from_entry)), expected);
+    assert_eq!(names(&reordered, &all_ids(&reordered)), expected);
+
+    // The same ids mean the same edges and the same answers, wherever the walk started.
+    for id in all_ids(&from_entry) {
+        assert_eq!(from_entry.dependencies(id), reordered.dependencies(id));
+        assert_eq!(from_entry.dependents(id), reordered.dependents(id));
+    }
+    assert_eq!(from_entry.layers(), reordered.layers());
+    assert_eq!(from_entry.cycles(), reordered.cycles());
+}
+
+#[test]
+fn an_entry_does_not_get_a_low_id_for_being_an_entry() {
+    // ring_c is the only entry, and it sorts after everything it reaches.
+    let graph = build(&["cycles/ring_c.ts"]);
+    assert_eq!(
+        names(&graph, &all_ids(&graph)),
+        ["leaf.ts", "ring_a.ts", "ring_b.ts", "ring_c.ts"]
+    );
+    assert_eq!(id_of(&graph, "cycles/ring_c.ts"), FileId::new(3));
+}
+
+#[test]
+fn adding_a_file_shifts_the_ids_after_it_and_nothing_else() {
+    let dir = scratch_dir("path-order-shift");
+    let a = dir.join("a.ts");
+    let b = dir.join("b.ts");
+    let c = dir.join("c.ts");
+    fs::write(&a, "const x: number = 1;").expect("write should succeed");
+    fs::write(&c, "const x: number = 1;").expect("write should succeed");
+
+    let index = |graph: &ModuleGraph, path: &Path| {
+        graph
+            .files()
+            .id(path)
+            .expect("file is in the graph")
+            .index()
+    };
+
+    let before = ModuleGraph::build(&[a.clone(), c.clone()], &ModuleResolver::new())
+        .expect("scratch graph should build");
+    assert_eq!((index(&before, &a), index(&before, &c)), (0, 1));
+
+    fs::write(&b, "const x: number = 1;").expect("write should succeed");
+    let after = ModuleGraph::build(&[a.clone(), b.clone(), c.clone()], &ModuleResolver::new())
+        .expect("scratch graph should build");
+    assert_eq!(
+        (index(&after, &a), index(&after, &b), index(&after, &c)),
+        (0, 1, 2),
+        "an id is a place in the order, so it is never stored or put in a key"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // A scratch project for the tests that have to change files. Each test gets its own

@@ -156,6 +156,14 @@ chain. Parallelism is one `CheckSession` per file inside a layer, so nothing mut
 shared and the checker gained no locks. The report is sorted by `FileId`, which is why
 `FileId` is now ordered.
 
+**Ids in path order.** Discovery hands out ids as files are found, so the numbering depends
+on the order the entries came in and on how the imports are written. Every list sorted by
+`FileId` would then depend on it too. The graph walks with those ids and, when the walk ends,
+renumbers the files in path order and remaps every edge. The report, the layers and the
+cycles come out the same wherever the walk started, and a test gives one project two entry
+orders to prove it. The id is a place in that order for one run, so it is never stored or put
+in a key.
+
 **Two-step change detection.** A stat call (length and mtime) answers the common case. A
 hash of the bytes is taken only when the stat moved, so a touched file with the same
 contents is not a change. The fingerprint is taken before the read, and an unreadable

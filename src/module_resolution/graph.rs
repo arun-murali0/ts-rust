@@ -23,7 +23,7 @@ pub struct ModuleEdge {
 }
 
 // The files reachable from a project's entry points and the imports between them.
-// Everything is indexed by FileId, which ProjectFiles hands out in discovery order, so
+// Everything is indexed by FileId, which follows path order (see `in_path_order`), so
 // the vectors below are plain arrays and a lookup never hashes a path.
 //
 // `dependencies` and `dependents` are the resolved edges with duplicates removed (two
@@ -42,7 +42,9 @@ pub struct ModuleGraph {
 impl ModuleGraph {
     /// Reads every file reachable from `entries` and resolves its imports. Entries must
     /// be absolute so that one file is never interned under two spellings of its path.
+    /// The ids of the result follow path order, whatever order the entries were given in.
     pub fn build(entries: &[PathBuf], resolver: &ModuleResolver) -> Result<Self, ModuleError> {
+        // Discovery ids: handed out as files are found, and used only until the walk ends.
         let mut files = ProjectFiles::new();
         for entry in entries {
             if !entry.is_absolute() {
@@ -99,7 +101,61 @@ impl ModuleGraph {
             next += 1;
         }
 
-        Ok(Self::assemble(files, edges, states, syntax_errors))
+        Ok(Self::in_path_order(&files, edges, states, syntax_errors))
+    }
+
+    // Discovery ids depend on the order the entries came in and on how imports are
+    // written, so the same project could be numbered two ways. The ids the graph
+    // publishes follow path order instead: the report, the layers and every other list
+    // sorted by FileId then come out the same wherever the walk started. Paths compare
+    // component by component, so the order does not depend on the separator character.
+    // The new id of a file is its place in that order, and every edge target is
+    // renumbered to match.
+    fn in_path_order(
+        discovered: &ProjectFiles,
+        edges: Vec<Vec<ModuleEdge>>,
+        states: Vec<FileState>,
+        syntax_errors: Vec<bool>,
+    ) -> Self {
+        let paths: Vec<&Path> = (0..discovered.len())
+            .map(|position| {
+                discovered
+                    .path(file_id(position))
+                    .expect("every interned id has a path")
+            })
+            .collect();
+
+        // order[new] is the discovery position of the file that gets the id `new`.
+        let mut order: Vec<usize> = (0..paths.len()).collect();
+        order.sort_by(|&a, &b| paths[a].cmp(paths[b]));
+
+        let mut new_position = vec![0; order.len()];
+        for (new, &old) in order.iter().enumerate() {
+            new_position[old] = new;
+        }
+
+        let mut files = ProjectFiles::new();
+        for &old in &order {
+            files.intern(paths[old].to_path_buf());
+        }
+
+        let mut edges: Vec<Option<Vec<ModuleEdge>>> = edges.into_iter().map(Some).collect();
+        let mut states: Vec<Option<FileState>> = states.into_iter().map(Some).collect();
+        let mut sorted_edges = Vec::with_capacity(order.len());
+        let mut sorted_states = Vec::with_capacity(order.len());
+        let mut sorted_errors = Vec::with_capacity(order.len());
+        for &old in &order {
+            let mut file_edges = edges[old].take().expect("each file is moved once");
+            for edge in &mut file_edges {
+                edge.target = edge
+                    .target
+                    .map(|target| file_id(new_position[index_of(target)]));
+            }
+            sorted_edges.push(file_edges);
+            sorted_states.push(states[old].take().expect("each file is moved once"));
+            sorted_errors.push(syntax_errors[old]);
+        }
+        Self::assemble(files, sorted_edges, sorted_states, sorted_errors)
     }
 
     fn assemble(
