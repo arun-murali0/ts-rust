@@ -222,7 +222,9 @@ fn run_foundation(wanted: &dyn Fn(&str) -> bool) {
                 .expect("heap workload graph should build");
             let topology = graph.topology();
             measure("topology_ring_50_files/cycles_graph", || graph.cycles());
-            measure("topology_ring_50_files/cycles_petgraph", || topology.cycles());
+            measure("topology_ring_50_files/cycles_petgraph", || {
+                topology.cycles()
+            });
         }
     }
 
