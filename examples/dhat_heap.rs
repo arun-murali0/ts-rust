@@ -8,6 +8,10 @@
 //     CARGO_PROFILE_RELEASE_DEBUG=true \
 //       cargo run --release --example dhat_heap --features dhat-heap,module-resolution
 //
+//     # plus the foundation layers (petgraph topology and the bump scratchpad):
+//     CARGO_PROFILE_RELEASE_DEBUG=true \
+//       cargo run --release --example dhat_heap --features dhat-heap,module-resolution,scratchpad
+//
 //     # one workload only, so dhat-heap.json and the peak are about it alone:
 //     CARGO_PROFILE_RELEASE_DEBUG=true \
 //       cargo run --release --example dhat_heap --features dhat-heap -- class_hierarchy
@@ -155,6 +159,106 @@ fn run_project_and_report(label: &str, project: &project_fixtures::Project, repo
     let _ = black_box(report);
 }
 
+// Labels of the foundation workloads below, so a filter that names only one of them is
+// not mistaken for "no workload matches". Empty without the features that build them.
+const FOUNDATION_LABELS: &[&str] = &[
+    #[cfg(feature = "module-resolution")]
+    "topology_layered_201_files",
+    #[cfg(feature = "module-resolution")]
+    "topology_ring_50_files",
+    #[cfg(feature = "scratchpad")]
+    "scratchpad_1000_values",
+    #[cfg(feature = "scratchpad")]
+    "vec_1000_values",
+];
+
+// Allocations made by `work`, for the foundation layers, which are measured as one step
+// each and have no diagnostics to report.
+#[cfg(any(feature = "module-resolution", feature = "scratchpad"))]
+fn measure<R>(label: &str, work: impl FnOnce() -> R) -> R {
+    #[cfg(feature = "dhat-heap")]
+    let before = dhat::HeapStats::get();
+
+    let out = black_box(work());
+
+    #[cfg(feature = "dhat-heap")]
+    {
+        let after = dhat::HeapStats::get();
+        println!(
+            "{label:<40} {:>9} blocks {:>12} bytes",
+            after.total_blocks - before.total_blocks,
+            after.total_bytes - before.total_bytes
+        );
+    }
+    #[cfg(not(feature = "dhat-heap"))]
+    println!("{label:<40} ran");
+
+    out
+}
+
+// The petgraph topology and the worker scratchpad, next to the plain-`Vec` and
+// hand-written-search code they are meant to compare with. Fixtures are built before the
+// measured step, so only the step itself is counted.
+fn run_foundation(wanted: &dyn Fn(&str) -> bool) {
+    let _ = wanted;
+
+    #[cfg(feature = "module-resolution")]
+    {
+        use ts_rust::{ModuleGraph, ModuleResolver};
+
+        if wanted("topology_layered_201_files") {
+            let project = project_fixtures::Project::new("heap-topology").layered(20, 10, 3);
+            let graph = ModuleGraph::build(&project.entries, &ModuleResolver::new())
+                .expect("heap workload graph should build");
+            let topology = measure("topology_layered_201_files/from_graph", || graph.topology());
+            measure("topology_layered_201_files/components", || {
+                topology.components()
+            });
+        }
+
+        if wanted("topology_ring_50_files") {
+            let project = project_fixtures::Project::new("heap-topology-ring").ring(50);
+            let graph = ModuleGraph::build(&project.entries, &ModuleResolver::new())
+                .expect("heap workload graph should build");
+            let topology = graph.topology();
+            measure("topology_ring_50_files/cycles_graph", || graph.cycles());
+            measure("topology_ring_50_files/cycles_petgraph", || topology.cycles());
+        }
+    }
+
+    #[cfg(feature = "scratchpad")]
+    {
+        use ts_rust::WorkerScratch;
+
+        if wanted("scratchpad_1000_values") {
+            let mut scratch = WorkerScratch::with_capacity(16 * 1024);
+            measure("scratchpad_1000_values/first_job", || {
+                for value in 0..1_000u32 {
+                    black_box(scratch.alloc(value));
+                }
+            });
+            scratch.reset();
+            // After a reset the same memory is reused, so this job should allocate
+            // nothing from the heap.
+            measure("scratchpad_1000_values/after_reset", || {
+                for value in 0..1_000u32 {
+                    black_box(scratch.alloc(value));
+                }
+            });
+        }
+
+        if wanted("vec_1000_values") {
+            measure("vec_1000_values", || {
+                let mut values = Vec::new();
+                for value in 0..1_000u32 {
+                    values.push(black_box(value));
+                }
+                values
+            });
+        }
+    }
+}
+
 fn main() {
     let filter = std::env::args().nth(1);
     let checker = TypeChecker::new();
@@ -233,7 +337,9 @@ fn main() {
     #[cfg(not(feature = "module-resolution"))]
     let selected_projects: Vec<&(&str, ())> = Vec::new();
 
-    if selected.is_empty() && selected_projects.is_empty() {
+    let foundation_selected = FOUNDATION_LABELS.iter().any(|label| wanted(label));
+
+    if selected.is_empty() && selected_projects.is_empty() && !foundation_selected {
         eprintln!(
             "no workload label contains {:?}; available:",
             filter.unwrap_or_default()
@@ -243,6 +349,9 @@ fn main() {
         }
         #[cfg(feature = "module-resolution")]
         for (label, _) in &projects {
+            eprintln!("  {label}");
+        }
+        for label in FOUNDATION_LABELS {
             eprintln!("  {label}");
         }
         process::exit(2);
@@ -263,6 +372,8 @@ fn main() {
     }
     #[cfg(not(feature = "module-resolution"))]
     let _ = selected_projects;
+
+    run_foundation(&wanted);
 }
 
 fn large_source(function_count: usize) -> String {

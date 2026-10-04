@@ -1,24 +1,32 @@
-name: Auto-merge features into main
+name: Auto-merge branches into main
 
-# Promotes `features` to `main` as soon as CI goes green on it, with the schedule
-# below as a safety net, so main stays one clean commit per batch of work. A run
-# merges only when ALL of these hold:
-#   1. features is ahead of main
-#   2. every commit in the batch is authored by the repository owner
-#   3. CI completed successfully on the exact head commit of features
+# Promotes a work branch to `main` the moment CI goes green on it, then brings every
+# other branch up to date with the new main, so no branch is left behind. Any branch
+# other than main is covered, however many are created. A branch
+# is merged only when ALL of these hold:
+#   1. it is ahead of main
+#   2. every non-merge commit in the batch is authored by the repository owner
+#   3. CI completed successfully on the exact head commit of the branch
+#   4. it already contains main. Then squashing it gives main exactly the tree CI
+#      tested, so main is green by construction. If it does not, main is merged into
+#      the branch instead and the merge waits for CI on that new commit.
 # Otherwise it does nothing and tries again on the next trigger.
 #
 # Note: `workflow_run` triggers always use the workflow file on the default
 # branch (main), so this takes effect once this file has been merged to main.
+#
+# AUTO_MERGE_TOKEN (a personal access token or GitHub App token) is needed for the
+# branch sync: a push made with the default GITHUB_TOKEN does not start other
+# workflows, so the synced branch would never get a CI run and could not be merged.
 
 on:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
-    branches: [features]
+    branches-ignore: [main]
   schedule:
     # One retry slot (UTC), after ci.yml's daily run. A merge is normally triggered
-    # by CI finishing on features; this only covers a merge that was skipped then.
+    # by CI finishing on a branch; this only covers a merge that was skipped then.
     # Scheduled workflows never run on forks, so this is effectively owner-only.
     - cron: "30 3 * * *"
   workflow_dispatch:
@@ -26,6 +34,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   actions: read
 
 concurrency:
@@ -33,13 +42,15 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SOURCE: features
   TARGET: main
+  # Branches that are never merged or synced. Every other branch is picked up
+  # automatically, so a new branch needs no change here.
+  EXCLUDE: "dependabot/.*|gh-pages"
   GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
 
 jobs:
   merge:
-    name: Merge features into main
+    name: Merge green branches into main and sync the rest
     runs-on: ubuntu-latest
     # A failed or cancelled CI run never triggers a merge attempt.
     if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
@@ -49,57 +60,124 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
 
-      - name: Merge if ready
+      - name: Merge what is green, then sync the others
         shell: bash
         run: |
           set -euo pipefail
           REPO="${{ github.repository }}"
           OWNER="${{ github.repository_owner }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git fetch origin "$SOURCE" "$TARGET" || { echo "No $SOURCE branch yet; nothing to do."; exit 0; }
-
-          AHEAD="$(git rev-list --count "origin/$TARGET..origin/$SOURCE")"
-          if [ "$AHEAD" = "0" ]; then
-            echo "$SOURCE has nothing new for $TARGET."
-            exit 0
+          if [ "${{ secrets.AUTO_MERGE_TOKEN != '' }}" != "true" ]; then
+            echo "::warning::AUTO_MERGE_TOKEN is not set. Synced branches will not get a CI run, so they will not auto-merge."
           fi
-          SHA="$(git rev-parse "origin/$SOURCE")"
-          echo "$AHEAD commit(s) to merge, head $SHA"
 
-          # 1. Only the owner's commits are auto-merged.
-          for c in $(git rev-list "origin/$TARGET..origin/$SOURCE"); do
-            login="$(gh api "repos/$REPO/commits/$c" --jq '.author.login // ""')"
-            if [ "${login,,}" != "${OWNER,,}" ]; then
-              echo "Commit $c is authored by '${login:-unlinked email}', not $OWNER. Not auto-merging."
-              exit 0
+          git fetch origin --prune
+
+          # Every branch on the remote except main and the excluded ones, found fresh
+          # each time so new branches are covered without editing this file.
+          list_branches() {
+            git for-each-ref --format='%(refname)' refs/remotes/origin/ \
+              | sed 's#^refs/remotes/origin/##' \
+              | grep -Ev "^(HEAD|$TARGET|$EXCLUDE)$" || true
+          }
+
+          sync_into() {
+            # Brings main into branch $1 with a merge commit. A conflict is left for a
+            # person: the merge is aborted and one issue is opened.
+            local branch="$1"
+            git checkout -q -B "$branch" "origin/$branch"
+            if git merge --no-edit "origin/$TARGET" >/dev/null 2>&1; then
+              git push origin "HEAD:refs/heads/$branch"
+              echo "Synced $TARGET into $branch."
+            else
+              git merge --abort || true
+              echo "::warning::$branch conflicts with $TARGET; not synced."
+              title="Branch $branch conflicts with $TARGET"
+              if [ -z "$(gh issue list --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')" ]; then
+                gh issue create --title "$title" \
+                  --body "Automatic sync of \`$TARGET\` into \`$branch\` hit a conflict. Merge or rebase \`$branch\` onto \`$TARGET\` by hand; auto-merge resumes once CI is green on the result." || true
+              fi
             fi
+          }
+
+          merged_any=false
+          for SOURCE in $(list_branches); do
+            echo "=== $SOURCE"
+            if ! git rev-parse --verify -q "origin/$SOURCE" >/dev/null; then
+              echo "No $SOURCE branch; skipping."
+              continue
+            fi
+
+            AHEAD="$(git rev-list --count "origin/$TARGET..origin/$SOURCE")"
+            if [ "$AHEAD" = "0" ]; then
+              echo "$SOURCE has nothing new for $TARGET."
+              continue
+            fi
+            SHA="$(git rev-parse "origin/$SOURCE")"
+            echo "$AHEAD commit(s) to merge, head $SHA"
+
+            # 1. Only the owner's commits are auto-merged. Merge commits made by the
+            # sync below are not authored by a person and are not checked.
+            owned=true
+            for c in $(git rev-list --no-merges "origin/$TARGET..origin/$SOURCE"); do
+              login="$(gh api "repos/$REPO/commits/$c" --jq '.author.login // ""')"
+              if [ "${login,,}" != "${OWNER,,}" ]; then
+                echo "Commit $c is authored by '${login:-unlinked email}', not $OWNER. Not auto-merging $SOURCE."
+                owned=false
+                break
+              fi
+            done
+            [ "$owned" = "true" ] || continue
+
+            # 2. CI must have finished green on this exact commit.
+            STATE="$(gh run list --workflow ci.yml --branch "$SOURCE" --commit "$SHA" \
+              --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' || true)"
+            if [ "$STATE" != "completed/success" ]; then
+              echo "CI on $SHA is '${STATE:-not found}', not completed/success. Will retry on the next trigger."
+              continue
+            fi
+
+            # 3. The branch must contain main. If main moved on, bring it in and let CI
+            # run on the result; the next trigger does the merge.
+            if ! git merge-base --is-ancestor "origin/$TARGET" "origin/$SOURCE"; then
+              echo "$TARGET has moved since $SOURCE was last updated; syncing it in first."
+              sync_into "$SOURCE"
+              continue
+            fi
+
+            # 4. One PR, squash-merged: one clean commit on main per batch.
+            TITLE="Merge $SOURCE: $AHEAD change(s) on $(date -u +'%Y-%m-%d %H:%M UTC')"
+            BODY="$(git log --no-merges --format='- %s' "origin/$TARGET..origin/$SOURCE")"
+
+            PR="$(gh pr list --base "$TARGET" --head "$SOURCE" --state open --json number --jq '.[0].number // empty')"
+            if [ -z "$PR" ]; then
+              PR="$(gh pr create --base "$TARGET" --head "$SOURCE" --title "$TITLE" --body "$BODY")"
+            fi
+            # --match-head-commit: abort if something was pushed after CI was checked.
+            # The branch contained main, so main now holds exactly the tree CI just
+            # passed. Main itself gets no CI run on push (see ci.yml).
+            gh pr merge "$PR" --squash --subject "$TITLE" --body "$BODY" --match-head-commit "$SHA"
+            merged_any=true
+
+            # 5. A squash leaves the branch with different history than main, which
+            # would cause conflicts next time. Realign it to main, but only if nobody
+            # pushed to it since $SHA (force-with-lease).
+            git fetch origin "$TARGET" "$SOURCE" || true
+            git push --force-with-lease="$SOURCE:$SHA" origin "origin/$TARGET:refs/heads/$SOURCE" \
+              || echo "$SOURCE moved since the merge; left as is. Run: git fetch && rebase onto origin/main."
+
+            # Later branches in this run must see the new main.
+            git fetch origin --prune
           done
 
-          # 2. CI must have finished green on this exact commit.
-          STATE="$(gh run list --workflow ci.yml --branch "$SOURCE" --commit "$SHA" \
-            --limit 1 --json status,conclusion --jq '.[0] | "\(.status)/\(.conclusion)"' || true)"
-          if [ "$STATE" != "completed/success" ]; then
-            echo "CI on $SHA is '${STATE:-not found}', not completed/success. Will retry on the next trigger."
-            exit 0
-          fi
-
-          # 3. One PR, squash-merged: one clean commit on main per batch.
-          TITLE="Merge $SOURCE: $AHEAD change(s) on $(date -u +'%Y-%m-%d %H:%M UTC')"
-          BODY="$(git log --format='- %s' "origin/$TARGET..origin/$SOURCE")"
-
-          PR="$(gh pr list --base "$TARGET" --head "$SOURCE" --state open --json number --jq '.[0].number // empty')"
-          if [ -z "$PR" ]; then
-            PR="$(gh pr create --base "$TARGET" --head "$SOURCE" --title "$TITLE" --body "$BODY")"
-          fi
-          # --match-head-commit: abort if something was pushed after CI was checked.
-          # [skip ci] on the squash commit: main and the realigned features then hold
-          # exactly the tree CI just passed on features, so re-running CI on either
-          # push would repeat that run. The daily CI schedule still covers main.
-          gh pr merge "$PR" --squash --subject "$TITLE [skip ci]" --body "$BODY" --match-head-commit "$SHA"
-
-          # 4. A squash leaves features with different history than main, which
-          # would cause conflicts next time. Realign it to main, but only if nobody
-          # pushed to features since $SHA (force-with-lease).
-          git fetch origin "$TARGET" "$SOURCE" || true
-          git push --force-with-lease="$SOURCE:$SHA" origin "origin/$TARGET:refs/heads/$SOURCE" \
-            || echo "features moved since the merge; left as is. Run: git fetch && rebase onto origin/main."
+          # 6. Everyone else catches up with main, with no delay after a merge and as a
+          # safety net on every run.
+          git fetch origin --prune
+          for BRANCH in $(list_branches); do
+            git rev-parse --verify -q "origin/$BRANCH" >/dev/null || continue
+            if ! git merge-base --is-ancestor "origin/$TARGET" "origin/$BRANCH"; then
+              sync_into "$BRANCH"
+            fi
+          done

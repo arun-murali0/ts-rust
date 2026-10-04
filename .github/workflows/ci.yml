@@ -3,12 +3,15 @@ name: CI
 on:
   pull_request:
   push:
-    # `features` is where day-to-day work lands; auto-merge.yml only promotes a
-    # features commit to main after CI has passed on that exact commit.
-    branches: [main, features, modules]
+    # Nothing is ever pushed to main by hand: work lands on a branch, and auto-merge.yml
+    # promotes a branch commit to main only after CI has passed on that exact commit,
+    # and only when the branch already contains main, so the tree CI tested is the tree
+    # main receives. CI therefore runs on every branch except main.
+    branches-ignore: [main]
   schedule:
-    # Once a day on main. It catches what a push never would: a new advisory in an
-    # unchanged lockfile. Scheduled workflows never run on forks.
+    # Once a day on main, which is the only run main ever gets. It catches what a push
+    # never would: a new advisory in an unchanged lockfile. Scheduled workflows never
+    # run on forks.
     - cron: "0 2 * * *"
   workflow_dispatch:
 
@@ -16,11 +19,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-\({{ github.workflow }}-\){{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  # Every warning is an error, for rustc, for clippy and for rustdoc. Cargo caps lints
+  # in registry dependencies, so this only ever fires on this repository's own code.
+  RUSTFLAGS: "-D warnings"
+  RUSTDOCFLAGS: "-D warnings"
   # Pinned, not `stable`: a new stable release would empty the build cache and could
   # add clippy lints that fail CI with no change on our side. Keep it equal to
   # rust-version in Cargo.toml.
@@ -28,16 +37,55 @@ env:
 
 jobs:
   quality:
-    name: Format, check, clippy, test
-    # auto-merge.yml opens a PR from features, and CI already passed on that same
-    # commit through the push to features, so that PR run would repeat it. Forks
-    # still get CI: only a PR from this repository's own features branch is skipped.
-    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    name: Quality (${{ matrix.name }})
+    # auto-merge.yml opens a PR from a work branch, and CI already passed on that same
+    # commit through the push to that branch, so the PR run would repeat it. Forks
+    # still get CI: only a PR from a branch of this repository is skipped.
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The full gate: formatting, clippy, every test, rustdoc.
+          - name: all features
+            args: "--all-features"
+            full: "1"
+          # Each feature on its own, and none, so a build that works only because
+          # another feature happens to be on cannot get through.
+          - name: no features
+            args: "--no-default-features"
+            full: "0"
+          - name: module-resolution
+            args: "--features module-resolution"
+            full: "0"
+          - name: wasm
+            args: "--features wasm"
+            full: "0"
+          - name: dhat-heap
+            args: "--features dhat-heap"
+            full: "0"
+          - name: incremental
+            args: "--features incremental"
+            full: "0"
+          - name: scratchpad
+            args: "--features scratchpad"
+            full: "0"
+          - name: mimalloc
+            args: "--features mimalloc"
+            full: "0"
+          # The foundation bench needs these three together, and the bench is skipped
+          # by cargo when any is missing, so this is the one run that compiles it
+          # without the rest.
+          - name: foundation layers
+            args: "--features module-resolution,incremental,scratchpad"
+            full: "0"
     env:
       # Line tables keep panic backtraces readable while linking and caching far
       # less debug info than the default.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CI_FEATURE_ARGS: ${{ matrix.args }}
+      CI_FULL: ${{ matrix.full }}
     steps:
       - uses: actions/checkout@v4
 
@@ -66,14 +114,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ matrix.name }}
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Run repository quality gates
         run: ./scripts/ci.sh
 
   security:
     name: Dependency security
-    if: ${{ !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,14 +138,14 @@ jobs:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
         run: |
           run=true
-          if [ "\(EVENT" != "schedule" ] && [ "\)EVENT" != "workflow_dispatch" ] \
-             && [ -n "\(BASE" ] && [ "\)BASE" != "0000000000000000000000000000000000000000" ] \
-             && changed="\((git diff --name-only "\)BASE" HEAD 2>/dev/null)"; then
-            if ! grep -qE '(^|/)Cargo\.(lock|toml)\(' <<<"\)changed"; then
+          if [ "$EVENT" != "schedule" ] && [ "$EVENT" != "workflow_dispatch" ] \
+             && [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
+             && changed="$(git diff --name-only "$BASE" HEAD 2>/dev/null)"; then
+            if ! grep -qE '(^|/)Cargo\.(lock|toml)$' <<<"$changed"; then
               run=false
             fi
           fi
-          echo "run=\(run" >> "\)GITHUB_OUTPUT"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
 
       - if: steps.gate.outputs.run == 'true'
         uses: taiki-e/install-action@cargo-audit
@@ -107,7 +156,7 @@ jobs:
 
   tsc-drift:
     name: Compare against real tsc (false-positive gate)
-    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'pull_request' && github.head_ref == 'features' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ github.event_name != 'schedule' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: ubuntu-latest
     env:
       CARGO_PROFILE_RELEASE_LTO: "off"
@@ -123,7 +172,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       - uses: actions/setup-node@v4
         with:
@@ -132,7 +181,7 @@ jobs:
           cache-dependency-path: scripts/ts-diag-tool/package-lock.json
 
       - name: Build ts-rust (release)
-        run: cargo build --release --bin ts-rust
+        run: cargo build --locked --release --bin ts-rust
 
       - name: Install ts-diag-tool dependencies
         working-directory: scripts/ts-diag-tool
@@ -156,7 +205,7 @@ jobs:
       - name: Identify main's commit
         id: main
         if: github.ref != 'refs/heads/main'
-        run: echo "sha=\((git -C main-src rev-parse HEAD)" >> "\)GITHUB_OUTPUT"
+        run: echo "sha=$(git -C main-src rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Restore main's binary
         id: main-bin
@@ -164,11 +213,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: main-src/target/release/ts-rust
-          key: main-ts-rust-\({{ runner.os }}-\){{ env.RUST_TOOLCHAIN }}-${{ steps.main.outputs.sha }}-v1
+          key: main-ts-rust-${{ runner.os }}-${{ env.RUST_TOOLCHAIN }}-${{ steps.main.outputs.sha }}-v1
 
       - name: Build main's ts-rust (release)
         if: github.ref != 'refs/heads/main' && steps.main-bin.outputs.cache-hit != 'true'
-        run: cargo build --release --bin ts-rust --manifest-path main-src/Cargo.toml
+        run: cargo build --locked --release --bin ts-rust --manifest-path main-src/Cargo.toml
 
       - name: Compare main's ts-rust against real tsc over the same fixtures
         if: github.ref != 'refs/heads/main'
@@ -189,3 +238,25 @@ jobs:
               process.exit(1);
             }
           '
+
+  # The single status that means "everything that should run, ran, and passed". Branch
+  # protection on main requires this one check, and auto-merge.yml looks for CI as a
+  # whole, so a job added above is covered by adding it to `needs`.
+  all-green:
+    name: All green
+    if: ${{ always() }}
+    needs: [quality, security, tsc-drift]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every job passed, or was skipped on purpose
+        shell: bash
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "A job finished as '$result'."; exit 1 ;;
+            esac
+          done
