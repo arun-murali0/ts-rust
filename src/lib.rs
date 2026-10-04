@@ -38,8 +38,7 @@ pub use line_index::LineIndex;
 
 #[cfg(feature = "incremental")]
 pub use incremental::{
-    Database as IncrementalDatabase, HeaderRequest, IncrementalDb, ModuleHeader, SemanticName,
-    SourceFile, SourceKind, import_count, module_header,
+    Database as IncrementalDatabase, IncrementalDb, SourceFile, SourceKind, source_len,
 };
 
 #[cfg(feature = "scratchpad")]
