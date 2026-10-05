@@ -725,8 +725,8 @@ Either way, writes to inputs while workers run must cancel in-flight work; use t
 
 ### 7.4 Migration order (each step builds and passes the existing fixtures)
 
-1. Introduce `Node` and `DeclSlot` alongside the current types behind the same `TypeId` API; port interfaces and classes to `Ref` slots; delete placeholders and `set`.
-2. Move display and aliases to `Named` and `App`; delete `display_names`, `duplicate_named`, `make_unique`.
+1. Introduce `Node` and `DeclSlot` alongside the current types behind the same `TypeId` API; port interfaces and classes to `Ref` slots; delete placeholders and `set`. **Done.**
+2. Move display and aliases to `Named` and `App`; delete `display_names`, `duplicate_named`, `make_unique`. **Done.** `App` keeps its instantiated body, so expansion is still eager; lazy `expand` comes with step 4's unit context.
 3. Switch object properties to bump slices with `SmallVec` scratch; add the `needs_drop` assertions.
 4. Add `Worker` and `run_unit`; check one file per unit with reset between runs.
 5. Add keys, stable hashing, portable export and import; round-trip tests.

@@ -13,8 +13,8 @@ pub fn is_subtype(arena: &TypeArena, sub: TypeId, sup: TypeId) -> bool {
     is_subtype_inner(arena, sub, sup, &mut PairStack::new())
 }
 
-// A recursive type (Node { next: Node }, built by namespace::resolve's
-// placeholder backpatch) means comparing sub and sup can lead back to
+// A recursive type (Node { next: Node }, whose declaration's Ref namespace::resolve
+// resolves after its members) means comparing sub and sup can lead back to
 // comparing the same (sub, sup) pair again before either call has returned.
 // `seen` tracks pairs currently on the call stack. Re-entering one is treated
 // as true (coinductively: two types that only differ by "going in circles"

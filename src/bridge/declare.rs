@@ -193,12 +193,11 @@ fn declare_enum(decl: &oxc_ast::ast::TSEnumDeclaration, ctx: &mut CheckContext<'
     // are registered here from the same resolved member list.
     let member_types: Vec<_> = members.iter().map(|(_, type_id)| *type_id).collect();
     let type_position = ctx.arena.alloc_union(member_types);
-    // A one-member enum collapses to that member's literal type, which is an id
-    // every identical literal shares; naming it would rename them all.
-    let type_position = ctx.arena.make_unique(type_position);
-    // Prints as `Weird`, not the union of its member literals, in a message.
-    ctx.arena
-        .set_display_name(type_position, decl.id.name.to_string());
+    // Prints as `Weird`, not the union of its member literals, in a message. The name
+    // goes on a wrapper around the union: a one-member enum collapses to its member's
+    // literal type, an id every identical literal shares, and that id stays unnamed.
+    let name = ctx.arena.alloc_name(decl.id.name.to_string());
+    let type_position = ctx.arena.alloc_named(name, type_position);
     ctx.namespace
         .insert_enum(&decl.id.name, type_position, decl.id.span);
 

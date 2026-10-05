@@ -173,55 +173,43 @@ pub fn resolve_ts_type(
             // below, which depends on nothing but the declaration and its resolved
             // arguments, is reused.
             //
-            // A hit is a duplicate of the stored copy, not the copy itself: callers
-            // rename what they are handed (`type Alias = Box<number>`), and that
-            // must not rename every other `Box<number>`.
-            let reusable = bindings
-                .iter()
-                .all(|&(_, bound)| arena.has_settled_display(bound));
-            if reusable {
-                if let Some(pristine) = namespace.cached_instantiation(base, &bindings) {
-                    return Some(arena.duplicate_named(pristine));
-                }
+            // A hit is the stored application itself. It carries no name that a caller
+            // could change (`type Alias = Box<number>` wraps it, it does not rename it),
+            // and it prints from its arguments when it is displayed, so there is
+            // nothing a later reference could find out of date.
+            if let Some(application) = namespace.cached_instantiation(base, &bindings) {
+                return Some(application);
             }
 
             // Only the declaration's own parameters are bound here, so a parameter
             // a member declares for itself (`map<U>(...)`) is kept for inference
             // at the call site instead of becoming unknown.
-            let mut result = crate::semantic::substitute_bound_type_params(arena, base, &bindings);
+            let result = crate::semantic::substitute_bound_type_params(arena, base, &bindings);
 
             // Prints as `Box<number>`, not Box's full member list, in a message.
             // Skipped when substitution left `result` identical to `base`: that
             // happens when none of Box's declared parameters actually appear in
             // its body, in which case every instantiation of Box shares this one
-            // TypeId, and naming it per-instantiation would just have the last
-            // one processed silently overwrite every earlier one's name.
+            // TypeId, and there is no application of it worth telling apart.
             if result != base {
-                // Each argument's own text (via display_type) may itself be a
-                // name set moments ago by this same resolve, e.g. `Box<Dog>`
-                // once Dog's own reference resolved and named it.
-                let args = bindings
-                    .iter()
-                    .map(|(_, bound)| crate::type_display::display_type(arena, *bound))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                // Substitution allocates through alloc(), so `result` may be the id
-                // every identical anonymous shape shares (a Box<number> and a
-                // Pair<number> with the same members, or a plain `{ value: number }`).
-                // Name a copy that is this instantiation's own.
-                result = arena.make_unique(result);
-                arena.set_display_name(result, format!("{}<{args}>", id.name));
+                // The application is its own node: the declaration's name, the
+                // arguments, and `result` as what it is. Substitution allocates through
+                // alloc(), so `result` may be the id every identical anonymous shape
+                // shares (a Box<number> and a Pair<number> with the same members, or a
+                // plain `{ value: number }`); that id is not renamed, it is wrapped.
+                // Each argument prints in its own current spelling when the
+                // application is displayed, so `Box<Dog>` says `Box<Dog>` whether Dog
+                // had its name yet when this was built or not.
+                let slot = arena.alloc_name(id.name.as_str());
+                let arguments = bindings.iter().map(|&(_, bound)| bound).collect();
+                let application = arena.alloc_app(slot, arguments, result);
 
                 // Stored only here, inside `result != base`: an unchanged result
-                // means `base` was still an empty placeholder (a reference from
-                // inside its own declaration), and remembering that would return the
-                // empty shape for every later reference, after it is filled in. The
-                // copy kept is a duplicate so that renaming `result`, which the
-                // caller may do, cannot rename the memo.
-                if reusable {
-                    let pristine = arena.duplicate_named(result);
-                    namespace.cache_instantiation(base, bindings, pristine);
-                }
+                // means `base` was still an unresolved Ref (a reference from inside
+                // its own declaration), and remembering that would return the empty
+                // shape for every later reference, after it is resolved.
+                namespace.cache_instantiation(base, bindings, application);
+                return Some(application);
             }
 
             Some(result)
@@ -289,7 +277,7 @@ fn check_type_argument_constraint(
 //
 // `Record<K, V>` gets the same opaque-object treatment as Promise, plus one
 // more thing Promise doesn't need: its value type V is recorded on the
-// arena (see TypeArena::set_record_value_type) so a later property access
+// application (see TypeArena::record_value_type) so a later property access
 // can return V instead of "does not exist". This does not model K at all --
 // any key is accepted, not just ones K would allow -- so it under-checks
 // rather than risking a false positive on a key it can't classify. `Partial`
@@ -320,13 +308,12 @@ fn resolve_builtin_generic(
                 Some(resolved) => resolved.unwrap_or_else(|| arena.error()),
                 None => arena.void(),
             };
-            let argument_text = crate::type_display::display_type(arena, argument);
-            // alloc_fresh, not alloc: every Promise<T> is the same empty object and
-            // is told apart only by the name below, so a reused id would give
-            // Promise<number> and Promise<string> one shared name.
-            let opaque = arena.alloc_fresh(Type::Object(ObjectType::new(Vec::new())));
-            arena.set_display_name(opaque, format!("Promise<{argument_text}>"));
-            Some(opaque)
+            // Every Promise<T> has the same empty body and is told apart by its argument,
+            // which the application keeps: Promise<number> and Promise<string> are two
+            // ids, and two mentions of Promise<number> are one.
+            let body = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+            let slot = arena.builtin_slot("Promise");
+            Some(arena.alloc_app(slot, vec![argument], body))
         }
         "Record" => {
             let key_argument = first_type_argument(namespace, arena)
@@ -344,15 +331,13 @@ fn resolve_builtin_generic(
                 // that was never given.
                 return None;
             };
-            let key_text = crate::type_display::display_type(arena, key);
-            let value_text = crate::type_display::display_type(arena, value);
-            // alloc_fresh for the same reason as Promise above, and more so:
-            // record_value_types is keyed by this id, so a shared id would give
-            // Record<string, number> and Record<string, string> one value type.
-            let opaque = arena.alloc_fresh(Type::Object(ObjectType::new(Vec::new())));
-            arena.set_display_name(opaque, format!("Record<{key_text}, {value_text}>"));
-            arena.set_record_value_type(opaque, value);
-            Some(opaque)
+            // Same shape as Promise above. The value type is not stored anywhere else:
+            // TypeArena::record_value_type reads it back from the application's second
+            // argument, so Record<string, number> and Record<string, string> each
+            // carry their own.
+            let body = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+            let slot = arena.builtin_slot("Record");
+            Some(arena.alloc_app(slot, vec![key, value], body))
         }
         _ => None,
     }
