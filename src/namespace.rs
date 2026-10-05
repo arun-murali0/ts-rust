@@ -17,8 +17,8 @@ use std::hash::{Hash, Hasher};
 // declared type parameter, in declaration order.
 type Bindings = Vec<(TypeParameterId, TypeId)>;
 
-// One memoized instantiation: the bindings it was built from, and the private
-// pristine slot that holds the result.
+// One memoized instantiation: the bindings it was built from, and the application that
+// is the result.
 type Instantiation = (Bindings, TypeId);
 
 // A type namespace is a single flat map from name to declaration, not a scope tree.
@@ -239,8 +239,8 @@ impl<'a> TypeNamespace<'a> {
         self.file_id
     }
 
-    // The private, never-handed-out copy stored for this instantiation, if any. The
-    // caller must take a duplicate_named of it rather than use it directly.
+    // The application stored for this instantiation, if any. It carries no name a caller
+    // could change, so a hit is handed out as it is.
     pub fn cached_instantiation(
         &mut self,
         base: TypeId,
@@ -255,7 +255,7 @@ impl<'a> TypeNamespace<'a> {
                     .iter()
                     .find(|(stored, _)| stored.as_slice() == bindings)
             })
-            .map(|&(_, pristine)| pristine);
+            .map(|&(_, application)| application);
         if hit.is_some() {
             self.instantiation_hits += 1;
         } else {
@@ -264,23 +264,21 @@ impl<'a> TypeNamespace<'a> {
         hit
     }
 
-    // Only a finished, named instantiation belongs here, and the caller owns that
-    // judgement: it must have come from a substitution that actually changed `base`
-    // (an unchanged result means the shape was still an empty placeholder, and
-    // remembering it would hand back the empty shape forever), and every argument's
-    // display must be settled (see TypeArena::has_settled_display). `pristine` must
-    // be a slot nobody else holds, or a later rename of it would rename the memo.
+    // Only a finished instantiation belongs here, and the caller owns that judgement: it
+    // must have come from a substitution that actually changed `base`. An unchanged
+    // result means the shape was still an unfinished Ref, and remembering it would hand
+    // back the empty shape forever.
     pub fn cache_instantiation(
         &mut self,
         base: TypeId,
         bindings: Vec<(TypeParameterId, TypeId)>,
-        pristine: TypeId,
+        application: TypeId,
     ) {
         let key = (base, binding_fingerprint(&bindings));
         self.instantiations
             .entry(key)
             .or_default()
-            .push((bindings, pristine));
+            .push((bindings, application));
     }
 
     /// Counts for performance reports; see NamespaceStats.
@@ -748,8 +746,8 @@ impl<'a> TypeNamespace<'a> {
         // An interface, a class, and a type-literal alias (`type X = { ... }`)
         // are always object-shaped, so a property inside one can legitimately
         // refer back to the declaration itself -- a linked list's
-        // `next: Node | null`, a tree's `children: Node[]`. For these, a
-        // placeholder object is registered as this name's resolved type
+        // `next: Node | null`, a tree's `children: Node[]`. For these, a Ref
+        // to the declaration is registered as this name's resolved type
         // *before* its members are resolved, so the self-reference finds a real
         // TypeId (via the entry.resolved short-circuit above) instead of
         // hitting the Circular case below. That case stays reserved for a bare
@@ -758,8 +756,8 @@ impl<'a> TypeNamespace<'a> {
         let self_referenceable = matches!(kind, DeclKind::Interface(_) | DeclKind::Class(_))
             || matches!(kind, DeclKind::TypeAlias(body, _) if matches!(body, TSType::TSTypeLiteral(_)));
 
-        let placeholder = if self_referenceable {
-            let id = arena.alloc_object_placeholder();
+        let reference = if self_referenceable {
+            let id = arena.alloc_ref();
             if let Some(entry) = self.entries.get_mut(name) {
                 entry.resolved = Some(id);
             }
@@ -814,44 +812,42 @@ impl<'a> TypeNamespace<'a> {
         // arm) names its own substituted result instead ("Box<number>").
         let is_non_generic = type_params.is_none_or(|params| params.params.is_empty());
 
-        match (placeholder, resolved) {
-            (Some(placeholder_id), Some(final_id)) => {
+        match (reference, resolved) {
+            (Some(reference), Some(body)) => {
                 // resolve_object_members and resolve_class allocate an Object
                 // (through alloc(), so it may be an id shared with an identical
-                // anonymous shape), so final_id is a different, now
-                // redundant TypeId holding the right content -- placeholder_id
-                // is the one a self-reference (and entry.resolved) actually
-                // points to, so that's what gets filled in and reported.
-                let final_type = arena.get(final_id).clone();
-                arena.set(placeholder_id, final_type);
-                entry.resolved = Some(placeholder_id);
+                // anonymous shape), and that is fine as the body: the id of the
+                // declaration itself is the Ref, which a self-reference (and
+                // entry.resolved) already points to, and it now reads as that body.
+                arena.resolve_ref(reference, body);
+                entry.resolved = Some(reference);
                 if is_non_generic {
-                    arena.set_display_name(placeholder_id, name);
+                    arena.name_ref(reference, name);
                 }
-                Resolution::Resolved(placeholder_id)
+                Resolution::Resolved(reference)
             }
-            (Some(_), None) => {
+            (Some(reference), None) => {
                 // A member turned out to be unresolvable after all. A failed
                 // resolution's partial work is discarded, never handed to a
                 // caller, so nothing outside this call could have captured the
-                // placeholder as real by now -- safe to just forget it.
+                // Ref as real by now -- safe to just forget it.
+                arena.fail_ref(reference);
                 entry.resolved = None;
                 Resolution::NotFound
             }
             (None, Some(type_id)) => {
                 // `type Scores = number[]` resolves to the id every `number[]`
-                // shares. Naming that would make every array of numbers print as
-                // "Scores", so an alias gets a copy that is its own. An id that is
-                // already unique (an interface's, a primitive) is left as it is.
+                // shares. The alias's name goes on a wrapper around that id, so the
+                // shared id is left as it is and no other array of numbers prints as
+                // "Scores". A primitive is not wrapped, so `type Age = number` still
+                // prints as `number`.
                 let type_id = if is_non_generic {
-                    arena.make_unique(type_id)
+                    let slot = arena.alloc_name(name);
+                    arena.alloc_named(slot, type_id)
                 } else {
                     type_id
                 };
                 entry.resolved = Some(type_id);
-                if is_non_generic {
-                    arena.set_display_name(type_id, name);
-                }
                 Resolution::Resolved(type_id)
             }
             (None, None) => Resolution::NotFound,

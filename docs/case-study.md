@@ -296,3 +296,42 @@ test holds them to the same answer. The component order is asserted, not assumed
 
 **Allocator.** mimalloc is set in the binary behind an opt-in feature, since a library
 that chose a global allocator would change it for every program that links the crate.
+
+## 15. Declarations as slots, and names on nodes
+
+**Problem.** An interface that mentions itself needs an id before its members exist, so the
+arena handed out an empty object and overwrote it in place when the members were done.
+That overwrite is why every cache had to be emptied after it, why two empty declarations
+compared equal until one was filled in, and why a name could not simply be attached to an
+id: naming a shared id would rename every identical type. A pile of workarounds grew
+around it: `make_unique` to copy before naming, `duplicate_named` so a memo hit could be
+renamed safely, and a check that an argument's name had settled before an instantiation
+was reused.
+
+**Choice.** Two changes, one per cause. A declaration is a `Ref` to a slot, and the slot
+gets its body when the members are resolved. The `Ref` itself is never rewritten, so
+nothing that holds its id has to be patched. And a name is a node: `Named` wraps an alias
+or enum, `App` is a generic with its arguments. `get` looks through all of them, so the
+rest of the checker keeps matching on objects and never sees a wrapper.
+
+**What went away.** `set`, the empty-object placeholder, the display-name side table,
+`make_unique`, `duplicate_named`, `has_settled_display`, and the Record value-type table.
+An application's name is written from its arguments when it is printed, so there is no
+spelling to go stale; `Record<K, V>` hands back its value type from its own second
+argument.
+
+**What did not.** Resolving a `Ref` still moves the arena's generation and empties the
+two caches that could hold an answer about it. The LLD's append-only caches need
+relations to expand a `Ref` lazily, and that arrives with the unit context in step 4.
+An `App` still holds its instantiated body, so expansion is eager.
+
+**One behavior change to know about.** A name used to be written onto the id an alias
+resolved to. For `type A = Dog`, that renamed `Dog` itself to `A` everywhere. The alias is
+now its own wrapper, so `Dog` keeps its name and only uses through `A` print `A`.
+
+**How it was checked.** The full suite, 609 tests before and 615 after, with the existing
+fixtures untouched. The unit tests that covered the removed APIs were rewritten for the
+guarantee they protected: an alias never renames a shared id, an application is told apart
+by its declaration and arguments, and `Box<Node>` prints as `Box<Node>` once `Node` has
+its name.
+

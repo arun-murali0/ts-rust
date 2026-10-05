@@ -78,46 +78,66 @@ What is interned:
 | Object, Array, Function | yes | Object properties are kept sorted, so key order never splits a shape |
 | String, Number, Boolean literal | yes | Number literals compare by bit pattern, so `Eq` and `Hash` agree |
 | GenericParameter | yes | Its key includes its declaration identity, so a `T` from one declaration never merges with another |
+| Named, App | yes | An alias or enum name, and a generic applied to arguments; see section 2.4 |
 | Union | yes, own table | Needs flattening and dedup first, see section 2.6 |
 | The ten primitives | no | Fixed slots 0 to 9, allocated once in `new()` |
-| Object placeholders | no | See section 2.5 |
-| Anything from `alloc_fresh` | no | Reserved for types with an identity beyond their shape |
+| Ref (a declaration) | no | One per declaration, never shared; see section 2.5 |
 
-### 2.4 Named types stay unique
+### 2.4 Names live on nodes, not on ids
 
-Sharing ids creates a hazard. A display name is attached to an id, so naming a shared id
-would rename every identical type in the file. `type Alias = Box<number>` must not make
-every other `Box<number>` print as `Alias`.
+Sharing ids creates a hazard. If a display name were attached to an id, naming a shared id
+would rename every identical type in the file: `type Scores = number[]` would make every
+array of numbers print as `Scores`, and `type Alias = Box<number>` would do the same to
+every other `Box<number>`.
 
-The rule is that anything that receives a name must be unique to its holder:
+So a name is never attached to an id. It is part of a wrapper node, and the wrapper is
+the thing that is unique to what it names:
 
-- `alloc_fresh` always pushes a new slot and never enters an intern table.
-- `make_unique(id)` returns the id unchanged if it is already unique, or a fresh copy if
-  it is shared.
-- `set_display_name`, `set_record_value_type` and `set` assert in debug builds that the
-  id is not shared.
+- `Named(slot, inner)` is an alias or an enum. It prints as the name of `slot` and reads
+  as `inner`. `inner` stays the shared id and is never touched.
+- `App(slot, args, body)` is a generic applied to arguments. It reads as `body`, and it
+  prints as the declaration's name followed by its arguments, which are written out when
+  the type is displayed. The same declaration, arguments and body are the same id, so
+  an instantiation can be remembered by the id of its `App` and handed out as it is.
+- A declaration's own name lives on its `Ref` slot (section 2.5).
 
-Display names live in a side table keyed by id, not on `Type`. That keeps display a
-concern of `display_type` alone: no `match` over `Type` elsewhere has to carry a name.
-The ten primitive slots never take a name, because they are shared by every use of
-`number`, `string` and so on.
+`TypeArena::get` looks through all three, so every relation sees the structure and no
+`match` over `Type` outside the arena and the printer meets a wrapper. Code that must
+tell two declarations apart asks about the id it was handed, not about what `get`
+returns: `display_name`, `app_parts` and `record_value_type` do.
 
-Checking "is this id shared" is done by looking the content up in the intern table and
-comparing ids, not by keeping a flag per slot. A flag would have to be kept correct
-through every code path that creates or completes a slot.
+Two consequences are worth stating. The printer no longer needs to know whether an
+argument's name was settled when an instantiation was built, because the text is made at
+display time: `Box<Node>` built while `Node` was still being resolved prints as
+`Box<Node>` once it is named. And `Record<K, V>` keeps its value type in the `App` itself
+(its second argument), so there is no side table to keep unique.
 
-### 2.5 Placeholders for recursive types
+The ten primitive slots are never wrapped. `alloc_named` returns them as they are, because
+every `number` shares one id and tsc prints `type Age = number` as the primitive.
+
+### 2.5 Declarations as `Ref` slots
 
 `interface Node { next: Node }` needs a type that refers to itself before it is
-finished. The arena hands out a placeholder: an empty object slot from
-`alloc_object_placeholder`. The self reference resolves to that id by identity, and
-`set(id, ty)` completes the same slot afterwards.
+finished. Each interface, class and object-literal alias gets a slot in a declaration
+table, and its type is a `Ref` to that slot. `alloc_ref` hands the `Ref` out before the
+members are resolved. The self reference resolves to that id by identity, and
+`resolve_ref(ref, body)` later gives the slot its body, an ordinary `Object`.
 
-Two rules keep this safe. A placeholder is pushed directly and never interned, otherwise
-every empty object and every other placeholder would merge with it and one `set` would
-overwrite all of them. And a completed placeholder stays out of the intern table, because
-other types already hold its raw id and it could never be merged retroactively with an
-identical shape.
+A `Ref` is never rewritten. This is what replaced overwriting an empty object in place:
+the body is a separate type, so it can be interned and shared like any other, two
+declarations with the same members can share one body, and what a `Ref` points at is the
+only thing that changes.
+
+Until `resolve_ref` runs (or `fail_ref` gives up), `get` returns an empty object for the
+`Ref`, which is what an unfinished declaration has always looked like to a caller. The
+slot holds the declaration's display name, set once a non-generic declaration is
+resolved. A generic one stays unnamed, because its body still holds bare type parameters
+and each application of it names itself.
+
+Two rules keep this safe. A `Ref` is pushed directly and never interned, otherwise every
+declaration would merge with every other one. And resolving a `Ref` still moves the
+arena's generation and empties the two caches that could hold an answer about it, since
+an answer computed while it read as an empty object stops being true.
 
 ### 2.6 Unions
 
@@ -137,8 +157,9 @@ section 8).
 `structurally_equal(a, b)` answers "same type by shape". It follows ids through the arena
 and is used by `alloc_union` to remove duplicate members. Three rules matter:
 
-- It must terminate on recursive types. A completed placeholder refers to its own id, so
-  comparing two identical recursive interfaces used to loop until the stack overflowed.
+- It must terminate on recursive types. A resolved declaration's body refers to its own
+  `Ref`, so comparing two identical recursive interfaces used to loop until the stack
+  overflowed.
   It now keeps the object pairs being compared and treats a repeat as equal, the same
   coinductive rule the subtype check uses.
 - It compares the method flag, matching the intern key, so `alloc_union` cannot merge
@@ -160,7 +181,7 @@ instead of answering wrongly.
 source text
    |
    v
-declare pass: register names, allocate placeholders for named types
+declare pass: register names, allocate a Ref for each named declaration
    |
    v
 resolve annotation --> TypeNamespace::resolve --> arena.alloc / alloc_union
@@ -248,9 +269,9 @@ Problem. Unions were the one composite the intern table skipped, so the same `A 
 built twice got two ids and the cache key never repeated.
 
 Change. `alloc_union` looks its finished member list up in `interned_unions`.
-`is_interned` had to learn about unions too. Without that, `make_unique` would hand back
-a shared union and naming `type Status = "a" | "b"` would rename every identical union,
-silently in release builds where the guards are debug-only.
+`is_interned` had to learn about unions too. Without that, `make_unique` (since removed,
+see section 2.4) would hand back a shared union and naming `type Status = "a" | "b"` would
+rename every identical union, silently in release builds where the guards are debug-only.
 
 Result: neutral. wide_union_50 +0.51% (worse), connected_application -0.33% to -0.45%,
 everything else within 0.02%.
@@ -273,9 +294,9 @@ Change. The cache is threaded through the inference recursion. Inference builds 
 the arena and a long-lived `SemanticQueries` would keep a shared borrow of it.
 
 One call site is deliberately left out: the type argument constraint check. It runs while
-a declaration is still being resolved, when a placeholder can be empty, and the cache is
-keyed on `TypeId` alone. A result stored against an empty placeholder would survive
-`set()` filling it in, and nothing invalidates it.
+a declaration is still being resolved, when its `Ref` reads as an empty object, and the
+cache is keyed on `TypeId` alone. A result stored against that empty object would survive
+`resolve_ref` giving it a body, and nothing invalidates it.
 
 Result: no change except connected_application -0.43% to -0.46%.
 
@@ -297,11 +318,17 @@ Three rules keep it from changing behavior:
 - A hit is a duplicate, never the stored slot. Callers rename what they receive, and
   sharing one slot would rename every other `Box<number>`.
 - Nothing is stored when substitution left the shape unchanged. That means the generic is
-  still an empty placeholder, and remembering it would return the empty shape after it
+  still an unresolved declaration, which reads as an empty object, and remembering it would return the empty shape after it
   is filled in.
 - Reuse requires every argument's display to be settled (`has_settled_display`). An
   unfinished type prints as an empty object, and reusing that spelling would turn
   `Box<Node>` into `Box<{}>` in a message.
+
+Since then. The three rules above existed because a name was attached to an id. Names now
+live on `App` nodes (section 2.4), so the memo stores the `App` itself and a hit is that
+id: there is no duplicate to take, no slot a caller could rename, and no settled-display
+check, because an argument's name is read when the type is printed. The second rule still
+holds as written: an unchanged result still means the generic was an unresolved `Ref`.
 
 Result: release dhat shows about 2.4% fewer allocation blocks on connected_application,
 measured against the run before phase 1, so it includes phases 1 to 3. The instruction
@@ -402,8 +429,9 @@ fixture, total allocation fell about 4.9% in bytes and 2.1% in blocks, and peak 
 - Two untried speed levers outside the arena: the bench build profile (`opt-level = "s"`
   versus 3) and the cost of Oxc's control-flow graph, which only unreachable code
   detection uses.
-- Known edge in the instantiation memo: the names of arguments are baked in at first use,
-  so an argument renamed later keeps its old text in reused instantiations.
+- A generic's own name is a slot allocated per instantiation (`alloc_name`), because a
+  generic's `Ref` is deliberately unnamed. The memo means each distinct instantiation
+  allocates it once, but a slot per declaration would be cheaper.
 - `structurally_equal_cached` is not connected to `alloc_union`. Connecting it changed
   diagnostic counts once and the cause was not established, so the uncached form stays
   until it is. See section 11 for what was ported alongside it.
@@ -413,12 +441,14 @@ fixture, total allocation fell about 4.9% in bytes and 2.1% in blocks, and peak 
 These are the rules the design depends on. Break one and the failure is usually silent.
 
 1. `types` is the source of truth. Every side table is an index over it.
-2. Anything that receives a display name, a record value type, or a `set` must be unique
-   to its holder. Get it from `alloc_fresh`, `alloc_object_placeholder` or `make_unique`.
+2. A name is never attached to a shared id. An alias or enum wraps what it names in a
+   `Named`, an application is an `App`, and only a declaration's own `Ref` carries a name
+   directly.
 3. A digest match is a hint. Confirm against the slot before reuse.
-4. Placeholders and completed placeholders never enter an intern table.
+4. A declaration's `Ref` never enters an intern table, and is never rewritten: only the
+   slot it points at changes.
 5. The relation cache is scoped to an arena generation (section 11), so an answer from
-   before a placeholder was filled in, or before the arena was cleared, cannot be read
+   before a declaration was resolved, or before the arena was cleared, cannot be read
    back. Resolution still bypasses the cache; the generation check would make caching
    there safe, it just has not been needed. A growth policy for the intern tables is still
    open.
@@ -454,13 +484,13 @@ A table that survived would let the next file see a stale name or a stale intern
 which fails silently.
 
 **A generation counter instead of an invalidation rule.** `generation` advances whenever
-an id that already exists changes meaning: `set()` filling in a placeholder, and
+an id that already exists changes meaning: `resolve_ref` giving a declaration its body, and
 `clear()`. New ids do not advance it, since an id nobody has asked about has no stale
 answer. `RelationCache` remembers the generation it was filled under, and
 `SemanticQueries::new` drops every entry from an older one. The alternative, telling each
-caller "invalidate after `set`", puts a rule in every call site that has to be remembered
+caller "invalidate after `resolve_ref`", puts a rule in every call site that has to be remembered
 forever; comparing one integer makes the cache correct by construction. It also lifts the
-old restriction that no query may run while a placeholder is empty.
+old restriction that no query may run while a declaration is unresolved.
 
 **`CheckSession` is the explicit mutable boundary.** The reusable state lives in a session,
 not inside `TypeChecker`, so the checker keeps no interior mutability and independent

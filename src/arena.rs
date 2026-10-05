@@ -7,6 +7,36 @@ use std::hash::{Hash, Hasher};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct TypeId(u32);
 
+// A declaration's place in the arena: an interface, a class or an object-literal alias,
+// the kinds that can refer to themselves. The type of such a declaration is a
+// Type::Ref to its slot. The Ref is allocated before the declaration's members are
+// resolved and is never rewritten, so a member that names the declaration back holds
+// its id from the start and nothing has to be patched when the body is finished.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct DeclSlot(u32);
+
+#[derive(Clone, Copy)]
+enum DeclState {
+    // The members are still being resolved. The declaration reads as an empty object,
+    // which is what an unfinished declaration has always looked like to a caller.
+    Resolving,
+    // The id of the body, an Object, which is what get() hands out for the Ref.
+    Resolved(TypeId),
+    // Resolution gave up. Nothing outside the failed call was given a usable type, and
+    // the Ref keeps reading as an empty object.
+    Failed,
+    // A slot that exists only so a Named or an App has a declaration to print: an alias,
+    // an enum, a built-in generic. No Ref points at it.
+    NameOnly,
+}
+
+struct DeclInfo {
+    state: DeclState,
+    // How the declaration prints in a message ("Dog"). A generic declaration has none:
+    // its body still holds bare type parameters, and each instantiation names itself.
+    name: Option<String>,
+}
+
 // The (left, right) pairs a recursive comparison is in the middle of. It is a
 // SmallVec, not a Vec or a hash set: real comparisons are shallow, so the sixteen
 // inline slots almost never spill to the heap and a lookup is a handful of integer
@@ -25,8 +55,8 @@ impl TypeId {
 }
 
 // How many slots new() reserves for the primitives (number() .. void()). Those ids
-// are shared by every use of the primitive and can never be renamed: see
-// set_display_name.
+// are shared by every use of the primitive and never get a name of their own: see
+// alloc_named.
 const FIXED_SLOTS: u32 = 10;
 
 // The 64-bit digest the intern tables are keyed on, in place of the content itself.
@@ -58,28 +88,11 @@ pub struct TypeArenaStats {
 pub struct TypeArena {
     types: Vec<Type>,
 
-    // How a TypeId should read in a diagnostic, when it's not just its
-    // structural shape: an interface, class or alias by its declared name
-    // ("Dog"), a generic instantiation with its arguments ("Box<number>"), an
-    // enum by its name ("Weird"). Keyed by TypeId rather than carried on Type
-    // itself, so display is a side concern display_type can consult, not
-    // something every match arm over Type has to thread through. Safe only for a
-    // TypeId that is unique to whatever it names: alloc() reuses one TypeId for
-    // every identical anonymous composite (see its doc comment), so a name given
-    // to such a shared id would show up on every other use of the same shape.
-    // Anything that gets a name must therefore come from alloc_fresh,
-    // alloc_object_placeholder or make_unique; set_display_name asserts this in
-    // debug builds.
-    display_names: FxHashMap<TypeId, String>,
-
-    // The value type of a `Record<K, V>`-shaped TypeId (see
-    // type_annotation::resolve_builtin_generic). Record has no real index
-    // signature representation here -- this is a narrower, honest stand-in: a
-    // property access on a Record-tagged TypeId returns this value type for
-    // *any* key, rather than modelling K at all (so a Record<"a" | "b",
-    // number> does not reject an unrelated key the way tsc would). Same
-    // TypeId-uniqueness requirement as display_names above.
-    record_value_types: FxHashMap<TypeId, TypeId>,
+    // The slots of the built-in generics (`Promise`, `Record`), by name. A built-in has
+    // no declaration in the file, so its applications need a slot of their own to hang
+    // off, and one per name keeps every `Promise<number>` the same id. Separate from
+    // the slots an alias or a user's own `Record` gets, which are never shared.
+    builtin_slots: FxHashMap<&'static str, DeclSlot>,
 
     // Auxiliary index behind alloc(): a digest of the content of every anonymous
     // composite allocated so far -> the one TypeId that holds it. `types` stays the
@@ -120,10 +133,10 @@ pub struct TypeArena {
     // single lookup. It sits behind a RefCell only because the question is asked
     // through &TypeArena; no borrow is held across a call.
     //
-    // Cleared by set(), the one place a slot's content changes. A placeholder
-    // that was still empty when it was scanned reads as "no parameter", and every
-    // type built on top of it inherited that answer, so any set() drops them all.
-    // New slots need no invalidation: an id nobody has asked about is just absent.
+    // Cleared by resolve_ref(), the one place what an existing id reads as changes. A
+    // Ref that was still unfinished when it was scanned reads as "no parameter", and
+    // every type built on top of it inherited that answer, so resolving one drops them
+    // all. New slots need no invalidation: an id nobody has asked about is just absent.
     param_scan: RefCell<Vec<u8>>,
 
     // Answers already given by structurally_equal_cached, one entry per unordered
@@ -131,16 +144,23 @@ pub struct TypeArena {
     //
     // Only alloc_union asks, and it asks the same questions again whenever narrowing
     // rebuilds a union from the same members. Every answer stays valid until a
-    // placeholder is completed: set() is the one operation that changes what an
-    // existing id means, so it empties this table, same as param_scan above.
+    // declaration is resolved: resolve_ref() is the one operation that changes what an
+    // existing id reads as, so it empties this table, same as param_scan above.
     equality_cache: FxHashMap<(TypeId, TypeId), bool>,
 
-    // Advances whenever an id that already exists changes meaning: set() filling in a
-    // placeholder, or clear() starting over. Anything that remembers an answer about
-    // a TypeId (the relation cache) compares generations instead of relying on each
-    // caller to remember an invalidation rule. New ids do not advance it, since an id
-    // nobody has asked about has no stale answer.
+    // Advances whenever an id that already exists changes meaning: resolve_ref()
+    // giving a declaration its body, or clear() starting over. Anything that remembers
+    // an answer about a TypeId (the relation cache) compares generations instead of
+    // relying on each caller to remember an invalidation rule. New ids do not advance
+    // it, since an id nobody has asked about has no stale answer.
     generation: u64,
+
+    // The declaration behind every Ref, indexed by DeclSlot.
+    decls: Vec<DeclInfo>,
+
+    // What a Ref reads as while its declaration has no body. Kept here so get() can hand
+    // out a reference to it instead of building one per call.
+    empty_object: Type,
 }
 
 impl TypeArena {
@@ -151,13 +171,14 @@ impl TypeArena {
     pub fn new() -> Self {
         let mut arena = Self {
             types: Vec::new(),
-            display_names: FxHashMap::default(),
-            record_value_types: FxHashMap::default(),
+            builtin_slots: FxHashMap::default(),
             interned: FxHashMap::default(),
             interned_unions: FxHashMap::default(),
             param_scan: RefCell::new(Vec::new()),
             equality_cache: FxHashMap::default(),
             generation: 0,
+            decls: Vec::new(),
+            empty_object: Type::Object(ObjectType::new(Vec::new())),
         };
 
         arena.alloc(Type::Number);
@@ -181,12 +202,12 @@ impl TypeArena {
     //   - the fixed primitives (numbered 0..=9 in new(), never allocated again),
     //   - unions, which are interned by alloc_union itself after it has flattened
     //     and deduplicated them (see interned_unions), and
-    //   - object placeholders, which alloc_object_placeholder pushes directly.
+    //   - declaration references, which alloc_ref pushes directly.
     //
     // Because two calls can return the same TypeId, a TypeId does not identify one
-    // allocation. Anything that needs an id that is uniquely its own
-    // (to attach a display name or a Record value type to it) must use
-    // alloc_fresh, or make_unique on an id it was handed.
+    // allocation. A name is never attached to such an id: an alias or an application
+    // wraps the id it names (see alloc_named and alloc_app), so a shared id is never
+    // renamed and nothing has to ask for one of its own.
     //
     // A GenericParameter is not at risk: its key includes its TypeParameterId,
     // so a `T` from one declaration never matches a `T` from another.
@@ -208,85 +229,55 @@ impl TypeArena {
         id
     }
 
-    // Always pushes a new slot and never enters the intern table, so the id is
-    // guaranteed to be unique to this call. For the few types that carry an
-    // identity beyond their shape: an opaque `Promise<T>` or `Record<K, V>` (an
-    // empty object distinguished only by a display name or a side-table entry),
-    // and the named result of a generic instantiation.
-    pub fn alloc_fresh(&mut self, ty: Type) -> TypeId {
+    // A slot that exists to give a Named or an App a declaration to print, with no body
+    // behind it. An alias and an enum each get one of their own, so two declarations
+    // never share a name by accident.
+    pub fn alloc_name(&mut self, name: impl Into<String>) -> DeclSlot {
+        let slot = DeclSlot(self.decls.len() as u32);
+        self.decls.push(DeclInfo {
+            state: DeclState::NameOnly,
+            name: Some(name.into()),
+        });
+        slot
+    }
+
+    // The one slot of a built-in generic such as `Promise`. Asked for again, it is the
+    // same slot, which is what makes every `Promise<number>` the same id.
+    pub fn builtin_slot(&mut self, name: &'static str) -> DeclSlot {
+        if let Some(&slot) = self.builtin_slots.get(name) {
+            return slot;
+        }
+        let slot = self.alloc_name(name);
+        self.builtin_slots.insert(name, slot);
+        slot
+    }
+
+    // `inner` under the name of `slot`: an alias (`type Scores = number[]`) or an enum.
+    // The wrapper is what carries the name, so `inner` stays the id everything else
+    // shares and is never renamed.
+    //
+    // A fixed primitive is returned as it is. tsc prints `type Age = number` as the
+    // primitive itself, and the one slot every `number` shares must not be wrapped.
+    pub fn alloc_named(&mut self, slot: DeclSlot, inner: TypeId) -> TypeId {
+        if inner.0 < FIXED_SLOTS {
+            return inner;
+        }
+        self.alloc(Type::Named(slot, inner))
+    }
+
+    // A generic declaration applied to `args`, with `body` as what that application is.
+    // The same declaration, arguments and body give the same id, so an instantiation
+    // can be remembered by the id this returns and handed out as it is.
+    pub fn alloc_app(&mut self, slot: DeclSlot, args: Vec<TypeId>, body: TypeId) -> TypeId {
+        self.alloc(Type::App(slot, args, body))
+    }
+
+    // A new slot that never enters the intern table, so the id is this call's own even
+    // when identical content was allocated before. Tests use it to get distinct ids for
+    // content that alloc() would give one id.
+    #[cfg(test)]
+    pub(crate) fn alloc_fresh(&mut self, ty: Type) -> TypeId {
         self.push(ty)
-    }
-
-    // Returns `id` itself when it is already unique to its holder, or a fresh copy
-    // of its content when it is a shared intern-table id. Call this before naming
-    // a type that came out of resolution (`type Scores = number[]`, an enum whose
-    // one member collapsed to a literal): the resolved id may be the very same id
-    // every other `number[]` uses, and naming it would rename all of them.
-    pub fn make_unique(&mut self, id: TypeId) -> TypeId {
-        if self.is_interned(id) {
-            let copy = self.get(id).clone();
-            self.push(copy)
-        } else {
-            id
-        }
-    }
-
-    // A fresh, unshared copy of `id` that prints under the same name. The copy is
-    // never entered in either intern table, so it can be renamed or completed later
-    // without touching `id` or any other copy.
-    //
-    // Exists for the instantiation memo (see TypeNamespace::cache_instantiation).
-    // Callers depend on every reference to `Box<number>` having a slot of its own:
-    // `type Alias = Box<number>` renames the slot it is handed, so if the memo handed
-    // out one shared slot an alias would rename every other `Box<number>` in the
-    // file. So the memo keeps a private pristine slot and every hit gets a duplicate
-    // of it.
-    pub fn duplicate_named(&mut self, id: TypeId) -> TypeId {
-        let copy = self.get(id).clone();
-        let duplicate = self.push(copy);
-        if let Some(name) = self.display_names.get(&id).cloned() {
-            self.display_names.insert(duplicate, name);
-        }
-        duplicate
-    }
-
-    // Whether the way `id` prints in a diagnostic can no longer change. A generic
-    // instantiation bakes its arguments' text into its own name once ("Box<Dog>"),
-    // so it may only be reused while every argument reads the same way it did when
-    // the name was made.
-    //
-    // The case this exists for: `interface Node { next: Box<Node> }`. While Node is
-    // still resolving, its id is an empty, unnamed placeholder that prints as an
-    // empty object. Reusing that spelling later, after Node has its name, would put
-    // "Box<{}>" in a message that should say "Box<Node>".
-    //
-    // Deliberately narrow: a composite that is not named, an object or a function,
-    // answers false, which only costs a missed reuse. Recursion is safe because only
-    // an Object can close a cycle, and Object never recurses here.
-    pub fn has_settled_display(&self, id: TypeId) -> bool {
-        if self.display_names.contains_key(&id) {
-            return true;
-        }
-        match self.get(id) {
-            Type::Number
-            | Type::String
-            | Type::Boolean
-            | Type::Null
-            | Type::Undefined
-            | Type::Any
-            | Type::Unknown
-            | Type::Error
-            | Type::Never
-            | Type::Void
-            | Type::StringLiteral(_)
-            | Type::NumberLiteral(_)
-            | Type::BooleanLiteral(_)
-            // A type parameter always prints as its own name, so it never changes.
-            | Type::GenericParameter(..) => true,
-            Type::Array(element) => self.has_settled_display(*element),
-            Type::Union(members) => members.iter().all(|&m| self.has_settled_display(m)),
-            Type::Object(_) | Type::Function(_) => false,
-        }
     }
 
     fn push(&mut self, ty: Type) -> TypeId {
@@ -304,21 +295,19 @@ impl TypeArena {
                 | Type::NumberLiteral(_)
                 | Type::BooleanLiteral(_)
                 | Type::GenericParameter(..)
+                | Type::Named(..)
+                | Type::App(..)
         )
     }
 
     // Whether `id` is the shared slot the intern table hands out for its content.
-    // Checked by looking the content up rather than tracking a flag per slot: a
-    // placeholder, an alloc_fresh id, or a slot rewritten by `set` can hold
-    // content identical to an interned one, but the table maps that content to a
-    // different id, so it correctly reports false.
+    // Checked by looking the content up rather than tracking a flag per slot: a Ref or
+    // an alloc_fresh id can hold (or read as) content identical to an interned one, but
+    // the table maps that content to a different id, so it correctly reports false. A
+    // union is answered from its own table.
+    #[cfg(test)]
     fn is_interned(&self, id: TypeId) -> bool {
         let ty = self.get(id);
-        // A union must be answered from its own table. If this fell through to the
-        // check below it would always say "not shared", make_unique would hand back
-        // the shared id, and `type Status = "a" | "b"` would rename every identical
-        // union in the file to "Status". Release builds would do it silently, since
-        // the guards that would catch it are debug_assert.
         if let Type::Union(members) = ty {
             return self.interned_unions.get(&content_hash(members)) == Some(&id);
         }
@@ -377,84 +366,141 @@ impl TypeArena {
         }
     }
 
+    // The type behind `id`. A declaration's Ref reads as its body once the body exists
+    // and as an empty object before; a Named reads as what it names and an App as its
+    // body. So callers match on the structural type and never see a wrapper. Code that
+    // has to tell two declarations apart (to print a name, to check a slot) asks about
+    // the id it was given, not about what this returns.
+    //
+    // Terminates because a wrapper is allocated after the id it points at, and a Ref
+    // resolves to a body, never to another Ref.
     pub fn get(&self, id: TypeId) -> &Type {
-        &self.types[id.0 as usize]
-    }
-
-    // Registers how type_id should print. A later call for the same TypeId
-    // replaces the earlier name rather than erroring, since a generic's own
-    // cached shape and a specific instantiation of it are sometimes the exact
-    // same TypeId (see namespace::resolve's own comment on this) and the more
-    // specific caller should win.
-    //
-    // A fixed primitive slot never takes a name. make_unique leaves those ids alone
-    // (they are not internable), so `type Age = number` or an empty enum collapsing
-    // to `never` would otherwise name the one slot every other `number` or `never`
-    // shares, and display_type consults names before the structural match. tsc
-    // prints such an alias as the primitive itself, so ignoring the name is also
-    // what a message should say.
-    pub fn set_display_name(&mut self, type_id: TypeId, name: impl Into<String>) {
-        if type_id.0 < FIXED_SLOTS {
-            return;
+        let mut current = id;
+        loop {
+            match &self.types[current.0 as usize] {
+                Type::Ref(slot) => match self.decls[slot.0 as usize].state {
+                    DeclState::Resolved(body) => current = body,
+                    DeclState::Resolving | DeclState::Failed | DeclState::NameOnly => {
+                        return &self.empty_object;
+                    }
+                },
+                Type::Named(_, inner) => current = *inner,
+                Type::App(_, _, body) => current = *body,
+                ty => return ty,
+            }
         }
-        debug_assert!(
-            !self.is_interned(type_id),
-            "naming a shared (interned) TypeId would rename every identical type; \
-             use alloc_fresh or make_unique first"
-        );
-        self.display_names.insert(type_id, name.into());
     }
 
+    // None for an id that is not a declaration, and also for one the arena does not hold
+    // (a stale id from before clear()), so that asking for a name stays harmless.
+    fn slot_of(&self, id: TypeId) -> Option<DeclSlot> {
+        match self.types.get(id.0 as usize) {
+            Some(Type::Ref(slot)) => Some(*slot),
+            _ => None,
+        }
+    }
+
+    // Names the declaration behind `reference`. Called once its body exists, for a
+    // declaration that is not generic: a generic's body still holds bare type
+    // parameters, and each application of it prints its own name. A later call replaces
+    // the earlier name.
+    pub fn name_ref(&mut self, reference: TypeId, name: impl Into<String>) {
+        debug_assert!(
+            self.slot_of(reference).is_some(),
+            "name_ref needs an id from alloc_ref"
+        );
+        if let Some(slot) = self.slot_of(reference) {
+            self.decls[slot.0 as usize].name = Some(name.into());
+        }
+    }
+
+    // The name `id` prints under when it has one that does not depend on anything else:
+    // a named declaration or an alias. An application is not covered, its name comes
+    // from its arguments (see app_parts), and is_named answers for all of them.
     pub fn display_name(&self, type_id: TypeId) -> Option<&str> {
-        self.display_names.get(&type_id).map(String::as_str)
+        let slot = match self.types.get(type_id.0 as usize)? {
+            Type::Ref(slot) | Type::Named(slot, _) => *slot,
+            _ => return None,
+        };
+        self.decls[slot.0 as usize].name.as_deref()
     }
 
-    pub fn set_record_value_type(&mut self, record_type: TypeId, value_type: TypeId) {
-        debug_assert!(
-            !self.is_interned(record_type),
-            "a Record's value type must hang off a TypeId unique to it; use alloc_fresh"
-        );
-        self.record_value_types.insert(record_type, value_type);
+    // The declaration's name and the arguments of an application, for display to write
+    // out as `Box<Dog>`.
+    pub fn app_parts(&self, type_id: TypeId) -> Option<(&str, &[TypeId])> {
+        match self.types.get(type_id.0 as usize)? {
+            Type::App(slot, args, _) => {
+                let name = self.decls[slot.0 as usize].name.as_deref()?;
+                Some((name, args.as_slice()))
+            }
+            _ => None,
+        }
     }
 
+    // Whether `id` prints under a name and not as its structure.
+    pub fn is_named(&self, type_id: TypeId) -> bool {
+        self.display_name(type_id).is_some() || self.app_parts(type_id).is_some()
+    }
+
+    // The value type V of a `Record<K, V>`: any key reads as V. Record has no real index
+    // signature here, so this is the narrower stand-in the member access code uses (see
+    // type_annotation::resolve_builtin_generic), and it does not model K at all.
     pub fn record_value_type(&self, type_id: TypeId) -> Option<TypeId> {
-        self.record_value_types.get(&type_id).copied()
+        let record = *self.builtin_slots.get("Record")?;
+        match self.types.get(type_id.0 as usize)? {
+            Type::App(slot, args, _) if *slot == record => args.get(1).copied(),
+            _ => None,
+        }
     }
 
-    // Allocates an empty object shape and hands back its id, to be filled in
-    // later with `set` once the real properties are known. This is what lets
-    // an interface, class, or type-literal alias refer to itself through a
-    // property -- a linked list's `next: Node | null` -- before its own shape
-    // is finished: the self-reference resolves to this placeholder's TypeId by
-    // identity, and `set` completes that same id afterward (see
-    // namespace::resolve for how it's used).
+    // Allocates the Ref for a declaration that is about to be resolved and hands back its
+    // id. This is what lets an interface, a class or an object-literal alias refer to
+    // itself through a property -- a linked list's `next: Node | null` -- before its own
+    // body exists: the self-reference resolves to this id by identity, and resolve_ref
+    // later gives the same id its body (see namespace::resolve for how it is used).
     //
-    // Pushed directly, never through alloc(): an empty object would otherwise be
-    // reused for every other empty object (and every other placeholder), and
-    // `set` would then overwrite all of them at once. A placeholder also stays
-    // out of the intern table after `set` completes it, because other types
-    // already hold its raw TypeId and it could never be merged with an identical
-    // shape retroactively.
-    pub fn alloc_object_placeholder(&mut self) -> TypeId {
-        self.push(Type::Object(ObjectType::new(Vec::new())))
+    // Pushed directly, never through alloc(): every declaration needs an id of its own,
+    // and two of them must never be reused for one another. Unlike the empty object
+    // this replaces, the Ref is never rewritten. The body is a separate type, so it can
+    // be interned and shared like any other, and what a Ref points at is the only
+    // thing that changes.
+    pub fn alloc_ref(&mut self) -> TypeId {
+        let slot = DeclSlot(self.decls.len() as u32);
+        self.decls.push(DeclInfo {
+            state: DeclState::Resolving,
+            name: None,
+        });
+        self.push(Type::Ref(slot))
     }
 
-    // Overwrites whatever is already at id. Only meant for finishing a
-    // placeholder from alloc_object_placeholder above: a property only ever
-    // stores a TypeId, never a cloned Type, so nothing can be holding a stale
-    // copy of the placeholder's old (empty) content by the time this runs.
-    pub fn set(&mut self, id: TypeId, ty: Type) {
+    // Gives the declaration behind `reference` its body. Until this runs the Ref reads
+    // as an empty object, so every answer remembered about it, or about anything built
+    // on top of it, was an answer about that empty object: the generation moves and
+    // the two caches that could hold one are emptied.
+    pub fn resolve_ref(&mut self, reference: TypeId, body: TypeId) {
+        let slot = self.slot_of(reference);
+        debug_assert!(slot.is_some(), "resolve_ref needs an id from alloc_ref");
+        let Some(slot) = slot else {
+            return;
+        };
         debug_assert!(
-            !self.is_interned(id),
-            "set() would change the content of a shared (interned) slot and leave \
-             the intern table pointing at the wrong type"
+            self.slot_of(body).is_none(),
+            "a body must be the type itself, not another declaration's Ref"
         );
-        self.types[id.0 as usize] = ty;
+        self.decls[slot.0 as usize].state = DeclState::Resolved(body);
         self.generation = self.generation.wrapping_add(1);
         self.param_scan.get_mut().clear();
-        // Two unfinished placeholders compare equal (both are empty objects), and that
-        // answer stops being true the moment either one is filled in.
+        // Two unfinished declarations compare equal (both read as empty objects), and
+        // that answer stops being true the moment either one is resolved.
         self.equality_cache.clear();
+    }
+
+    // The declaration could not be resolved. Its Ref keeps reading as an empty object.
+    // Nothing is invalidated: no answer about it ever rested on a body.
+    pub fn fail_ref(&mut self, reference: TypeId) {
+        if let Some(slot) = self.slot_of(reference) {
+            self.decls[slot.0 as usize].state = DeclState::Failed;
+        }
     }
 
     // The remembered answer for `id`, if contains_type_param has settled it.
@@ -511,8 +557,8 @@ impl TypeArena {
     // nothing distinguishes them. This follows TypeIds through the arena instead.
     //
     // Terminates even on recursive types. The graph is acyclic except through a
-    // placeholder: alloc_object_placeholder hands out an id, the members are
-    // resolved against it, and set() then fills it in, so `interface N { next: N |
+    // declaration's Ref: alloc_ref hands out an id, the members are resolved
+    // against it, and resolve_ref then gives it its body, so `interface N { next: N |
     // null }` contains its own id. Comparing two such types (say two interfaces
     // with the same recursive shape) would otherwise go N -> M -> N -> M forever.
     // Only an Object can close a cycle, so an object pair already being compared
@@ -615,8 +661,8 @@ impl TypeArena {
     pub fn clear(&mut self) {
         self.generation = self.generation.wrapping_add(1);
         self.types.truncate(FIXED_SLOTS as usize);
-        self.display_names.clear();
-        self.record_value_types.clear();
+        self.decls.clear();
+        self.builtin_slots.clear();
         self.interned.clear();
         self.interned_unions.clear();
         self.param_scan.get_mut().clear();
@@ -644,8 +690,12 @@ impl TypeArena {
             capacity: self.types.capacity(),
             interned_types: self.interned.len(),
             interned_unions: self.interned_unions.len(),
-            named_types: self.display_names.len(),
-            record_types: self.record_value_types.len(),
+            named_types: (0..self.types.len())
+                .filter(|&index| self.is_named(TypeId(index as u32)))
+                .count(),
+            record_types: (0..self.types.len())
+                .filter(|&index| self.record_value_type(TypeId(index as u32)).is_some())
+                .count(),
         }
     }
 
@@ -782,76 +832,88 @@ mod tests {
         assert_ne!(arena.alloc_union(vec![a, b]), arena.alloc_union(vec![a, c]));
     }
 
-    // Naming a shared union must not rename every other identical union. Alias and enum resolution call
-    // make_unique before naming, so make_unique has to know a union can be shared.
+    // An alias names a union by wrapping it. The union is the id every identical union
+    // shares, so it must stay unnamed: only uses that go through the alias print `Status`.
     #[test]
-    fn naming_a_union_through_make_unique_does_not_rename_the_shared_one() {
+    fn an_alias_wraps_a_shared_union_and_leaves_it_unnamed() {
         let mut arena = TypeArena::new();
         let a = arena.alloc(Type::StringLiteral("a".to_string()));
         let b = arena.alloc(Type::StringLiteral("b".to_string()));
         let shared = arena.alloc_union(vec![a, b]);
 
-        let own = arena.make_unique(shared);
-        arena.set_display_name(own, "Status");
+        let status = arena.alloc_name("Status");
+        let named = arena.alloc_named(status, shared);
 
-        assert_ne!(own, shared);
-        assert_eq!(arena.display_name(own), Some("Status"));
+        assert_ne!(named, shared);
+        assert_eq!(arena.display_name(named), Some("Status"));
         assert_eq!(arena.display_name(shared), None);
-        // A later identical build still finds the shared one, not the named copy.
+        // The wrapper reads as the union it names, so every relation sees one type.
+        assert_eq!(arena.get(named), arena.get(shared));
+        // A later identical build still finds the shared one, not the wrapper.
         assert_eq!(arena.alloc_union(vec![a, b]), shared);
     }
 
-    // The property the instantiation memo depends on: renaming a duplicate must
-    // leave its source alone, because an alias does exactly that to what it is given.
+    // The property the instantiation memo depends on: wrapping an application in an
+    // alias leaves the application as it was, because the alias is a node of its own.
     #[test]
-    fn a_named_duplicate_can_be_renamed_without_touching_its_source() {
+    fn an_alias_of_an_application_leaves_the_application_unchanged() {
         let mut arena = TypeArena::new();
         let number = arena.number();
-        let source = arena.alloc_fresh(Type::Object(ObjectType::new(vec![PropertyEntry {
+        let body = arena.alloc(Type::Object(ObjectType::new(vec![PropertyEntry {
             name: "value".into(),
             type_id: number,
             optional: false,
             is_method: false,
         }])));
-        arena.set_display_name(source, "Box<number>");
+        let declaration = arena.alloc_name("Box");
+        let application = arena.alloc_app(declaration, vec![number], body);
 
-        let duplicate = arena.duplicate_named(source);
-        arena.set_display_name(duplicate, "Alias");
+        let alias = arena.alloc_name("Alias");
+        let named = arena.alloc_named(alias, application);
 
-        assert_ne!(duplicate, source);
-        assert_eq!(arena.display_name(source), Some("Box<number>"));
-        assert_eq!(arena.display_name(duplicate), Some("Alias"));
-        assert!(arena.structurally_equal(source, duplicate));
+        assert_ne!(named, application);
+        assert_eq!(arena.display_name(application), None);
+        assert_eq!(arena.app_parts(application), Some(("Box", &[number][..])));
+        assert_eq!(arena.display_name(named), Some("Alias"));
+        assert!(arena.structurally_equal(application, named));
     }
 
     #[test]
-    fn an_unfinished_placeholder_does_not_have_a_settled_display() {
-        let mut arena = TypeArena::new();
-        let number = arena.number();
-        let placeholder = arena.alloc_object_placeholder();
-
-        assert!(arena.has_settled_display(number));
-        assert!(!arena.has_settled_display(placeholder));
-
-        // Naming it is what settles it, which is when resolution completes.
-        arena.set_display_name(placeholder, "Node");
-        assert!(arena.has_settled_display(placeholder));
-    }
-
-    #[test]
-    fn settled_display_looks_through_arrays_and_unions() {
+    fn an_application_is_told_apart_by_its_declaration_and_arguments() {
         let mut arena = TypeArena::new();
         let (number, string) = (arena.number(), arena.string());
-        let placeholder = arena.alloc_object_placeholder();
-        let settled_union = arena.alloc_union(vec![number, string]);
-        let unsettled_union = arena.alloc_union(vec![number, placeholder]);
-        let settled_array = arena.alloc(Type::Array(number));
-        let unsettled_array = arena.alloc(Type::Array(placeholder));
+        let body = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+        let declaration = arena.alloc_name("Box");
+        let other = arena.alloc_name("Box");
 
-        assert!(arena.has_settled_display(settled_union));
-        assert!(!arena.has_settled_display(unsettled_union));
-        assert!(arena.has_settled_display(settled_array));
-        assert!(!arena.has_settled_display(unsettled_array));
+        let of_number = arena.alloc_app(declaration, vec![number], body);
+        // The same declaration, arguments and body are one id, so a memo can hand it out.
+        assert_eq!(arena.alloc_app(declaration, vec![number], body), of_number);
+        assert_ne!(arena.alloc_app(declaration, vec![string], body), of_number);
+        // Two declarations that happen to share a name are still two declarations.
+        assert_ne!(arena.alloc_app(other, vec![number], body), of_number);
+    }
+
+    // A built-in generic has one slot however many times it is asked for, which is what
+    // makes every Promise<number> the same id, and Record's value type readable.
+    #[test]
+    fn a_built_in_generic_has_one_slot_and_record_gives_back_its_value_type() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let body = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+
+        let record = arena.builtin_slot("Record");
+        assert_eq!(arena.builtin_slot("Record"), record);
+        assert_ne!(arena.builtin_slot("Promise"), record);
+
+        let counts = arena.alloc_app(record, vec![string, number], body);
+        assert_eq!(arena.record_value_type(counts), Some(number));
+        // Not a Record: no value type to give back.
+        assert_eq!(arena.record_value_type(body), None);
+        // A user's own generic named Record does not borrow the built-in's meaning.
+        let users = arena.alloc_name("Record");
+        let theirs = arena.alloc_app(users, vec![string, number], body);
+        assert_eq!(arena.record_value_type(theirs), None);
     }
 
     // The digest is only a hint. If two different types ever share one, alloc() must
@@ -916,17 +978,15 @@ mod tests {
     }
 
     #[test]
-    fn completing_a_placeholder_drops_equality_answers_given_while_it_was_empty() {
+    fn resolving_a_declaration_drops_equality_answers_given_while_it_was_empty() {
         let mut arena = TypeArena::new();
         let number = arena.number();
-        let a = arena.alloc_object_placeholder();
-        let b = arena.alloc_object_placeholder();
+        let a = arena.alloc_ref();
+        let b = arena.alloc_ref();
         assert!(arena.structurally_equal_cached(a, b));
 
-        arena.set(
-            a,
-            Type::Object(ObjectType::new(vec![property("x", number, false)])),
-        );
+        let body = object(&mut arena, vec![property("x", number, false)]);
+        arena.resolve_ref(a, body);
 
         assert!(!arena.structurally_equal_cached(a, b));
     }
@@ -1224,7 +1284,8 @@ mod tests {
             optional: false,
             is_method: false,
         }])));
-        arena.set_display_name(object, "Wide");
+        let wide = arena.alloc_name("Wide");
+        let named = arena.alloc_named(wide, object);
         let capacity_before = arena.stats().capacity;
         assert!(arena.len() > FIXED_SLOTS as usize);
 
@@ -1236,7 +1297,7 @@ mod tests {
         assert_eq!(arena.void(), TypeId(9));
         assert_eq!(arena.stats().named_types, 0);
         assert_eq!(arena.stats().interned_types, 0);
-        assert_eq!(arena.display_name(object), None);
+        assert_eq!(arena.display_name(named), None);
 
         let fresh = arena.alloc(Type::Array(arena.number()));
         assert_eq!(
@@ -1254,21 +1315,22 @@ mod tests {
         arena.alloc(Type::Array(arena.number()));
         assert_eq!(arena.generation(), start, "a new id has no stale answers");
 
-        let placeholder = arena.alloc_object_placeholder();
+        let declaration = arena.alloc_ref();
         assert_eq!(arena.generation(), start);
 
-        arena.set(placeholder, Type::Object(ObjectType::new(Vec::new())));
+        let body = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+        arena.resolve_ref(declaration, body);
         assert_ne!(
             arena.generation(),
             start,
-            "filling a placeholder changes an id"
+            "resolving a declaration changes what its id reads as"
         );
 
-        let after_set = arena.generation();
+        let after_resolve = arena.generation();
         arena.clear();
         assert_ne!(
             arena.generation(),
-            after_set,
+            after_resolve,
             "clear() starts a new generation"
         );
     }
@@ -1322,11 +1384,11 @@ mod tests {
     // ---- carve-outs: types that must keep an id of their own ----
 
     #[test]
-    fn placeholders_are_never_shared_with_each_other_or_with_an_empty_object() {
+    fn declarations_are_never_shared_with_each_other_or_with_an_empty_object() {
         let mut arena = TypeArena::new();
 
-        let first = arena.alloc_object_placeholder();
-        let second = arena.alloc_object_placeholder();
+        let first = arena.alloc_ref();
+        let second = arena.alloc_ref();
         let empty = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
 
         assert_ne!(first, second);
@@ -1335,29 +1397,111 @@ mod tests {
     }
 
     #[test]
-    fn a_completed_placeholder_never_joins_the_intern_table() {
+    fn a_resolved_declaration_never_joins_the_intern_table() {
         let mut arena = TypeArena::new();
         let number = arena.number();
-        let placeholder = arena.alloc_object_placeholder();
-        arena.set(
-            placeholder,
-            Type::Object(ObjectType::new(vec![property("a", number, false)])),
-        );
+        let declaration = arena.alloc_ref();
+        let body = shared_object(&mut arena, "a", number, false);
+        arena.resolve_ref(declaration, body);
 
         let same_shape = shared_object(&mut arena, "a", number, false);
 
         assert_ne!(
-            placeholder, same_shape,
-            "other types already hold the placeholder's raw id, so it is never merged"
+            declaration, same_shape,
+            "other types already hold the declaration's id, so it is never merged with a shape"
         );
-        assert!(arena.structurally_equal(placeholder, same_shape));
+        assert_eq!(
+            same_shape, body,
+            "the body is an ordinary interned shape and is shared like any other"
+        );
+        assert!(arena.structurally_equal(declaration, same_shape));
     }
 
     #[test]
-    fn two_open_placeholders_never_merge_through_a_shape_that_mentions_them() {
+    fn a_declaration_reads_as_empty_until_resolved_and_as_its_body_after() {
         let mut arena = TypeArena::new();
-        let first = arena.alloc_object_placeholder();
-        let second = arena.alloc_object_placeholder();
+        let number = arena.number();
+        let declaration = arena.alloc_ref();
+
+        assert!(matches!(arena.get(declaration), Type::Object(o) if o.properties.is_empty()));
+
+        let body = object(&mut arena, vec![property("a", number, false)]);
+        arena.resolve_ref(declaration, body);
+
+        assert!(matches!(arena.get(declaration), Type::Object(o) if o.properties.len() == 1));
+    }
+
+    #[test]
+    fn resolving_a_declaration_does_not_change_its_id_or_add_a_slot() {
+        let mut arena = TypeArena::new();
+        let declaration = arena.alloc_ref();
+        let list = arena.alloc(Type::Array(declaration));
+        let body = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+        let slots = arena.len();
+
+        arena.resolve_ref(declaration, body);
+
+        assert_eq!(arena.len(), slots);
+        assert!(
+            matches!(arena.get(list), Type::Array(element) if *element == declaration),
+            "a type built on the id before it was resolved still holds that id"
+        );
+    }
+
+    #[test]
+    fn two_declarations_sharing_a_body_keep_their_own_names() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let body = object(&mut arena, vec![property("id", number, false)]);
+        let dog = arena.alloc_ref();
+        let cat = arena.alloc_ref();
+        arena.resolve_ref(dog, body);
+        arena.resolve_ref(cat, body);
+        arena.name_ref(dog, "Dog");
+        arena.name_ref(cat, "Cat");
+
+        assert_eq!(arena.display_name(dog), Some("Dog"));
+        assert_eq!(arena.display_name(cat), Some("Cat"));
+        assert_eq!(
+            arena.display_name(body),
+            None,
+            "naming a declaration never names its body"
+        );
+        assert!(arena.structurally_equal(dog, cat));
+    }
+
+    #[test]
+    fn a_failed_declaration_keeps_reading_as_an_empty_object() {
+        let mut arena = TypeArena::new();
+        let declaration = arena.alloc_ref();
+        let generation = arena.generation();
+
+        arena.fail_ref(declaration);
+
+        assert!(matches!(arena.get(declaration), Type::Object(o) if o.properties.is_empty()));
+        assert_eq!(
+            arena.generation(),
+            generation,
+            "no answer ever rested on a body"
+        );
+    }
+
+    #[test]
+    fn declaration_names_are_counted_and_cleared_with_the_arena() {
+        let mut arena = TypeArena::new();
+        let declaration = arena.alloc_ref();
+        arena.name_ref(declaration, "Node");
+        assert_eq!(arena.stats().named_types, 1);
+
+        arena.clear();
+        assert_eq!(arena.stats().named_types, 0);
+    }
+
+    #[test]
+    fn two_open_declarations_never_merge_through_a_shape_that_mentions_them() {
+        let mut arena = TypeArena::new();
+        let first = arena.alloc_ref();
+        let second = arena.alloc_ref();
 
         // Both are still the same empty `{}` here. The key hashes the ids, not
         // what they point at, so these must stay two different arrays.
@@ -1386,66 +1530,39 @@ mod tests {
     }
 
     #[test]
-    fn make_unique_copies_a_shared_id_and_leaves_an_owned_one_alone() {
+    fn naming_a_shared_array_through_an_alias_does_not_rename_the_shared_type() {
         let mut arena = TypeArena::new();
         let number = arena.number();
 
         let shared = arena.alloc(Type::Array(number));
-        let copy = arena.make_unique(shared);
-        assert_ne!(copy, shared);
-        assert!(arena.structurally_equal(copy, shared));
-        let again = arena.alloc(Type::Array(number));
-        assert_eq!(again, shared, "the table still points at the original");
-
-        let fresh = arena.alloc_fresh(Type::Array(number));
-        assert_eq!(arena.make_unique(fresh), fresh);
-        assert_eq!(arena.make_unique(arena.number()), arena.number());
-    }
-
-    #[test]
-    fn naming_a_unique_copy_does_not_rename_the_shared_type() {
-        let mut arena = TypeArena::new();
-        let number = arena.number();
-
-        let shared = arena.alloc(Type::Array(number));
-        let scores = arena.make_unique(shared);
-        arena.set_display_name(scores, "Scores");
+        let slot = arena.alloc_name("Scores");
+        let scores = arena.alloc_named(slot, shared);
 
         assert_eq!(arena.display_name(scores), Some("Scores"));
         assert_eq!(arena.display_name(shared), None);
+        assert_eq!(arena.alloc(Type::Array(number)), shared);
+        assert!(arena.structurally_equal(scores, shared));
     }
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "interned")]
-    fn naming_a_shared_id_is_caught_in_debug_builds() {
+    #[should_panic(expected = "alloc_ref")]
+    fn resolving_an_id_that_is_not_a_declaration_is_caught_in_debug_builds() {
         let mut arena = TypeArena::new();
         let number = arena.number();
         let shared = arena.alloc(Type::Array(number));
-        arena.set_display_name(shared, "Oops");
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "interned")]
-    fn rewriting_a_shared_slot_with_set_is_caught_in_debug_builds() {
-        let mut arena = TypeArena::new();
-        let number = arena.number();
-        let shared = arena.alloc(Type::Array(number));
-        arena.set(shared, Type::Array(arena.string()));
+        arena.resolve_ref(shared, number);
     }
 
     // `interface N { next: N | null }` built the way namespace::resolve builds
-    // it: placeholder first, members resolved against it, then set(). After set()
-    // the type refers to its own id, so the arena is no longer acyclic.
+    // it: the Ref first, members resolved against it, then resolve_ref(). Afterwards
+    // the body refers to the declaration's own id, so the arena is no longer acyclic.
     fn recursive_node(arena: &mut TypeArena, tail: TypeId) -> TypeId {
-        let placeholder = arena.alloc_object_placeholder();
-        let next = arena.alloc_union(vec![placeholder, tail]);
-        arena.set(
-            placeholder,
-            Type::Object(ObjectType::new(vec![property("next", next, false)])),
-        );
-        placeholder
+        let declaration = arena.alloc_ref();
+        let next = arena.alloc_union(vec![declaration, tail]);
+        let body = object(arena, vec![property("next", next, false)]);
+        arena.resolve_ref(declaration, body);
+        declaration
     }
 
     // Comparing two identically shaped recursive types goes a -> b -> a -> b ... and
@@ -1521,12 +1638,10 @@ mod tests {
         assert!(!arena.structurally_equal(method, field));
     }
 
-    // make_unique leaves the ten fixed slots alone (they are not internable), and
-    // namespace::resolve names whatever it gets back, so without a guard
-    // `type Age = number` would name slot 0 and print every `number` as "Age".
-    // set_display_name ignores the fixed slots.
+    // `type Age = number` must not wrap slot 0: tsc prints such an alias as the primitive,
+    // and every `number` shares that one id. alloc_named hands a fixed slot back as it is.
     #[test]
-    fn a_fixed_slot_never_takes_a_display_name() {
+    fn a_fixed_slot_is_never_wrapped_in_a_name() {
         let mut arena = TypeArena::new();
         let fixed = [
             arena.number(),
@@ -1542,13 +1657,13 @@ mod tests {
         ];
 
         for id in fixed {
-            let unique = arena.make_unique(id);
-            arena.set_display_name(unique, "Renamed");
+            let slot = arena.alloc_name("Renamed");
             assert_eq!(
-                arena.display_name(id),
-                None,
-                "fixed slot {id:?} was renamed"
+                arena.alloc_named(slot, id),
+                id,
+                "fixed slot {id:?} was wrapped"
             );
+            assert_eq!(arena.display_name(id), None);
         }
     }
 }

@@ -1,7 +1,7 @@
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use crate::arena::{TypeArena, TypeId};
+use crate::arena::{DeclSlot, TypeArena, TypeId};
 
 // PartialEq, Eq and Hash on Type are written by hand (below the enum) rather than
 // derived, for one reason: NumberLiteral(f64). f64 has no total Eq or Hash (NaN is
@@ -11,8 +11,8 @@ use crate::arena::{TypeArena, TypeId};
 //
 // Both are SHALLOW: a composite's TypeId fields are compared and hashed as opaque
 // ids, never followed through the arena. That is what makes the intern table safe
-// for self-referential types (two still-empty placeholders have different ids, so
-// they never look alike) and it is only sound because every child id was itself
+// for self-referential types (two still-unresolved declarations have different Ref
+// ids, so they never look alike) and it is only sound because every child id was itself
 // obtained from the arena. A consequence: `==` on a Type still cannot answer "are
 // these the same type by shape" for composites whose children are different ids.
 // Use TypeArena::structurally_equal for that; it follows TypeIds through the arena.
@@ -53,10 +53,33 @@ pub enum Type {
     Void,
 
     // The Option is the parameter's own `extends` bound (`T extends { length:
-    // number }`), resolved once when the placeholder is first created and reused
+    // number }`), resolved once when the parameter is first created and reused
     // from the same TypeParameterId cache as everything else about this
     // parameter. `None` means fully unconstrained.
     GenericParameter(TypeParameterId, String, Option<TypeId>),
+
+    // The type of an interface, class or object-literal alias: a reference to the
+    // declaration's slot in the arena. It is created before the declaration's
+    // members are resolved and never changes afterwards, which is what lets a member
+    // name the declaration back (`next: Node | null`) without anything being patched
+    // when the body is finished. TypeArena::get looks through it to the body, so code
+    // that reads a type never sees this variant; only the arena itself does.
+    Ref(DeclSlot),
+
+    // A type alias or an enum seen by its name: `type Scores = number[]` is Named(Scores,
+    // the array) and prints as `Scores`. The second field is what it stands for, and
+    // TypeArena::get looks through to it, so every relation treats the two as one type.
+    // Wrapping is what lets the name live on the node and not on an id: the array is
+    // the id every `number[]` shares, and nothing about it changes when it is named.
+    Named(DeclSlot, TypeId),
+
+    // A generic declaration applied to arguments: `Box<Dog>` is App(Box, [Dog], the
+    // instantiated body). The body is what get() looks through to. The name is not
+    // stored, it is written from the declaration and the arguments when the type is
+    // displayed, so it is always the arguments' current spelling and nothing has to
+    // check that a text baked in earlier is still right. Two applications with the same
+    // declaration, arguments and body are the same id.
+    App(DeclSlot, Vec<TypeId>, TypeId),
 }
 
 impl PartialEq for Type {
@@ -86,6 +109,13 @@ impl PartialEq for Type {
                 Type::GenericParameter(id_a, name_a, bound_a),
                 Type::GenericParameter(id_b, name_b, bound_b),
             ) => id_a == id_b && name_a == name_b && bound_a == bound_b,
+            (Type::Ref(a), Type::Ref(b)) => a == b,
+            (Type::Named(slot_a, inner_a), Type::Named(slot_b, inner_b)) => {
+                slot_a == slot_b && inner_a == inner_b
+            }
+            (Type::App(slot_a, args_a, body_a), Type::App(slot_b, args_b, body_b)) => {
+                slot_a == slot_b && args_a == args_b && body_a == body_b
+            }
 
             // Different variants. Every variant is named here on purpose, with no
             // wildcard, so adding a Type variant is a compile error until it is
@@ -108,7 +138,10 @@ impl PartialEq for Type {
                 | Type::StringLiteral(_)
                 | Type::NumberLiteral(_)
                 | Type::BooleanLiteral(_)
-                | Type::GenericParameter(..),
+                | Type::GenericParameter(..)
+                | Type::Ref(_)
+                | Type::Named(..)
+                | Type::App(..),
                 _,
             ) => false,
         }
@@ -147,6 +180,16 @@ impl Hash for Type {
                 id.hash(state);
                 name.hash(state);
                 bound.hash(state);
+            }
+            Type::Ref(slot) => slot.hash(state),
+            Type::Named(slot, inner) => {
+                slot.hash(state);
+                inner.hash(state);
+            }
+            Type::App(slot, args, body) => {
+                slot.hash(state);
+                args.hash(state);
+                body.hash(state);
             }
         }
     }
@@ -261,8 +304,8 @@ pub struct ObjectType {
     // arena (they need it after they start allocating), and with a Vec that copy
     // was a heap allocation plus one refcount bump per property, on every call
     // expression and every substitution step. Cloning the Rc is a single bump.
-    // The list never changes after construction (a placeholder is finished by
-    // replacing the whole Type through TypeArena::set), so sharing is safe. Hash
+    // The list never changes after construction (a declaration is finished by pointing
+    // its Ref at a body through TypeArena::resolve_ref), so sharing is safe. Hash
     // and equality see through the Rc, so the intern digests are unchanged.
     pub properties: Rc<[PropertyEntry]>,
 }

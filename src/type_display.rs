@@ -26,7 +26,7 @@ pub fn display_type(arena: &TypeArena, type_id: TypeId) -> String {
 pub fn display_source_type(arena: &TypeArena, source: TypeId, target: TypeId) -> String {
     // A named source (an enum is a union of literals underneath) keeps its name:
     // tsc prints `Type 'Color'`, never the widened `number`.
-    if arena.display_name(source).is_some()
+    if arena.is_named(source)
         || !is_literal_type(arena, source)
         || could_have_singleton(arena, target)
     {
@@ -113,6 +113,21 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
     // below so it applies uniformly, whatever the underlying Type is.
     if let Some(name) = arena.display_name(type_id) {
         out.push_str(name);
+        return;
+    }
+
+    // An instantiation is written out from its declaration and its arguments as they
+    // read now, so `Box<Dog>` is never a spelling made before Dog had its name.
+    if let Some((name, arguments)) = arena.app_parts(type_id) {
+        out.push_str(name);
+        out.push('<');
+        for (index, &argument) in arguments.iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            write_type(arena, argument, out, depth - 1);
+        }
+        out.push('>');
         return;
     }
 
@@ -225,6 +240,11 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
         }
 
         Type::GenericParameter(_, name, _) => out.push_str(name),
+
+        // get() looks through a declaration's Ref, a Named and an App, so these are not
+        // reached. If one ever is, an unfinished declaration is what prints as an empty
+        // object.
+        Type::Ref(_) | Type::Named(..) | Type::App(..) => out.push_str("{}"),
     }
 }
 
@@ -472,27 +492,73 @@ mod tests {
     fn a_named_type_prints_its_name_instead_of_its_shape() {
         let mut arena = TypeArena::new();
         let string = arena.string();
-        let dog = arena.alloc_fresh(Type::Object(ObjectType::new(vec![PropertyEntry {
+        let body = arena.alloc(Type::Object(ObjectType::new(vec![PropertyEntry {
             name: "name".into(),
             type_id: string,
             optional: false,
             is_method: false,
         }])));
-        arena.set_display_name(dog, "Dog");
+        let dog = arena.alloc_ref();
+        arena.resolve_ref(dog, body);
+        arena.name_ref(dog, "Dog");
         assert_eq!(render(&arena, dog), "Dog");
+    }
+
+    // The name of an application is written from its arguments when it is displayed, so
+    // it never holds a spelling from before an argument had its name. This is the case
+    // the old baked-in text had to guard against: `Box<Node>` built while Node was
+    // still being resolved.
+    #[test]
+    fn an_application_prints_its_arguments_as_they_read_now() {
+        let mut arena = TypeArena::new();
+        let node = arena.alloc_ref();
+        let body = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+        let declaration = arena.alloc_name("Box");
+        let application = arena.alloc_app(declaration, vec![node], body);
+        assert_eq!(render(&arena, application), "Box<{}>");
+
+        arena.resolve_ref(node, body);
+        arena.name_ref(node, "Node");
+        assert_eq!(render(&arena, application), "Box<Node>");
+    }
+
+    #[test]
+    fn an_application_prints_several_arguments_and_nested_applications() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let body = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+        let map = arena.alloc_name("Map");
+        let list = arena.alloc_name("List");
+
+        let inner = arena.alloc_app(list, vec![number], body);
+        let outer = arena.alloc_app(map, vec![string, inner], body);
+        assert_eq!(render(&arena, outer), "Map<string, List<number>>");
+    }
+
+    #[test]
+    fn an_alias_prints_its_name_and_not_what_it_stands_for() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let numbers = arena.alloc(Type::Array(number));
+        let slot = arena.alloc_name("Scores");
+        let scores = arena.alloc_named(slot, numbers);
+        assert_eq!(render(&arena, scores), "Scores");
+        assert_eq!(render(&arena, numbers), "number[]");
     }
 
     #[test]
     fn a_named_type_nested_in_another_type_still_prints_its_name() {
         let mut arena = TypeArena::new();
         let string = arena.string();
-        let dog = arena.alloc_fresh(Type::Object(ObjectType::new(vec![PropertyEntry {
+        let body = arena.alloc(Type::Object(ObjectType::new(vec![PropertyEntry {
             name: "name".into(),
             type_id: string,
             optional: false,
             is_method: false,
         }])));
-        arena.set_display_name(dog, "Dog");
+        let dog = arena.alloc_ref();
+        arena.resolve_ref(dog, body);
+        arena.name_ref(dog, "Dog");
         let dogs = arena.alloc(Type::Array(dog));
         assert_eq!(render(&arena, dogs), "Dog[]");
     }

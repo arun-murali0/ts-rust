@@ -122,8 +122,8 @@ impl<'a> SemanticQueries<'a> {
     // directly, precisely so "did this go through the cache" has one place to
     // check rather than needing an audit of every call site. The one deliberate
     // exception is type_annotation::check_type_argument_constraint: it runs while
-    // a declaration is still being resolved, when a placeholder can be empty, and a
-    // result cached against an empty placeholder would outlive it. Generic
+    // a declaration is still being resolved, when its Ref reads as an empty object, and
+    // a result cached against that empty object would outlive it. Generic
     // inference is not an exception: it runs after every declaration is complete
     // and goes through here.
     pub fn is_subtype(&mut self, source: TypeId, target: TypeId) -> bool {
@@ -244,11 +244,11 @@ mod tests {
     }
 
     #[test]
-    fn filling_a_placeholder_discards_answers_computed_against_the_empty_one() {
+    fn resolving_a_declaration_discards_answers_computed_against_the_empty_one() {
         use crate::types::{ObjectType, PropertyEntry, Type};
 
         let mut arena = TypeArena::new();
-        let placeholder = arena.alloc_object_placeholder();
+        let declaration = arena.alloc_ref();
         let shape = |arena: &TypeArena| {
             Type::Object(ObjectType::new(vec![PropertyEntry {
                 name: "value".into(),
@@ -265,17 +265,18 @@ mod tests {
 
         {
             let mut queries = SemanticQueries::new(&arena, &mut cache);
-            assert!(!queries.is_subtype(placeholder, target));
+            assert!(!queries.is_subtype(declaration, target));
         }
         assert_eq!(cache.len(), 1);
 
         let filled = shape(&arena);
-        arena.set(placeholder, filled);
+        let body = arena.alloc(filled);
+        arena.resolve_ref(declaration, body);
 
         let mut queries = SemanticQueries::new(&arena, &mut cache);
         assert!(
-            queries.is_subtype(placeholder, target),
-            "the answer from the empty placeholder must not survive set()"
+            queries.is_subtype(declaration, target),
+            "the answer from the empty declaration must not survive resolve_ref()"
         );
         assert_eq!(cache.len(), 1, "the old generation's entry was dropped");
     }

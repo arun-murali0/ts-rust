@@ -328,8 +328,9 @@ fn substitute_impl(
 // answered from the arena's own cache (see contains_type_param) instead of a fresh
 // walk at every level.
 //
-// `rewritten` does not outlive the call. A placeholder can be completed by
-// TypeArena::set between two calls, which would make a longer-lived rewrite stale.
+// `rewritten` does not outlive the call. A declaration's Ref can be resolved by
+// TypeArena::resolve_ref between two calls, which would make a longer-lived rewrite
+// stale.
 struct Substitution<'b> {
     bindings: &'b [(crate::types::TypeParameterId, TypeId)],
     keep_unbound: bool,
@@ -355,8 +356,8 @@ impl Substitution<'_> {
     // still be the generic `Box<T> | null`, and `box.next.value` would read as T.
     // So the cut only *finds* the cycle (`cyclic`); once the first pass over an
     // object has finished and it turns out to reach itself, rewrite_recursive
-    // builds it again with a placeholder of its own, so that the edge closes on the
-    // new object instead. Only an Object can close a cycle (see TypeArena), which
+    // builds it again with a Ref of its own, so that the edge closes on the new object
+    // instead. Only an Object can close a cycle (see TypeArena), which
     // is why nothing else gets a second pass.
     //
     // `lowest_cut` is the index in `open` of the outermost id any cut below this
@@ -401,7 +402,7 @@ impl Substitution<'_> {
         if cut_below >= depth {
             self.rewritten.insert(type_id, result);
         } else {
-            // rewrite_recursive registers its placeholder before descending; when
+            // rewrite_recursive registers its Ref before descending; when
             // the result turns out not to be reusable, that entry must go too.
             self.rewritten.remove(&type_id);
         }
@@ -409,13 +410,12 @@ impl Substitution<'_> {
         result
     }
 
-    // Rebuilds a self-referential object around a placeholder of its own. The
-    // placeholder is registered as type_id's rewrite *before* the properties are
-    // walked, so the walk finds it where the first pass found the cut, and the edge
-    // that closed on type_id closes on the copy. The placeholder is not
-    // interned (see TypeArena::alloc_object_placeholder), which is what a
-    // recursive shape needs anyway: other types hold its raw id, so it could not
-    // be merged with an identical shape afterwards.
+    // Rebuilds a self-referential object around a Ref of its own. The Ref is
+    // registered as type_id's rewrite *before* the properties are walked, so the walk
+    // finds it where the first pass found the cut, and the edge that closed on
+    // type_id closes on the copy. The Ref is its own id (see TypeArena::alloc_ref),
+    // which is what a recursive shape needs: other types hold that id, so it must
+    // never be merged with another declaration. Its body is an ordinary Object.
     fn rewrite_recursive(
         &mut self,
         arena: &mut TypeArena,
@@ -425,8 +425,8 @@ impl Substitution<'_> {
         let Type::Object(object) = arena.get(type_id).clone() else {
             return type_id;
         };
-        let placeholder = arena.alloc_object_placeholder();
-        self.rewritten.insert(type_id, placeholder);
+        let copy = arena.alloc_ref();
+        self.rewritten.insert(type_id, copy);
 
         let mut properties = Vec::with_capacity(object.properties.len());
         for p in object.properties.iter() {
@@ -437,8 +437,9 @@ impl Substitution<'_> {
                 is_method: p.is_method,
             });
         }
-        arena.set(placeholder, Type::Object(ObjectType::new(properties)));
-        placeholder
+        let body = arena.alloc(Type::Object(ObjectType::new(properties)));
+        arena.resolve_ref(copy, body);
+        copy
     }
 
     fn rewrite_uncached(
@@ -594,7 +595,7 @@ pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
 // ids on the current path, so a shared node was walked again for every parent.
 //
 // Caching needs care because of recursive types. A type reachable from itself
-// (Node { next: Node }, via namespace::resolve's placeholder backpatch) is cut
+// (Node { next: Node }, through the Ref namespace::resolve gives its declaration) is cut
 // where it re-enters an id that is still open, and that cut answers "false" only
 // because the answer is being computed. A node whose walk was cut at an *outer*
 // open id has not really been decided: that outer id may reach a parameter
@@ -801,15 +802,13 @@ mod tests {
         let number = arena.number();
         let null = arena.null();
 
-        let node = arena.alloc_object_placeholder();
+        let node = arena.alloc_ref();
         let next = arena.alloc_union(vec![node, null]);
-        arena.set(
-            node,
-            Type::Object(ObjectType::new(vec![
-                property("value", t),
-                property("next", next),
-            ])),
-        );
+        let body = arena.alloc(Type::Object(ObjectType::new(vec![
+            property("value", t),
+            property("next", next),
+        ])));
+        arena.resolve_ref(node, body);
 
         let bound = substitute_bound_type_params(&mut arena, node, &[(id, number)]);
 
@@ -837,22 +836,18 @@ mod tests {
         let t = arena.alloc(Type::GenericParameter(id, "T".to_string(), None));
         let number = arena.number();
 
-        let a = arena.alloc_object_placeholder();
-        let b = arena.alloc_object_placeholder();
-        arena.set(
-            b,
-            Type::Object(ObjectType::new(vec![
-                property("item", t),
-                property("back", a),
-            ])),
-        );
-        arena.set(
-            a,
-            Type::Object(ObjectType::new(vec![
-                property("item", t),
-                property("other", b),
-            ])),
-        );
+        let a = arena.alloc_ref();
+        let b = arena.alloc_ref();
+        let b_body = arena.alloc(Type::Object(ObjectType::new(vec![
+            property("item", t),
+            property("back", a),
+        ])));
+        arena.resolve_ref(b, b_body);
+        let a_body = arena.alloc(Type::Object(ObjectType::new(vec![
+            property("item", t),
+            property("other", b),
+        ])));
+        arena.resolve_ref(a, a_body);
 
         let bound = substitute_bound_type_params(&mut arena, a, &[(id, number)]);
 
@@ -871,15 +866,13 @@ mod tests {
         let id = TypeParameterId::new(0, 0);
         let number = arena.number();
         let null = arena.null();
-        let node = arena.alloc_object_placeholder();
+        let node = arena.alloc_ref();
         let next = arena.alloc_union(vec![node, null]);
-        arena.set(
-            node,
-            Type::Object(ObjectType::new(vec![
-                property("value", number),
-                property("next", next),
-            ])),
-        );
+        let body = arena.alloc(Type::Object(ObjectType::new(vec![
+            property("value", number),
+            property("next", next),
+        ])));
+        arena.resolve_ref(node, body);
 
         assert_eq!(
             substitute_bound_type_params(&mut arena, node, &[(id, number)]),

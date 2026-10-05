@@ -31,15 +31,15 @@ pub struct CheckContext<'ast, 'src> {
     // pair is ordered, never symmetrized for subtyping: subtyping is not symmetric
     // (see subtyping.rs), so (a, b) and (b, a) are independent entries.
     //
-    // The cache is tied to the arena's generation (see RelationCache). Filling in a
-    // recursive placeholder with TypeArena::set changes what an existing id means,
+    // The cache is tied to the arena's generation (see RelationCache). Resolving a
+    // declaration's Ref with TypeArena::resolve_ref changes what an existing id means,
     // and the next query drops every answer from before it, so nothing stale can be
     // read back.
     //
     // This only catches repeats of the *same* TypeId pair. alloc() reuses one TypeId
     // for identical anonymous composites (so the same-shaped object literal at two
     // call sites shares an entry here), but a named type, a union or a
-    // placeholder-originated type has its own id and its own entries even when it
+    // declaration's Ref has its own id and its own entries even when it
     // matches another by shape. What it does catch: the same subterm pair reached from
     // different branches of one recursive object or union comparison, and the
     // (candidate, existing) pairs generic inference compares, so a call like
