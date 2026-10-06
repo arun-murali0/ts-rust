@@ -15,6 +15,9 @@ The design is in `HLD.md` and `LLD.md`. This page is the short list of what was 
 | 7 | Salsa is pinned at `=0.28.5`, provisionally | It is what the foundation layer builds on | S1 fails |
 | 8 | A module key follows the rule in LLD 3.1.1 | An id has to survive moving the project and a different install layout | A platform test shows two spellings of one file get two keys |
 | 9 | `FileId` is a run-local index, sorted by canonical path | Output order must not depend on discovery order, and ids must not be stored | Never expected; it only works if no key uses it |
+| 10 | Intersection identity is ordered, deduplicated by id, never sorted | Call-signature order depends on member order, and callability needs a body that may not exist yet. tsc 5.9.3 does the same | A fixture shows overload order through intersections is not needed |
+| 11 | Intersection reduction has two levels: ids and wrappers at construction, bodies lazily | A decision that read a body while a declaration was unresolved would bake a wrong answer into the intern table | Never expected; it is the placeholder bug turned around |
+| 12 | A product of union sizes of 100,000 or more is TS2590 | Same cap as tsc | The ADR-6 budgets need it lower |
 
 ## The module key, in one place
 
