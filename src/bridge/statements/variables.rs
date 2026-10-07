@@ -7,7 +7,7 @@ use crate::type_annotation::resolve_type_annotation;
 use crate::types::Type;
 
 use super::super::context::CheckContext;
-use super::super::expressions::{check_excess_properties, infer_expression_type};
+use super::super::expressions::{check_excess_properties, infer_expression_type, report_mismatch};
 use super::bind_pattern;
 use super::support::{find_unresolved_type_name, report_implicit_any_params};
 
@@ -105,14 +105,19 @@ fn check_identifier_declarator(
 
         (AnnotationOutcome::Resolved(declared), Some(actual)) => {
             if !ctx.semantic().is_assignable(actual, declared) {
-                ctx.error(
-                    crate::diagnostic_messages::messages::declared_type_mismatch(
-                        &ctx.arena, actual, declared,
-                    ),
+                let whole = crate::diagnostic_messages::messages::declared_type_mismatch(
+                    &ctx.arena, actual, declared,
+                );
+                report_mismatch(
+                    declarator.init.as_ref(),
+                    actual,
+                    declared,
+                    whole,
                     declarator
                         .init
                         .as_ref()
                         .map_or(declarator.span(), GetSpan::span),
+                    ctx,
                 );
             } else if let Some(init) = &declarator.init {
                 check_excess_properties(init, declared, ctx);

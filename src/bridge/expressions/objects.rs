@@ -68,7 +68,8 @@ pub(super) fn infer_object_expression_type(
                 name: name.into(),
                 type_id,
                 optional: false,
-                is_method: false,
+                // `{ peek() {} }` prints as `{ peek(): any; }`, the way it was written.
+                is_method: property.method,
             },
         );
     }

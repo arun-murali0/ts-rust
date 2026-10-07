@@ -3,7 +3,7 @@ use oxc_semantic::Scoping;
 use oxc_span::GetSpan;
 
 use super::context::CheckContext;
-use super::expressions::{check_excess_properties, infer_expression_type};
+use super::expressions::{check_excess_properties, infer_expression_type, report_mismatch};
 
 mod classes;
 mod control_flow;
@@ -42,11 +42,16 @@ pub(super) fn check_return_statement(
 
     if let Some(expected) = ctx.current_return_type {
         if !ctx.semantic().is_assignable(actual, expected) {
-            ctx.error(
-                crate::diagnostic_messages::messages::return_type_mismatch(
-                    &ctx.arena, actual, expected,
-                ),
+            let whole = crate::diagnostic_messages::messages::return_type_mismatch(
+                &ctx.arena, actual, expected,
+            );
+            report_mismatch(
+                ret.argument.as_ref(),
+                actual,
+                expected,
+                whole,
                 ret.span(),
+                ctx,
             );
         } else if let Some(argument) = &ret.argument {
             check_excess_properties(argument, expected, ctx);

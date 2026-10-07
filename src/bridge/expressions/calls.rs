@@ -219,7 +219,13 @@ fn check_callable(
     if !arity_ok {
         // The text is tsc's TS2554 verbatim, which never names the missing
         // parameter, so there is nothing to look up here.
-        ctx.error(arity_message(required, max, arguments.len()), span);
+        // tsc puts "too many arguments" on the first extra argument and "too few" on
+        // the call, so each lands on the line a reader would look at.
+        let arity_span = match max {
+            Some(max) if arguments.len() > max => arguments[max].span(),
+            _ => span,
+        };
+        ctx.error(arity_message(required, max, arguments.len()), arity_span);
 
         for arg in arguments {
             if let Some(arg_expr) = arg.as_expression() {
@@ -343,12 +349,23 @@ fn check_callable(
             continue;
         }
         if !ctx.semantic().is_assignable(bound, constraint) {
-            ctx.error(
+            // A type argument the caller wrote out is TS2344. One that was inferred is
+            // reported by tsc as the argument that does not fit the parameter's
+            // constraint (TS2345).
+            let written = own_ids
+                .iter()
+                .position(|own| own == id)
+                .is_some_and(|position| position < explicit_type_args.len());
+            let message = if written {
                 crate::diagnostic_messages::messages::type_argument_constraint_violation(
                     &ctx.arena, bound, constraint,
-                ),
-                span,
-            );
+                )
+            } else {
+                crate::diagnostic_messages::messages::argument_not_assignable(
+                    &ctx.arena, bound, constraint,
+                )
+            };
+            ctx.error(message, span);
         }
     }
 
@@ -364,12 +381,17 @@ fn check_callable(
         };
         let expected = substitute_type_params(&mut ctx.arena, param_type, &bindings);
         if !ctx.semantic().is_assignable(arg_type, expected) {
-            ctx.error(
-                crate::diagnostic_messages::messages::argument_not_assignable(
-                    &ctx.arena, arg_type, expected,
-                ),
-                arg_expr.span(),
-            );
+            // tsc reports a bad property of an object literal argument on the property
+            // itself, as a plain assignability error; only an argument it cannot take
+            // apart gets the `Argument of type ...` message.
+            if !super::elaborate::elaborate_mismatch(arg_expr, arg_type, expected, ctx) {
+                ctx.error(
+                    crate::diagnostic_messages::messages::argument_not_assignable(
+                        &ctx.arena, arg_type, expected,
+                    ),
+                    arg_expr.span(),
+                );
+            }
         } else {
             check_excess_properties(arg_expr, expected, ctx);
         }

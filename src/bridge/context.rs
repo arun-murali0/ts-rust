@@ -67,6 +67,13 @@ pub struct CheckContext<'ast, 'src> {
     // very next function expression checked is known to have no contextual
     // `this`, so its body should run with implicit_this set. Consumed on entry.
     pub next_function_has_no_this: bool,
+
+    // The type of each branch of every conditional expression checked so far, by the
+    // expression's start offset. tsc reports a ternary that does not fit its target
+    // once per branch that does not fit; the branches' types cannot be recovered from
+    // the union the whole expression has, and inferring them again would report their
+    // own errors twice, so they are kept when they are first inferred.
+    pub conditional_arms: std::collections::HashMap<u32, (TypeId, TypeId)>,
 }
 
 impl<'ast, 'src> CheckContext<'ast, 'src> {
@@ -86,6 +93,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             current_class_instance: None,
             implicit_this: false,
             next_function_has_no_this: false,
+            conditional_arms: std::collections::HashMap::new(),
         }
     }
 
