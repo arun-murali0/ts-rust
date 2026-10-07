@@ -40,6 +40,7 @@ pub enum DiagnosticCode {
     NotConstructor,
     ArgumentArityMismatch,
     ArgumentArityAtLeast,
+    SpreadArgumentNotTupleOrRest,
 
     // 1200s -- name / member resolution
     UnresolvedIdentifier,
@@ -109,6 +110,7 @@ impl DiagnosticCode {
             ArgumentArityMismatch => "TSR1102",
             NotConstructor => "TSR1103",
             ArgumentArityAtLeast => "TSR1104",
+            SpreadArgumentNotTupleOrRest => "TSR1105",
 
             UnresolvedIdentifier => "TSR1201",
             PropertyDoesNotExist => "TSR1202",
@@ -180,6 +182,7 @@ impl DiagnosticCode {
             NotConstructor => 2351,
             ArgumentArityMismatch => 2554,
             ArgumentArityAtLeast => 2555,
+            SpreadArgumentNotTupleOrRest => 2556,
 
             UnresolvedIdentifier => 2304,
             PropertyDoesNotExist => 2339,

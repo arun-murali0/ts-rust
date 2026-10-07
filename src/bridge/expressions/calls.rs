@@ -217,32 +217,67 @@ fn check_callable(
     // counted; the spread's own length is not known, so only "too many" can be
     // decided, from the arguments written before it.
     // Cost: a call like `f(...xs)` with too few values is not reported.
+    //
+    // Now: when the first spread is known to be an array (not a tuple, which this checker
+    // does not model, so a tuple never reaches here as an array), tsc's own rule applies:
+    // the spread is only accepted when it starts at or after the required parameters
+    // and lands on a rest parameter or a parameter that exists. Anything else is TS2556 on
+    // the spread, which tsc reports instead of an arity message. A spread of anything that
+    // is not known to be an array (any, an unresolved type) keeps the lenient rule above,
+    // so this adds no false errors.
     let first_spread = arguments
         .iter()
         .position(|arg| matches!(arg, oxc_ast::ast::Argument::SpreadElement(_)));
-    let arity_ok = match first_spread {
-        Some(first) => match max {
-            Some(max) => first <= max,
-            None => true,
-        },
-        None => {
-            arguments.len() >= required
-                && match max {
-                    Some(max) => arguments.len() <= max,
-                    None => true,
-                }
+    // The first spread is inferred here, once, because the check below needs its type;
+    // the pass over the arguments further down skips it so it is not reported twice.
+    let first_spread_type = first_spread.and_then(|index| match &arguments[index] {
+        oxc_ast::ast::Argument::SpreadElement(spread) => {
+            Some(infer_expression_type(&spread.argument, scoping, ctx))
         }
-    };
-    if !arity_ok {
-        // The text is tsc's TS2554 verbatim, which never names the missing
-        // parameter, so there is nothing to look up here.
-        // tsc puts "too many arguments" on the first extra argument and "too few" on
-        // the call, so each lands on the line a reader would look at.
-        let arity_span = match max {
-            Some(max) if arguments.len() > max => arguments[max].span(),
-            _ => span,
+        _ => None,
+    });
+    let misplaced_spread = first_spread.zip(first_spread_type).and_then(|(index, ty)| {
+        // `f(...[1, 2])` is a tuple to tsc (the literal is typed by where it lands), so
+        // spreading an array literal is never an error here.
+        let is_literal = matches!(
+            &arguments[index],
+            oxc_ast::ast::Argument::SpreadElement(spread) if is_array_literal(&spread.argument)
+        );
+        let is_array = matches!(ctx.arena.get(ty), Type::Array(_));
+        let accepted = index >= required && (has_rest || index < function_type.params.len());
+        (is_array && !is_literal && !accepted).then_some(index)
+    });
+    let arity_ok = misplaced_spread.is_none()
+        && match first_spread {
+            Some(first) => match max {
+                Some(max) => first <= max,
+                None => true,
+            },
+            None => {
+                arguments.len() >= required
+                    && match max {
+                        Some(max) => arguments.len() <= max,
+                        None => true,
+                    }
+            }
         };
-        ctx.error(arity_message(required, max, arguments.len()), arity_span);
+    if !arity_ok {
+        if let Some(index) = misplaced_spread {
+            ctx.error(
+                crate::diagnostic_messages::messages::spread_argument_needs_tuple_or_rest(),
+                arguments[index].span(),
+            );
+        } else {
+            // The text is tsc's TS2554 verbatim, which never names the missing
+            // parameter, so there is nothing to look up here.
+            // tsc puts "too many arguments" on the first extra argument and "too few" on
+            // the call, so each lands on the line a reader would look at.
+            let arity_span = match max {
+                Some(max) if arguments.len() > max => arguments[max].span(),
+                _ => span,
+            };
+            ctx.error(arity_message(required, max, arguments.len()), arity_span);
+        }
 
         for arg in arguments {
             if let Some(arg_expr) = arg.as_expression() {
@@ -268,7 +303,9 @@ fn check_callable(
             let after_spread = first_spread.is_some_and(|first| index >= first);
             match arg {
                 oxc_ast::ast::Argument::SpreadElement(spread) => {
-                    infer_expression_type(&spread.argument, scoping, ctx);
+                    if Some(index) != first_spread {
+                        infer_expression_type(&spread.argument, scoping, ctx);
+                    }
                     None
                 }
                 other => other.as_expression().and_then(|expr| {
@@ -430,6 +467,14 @@ fn check_callable(
     }
 
     substitute_type_params(&mut ctx.arena, function_type.return_type, &bindings)
+}
+
+fn is_array_literal(expr: &Expression) -> bool {
+    match expr {
+        Expression::ArrayExpression(_) => true,
+        Expression::ParenthesizedExpression(inner) => is_array_literal(&inner.expression),
+        _ => false,
+    }
 }
 
 fn arity_message(

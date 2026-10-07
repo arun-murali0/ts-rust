@@ -278,6 +278,15 @@ pub mod messages {
         )
     }
 
+    // tsc's TS2556: reported on the spread itself, in place of any arity message, when an
+    // array (not a tuple) is spread where it cannot be matched to a rest parameter.
+    pub fn spread_argument_needs_tuple_or_rest() -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::SpreadArgumentNotTupleOrRest,
+            "A spread argument must either have a tuple type or be passed to a rest parameter.",
+        )
+    }
+
     pub fn unresolved_identifier(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::UnresolvedIdentifier,

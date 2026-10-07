@@ -1,4 +1,4 @@
-use ts_rust::{Diagnostic, Severity, TypeChecker};
+use ts_rust::{Diagnostic, DiagnosticCode, Severity, TypeChecker};
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -71,6 +71,42 @@ fn a_spread_argument_is_not_counted_as_one_argument() {
         source,
         "spread_argument_is_not_counted_as_one_argument.ts",
     ));
+}
+
+// tsc's TS2556: an array spread where it covers required parameters is reported on the
+// spread itself, and nothing else is said about the call.
+fn assert_only_spread_errors(diagnostics: &[Diagnostic], expected: usize) {
+    assert_eq!(
+        diagnostics.len(),
+        expected,
+        "expected {expected} diagnostic(s), got: {diagnostics:?}"
+    );
+    for diagnostic in diagnostics {
+        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.code, DiagnosticCode::SpreadArgumentNotTupleOrRest);
+    }
+}
+
+#[test]
+fn an_array_spread_must_land_on_a_rest_parameter() {
+    let source = include_str!(
+        "fixtures/false-positive-fixes/spread_array_must_land_on_a_rest_parameter.ts"
+    );
+    assert_only_spread_errors(
+        &check(source, "spread_array_must_land_on_a_rest_parameter.ts"),
+        2,
+    );
+}
+
+#[test]
+fn a_spread_after_every_parameter_is_still_reported() {
+    let source = include_str!(
+        "fixtures/false-positive-fixes/spread_after_every_parameter_is_still_reported.ts"
+    );
+    assert_only_spread_errors(
+        &check(source, "spread_after_every_parameter_is_still_reported.ts"),
+        1,
+    );
 }
 
 #[test]
