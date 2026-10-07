@@ -297,3 +297,6 @@ Locked at stage 0. Each stays as decided until the spike or measurement named in
 7. **Salsa: `=0.28.5`, provisional.** Reopen if S1 fails.
 8. **Module key: by the rule in LLD 3.1.1, never by `FileId`.**
 9. **`FileId` is a run-local index, sorted by canonical path.** It orders output and indexes arrays. It is never hashed, stored, or part of any key.
+10. **Intersection identity is ordered, deduplicated by id, never sorted.** Call-signature order depends on member order, and whether a member is callable needs a body that may not exist at construction. `A & B` and `B & A` are two ids that are mutually assignable, as in tsc 5.9.3. LLD 1.13.
+11. **Intersection reduction is split in two.** Construction reads only ids and `Named`/`App` wrappers, never a `Ref`'s body: flatten, identity and absorbing members, primitives and literals, distribution over unions, dedupe by id. Anything that needs a body (discriminant conflicts, property merging, callable detection) runs on demand, is cached per generation, and is never part of identity. LLD 1.13.
+12. **Distribution cap: a product of union sizes of 100,000 or more is TS2590,** as in tsc. Reopen if the ADR-6 budgets need it lower.

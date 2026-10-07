@@ -48,6 +48,7 @@ pub enum Node<'a> {
     BoolLit(bool),
     Array(TypeId),
     Union(&'a [TypeId]),               // sorted by TypeId, deduplicated, len >= 2
+    Intersection(&'a [TypeId]),        // written order, deduplicated by id, len >= 2; never sorted (1.13)
     Object(&'a ObjectShape<'a>),
     Function(&'a FnShape<'a>),
     Param(TypeParamKey),               // generic type parameter
@@ -236,6 +237,74 @@ impl Worker {
 | `expand` never loops | recursive interface, mutually recursive aliases, recursive generics |
 | No `Drop` types in nodes | compile-time assertion (2.2) |
 | Reset leaves no live references | compile-fail test (a reference kept across `run_unit` must not compile) |
+| Intersection identity is ordered | unit test: `A & B` and `B & A` are two ids and mutually assignable |
+| Intersection construction never reads a body | unit test: build with an unresolved `Ref` member, resolve it, and the result is unchanged |
+| Every intersection comes from `alloc_intersection` | substitution test: `T & number` with `T := string` is `never` |
+
+### 1.13 Intersections: canonical form (decided before the node exists)
+
+Intersections touch interning (1.4), unresolved declarations (1.7), generics (1.9) and the stable hash (3.2) at once, so the rules are fixed here first. Each was checked against tsc 5.9.3 with a probe over the compiler API; the table at the end records what it printed.
+
+**The node.** `Intersection(&'a [TypeId])`: members in written order, deduplicated by id, at least two. It is not sorted. A union is sorted because its members are alternatives; an intersection's order carries meaning.
+
+**Rule 1: identity is ordered.** `A & B` and `B & A` are two ids that are mutually assignable. tsc does the same. Order cannot be dropped, because the call signatures of the members are tried in member order: `((x: any) => string) & ((x: number) => number)` called with `1` returns `string`, and the reverse order returns `number`. Sorting would be safe only when no member is callable, and whether a member is callable needs its body, which may not exist yet. An identity that follows the written order never has to ask.
+
+**Rule 2: reduction happens at two levels, and only the first is identity.**
+
+*Construction*, in `alloc_intersection`. It reads only what an id and its wrappers show: the node kind, primitive and literal facts, and the contents of a `Named` or `App` wrapper. It never looks through a `Ref`. In order:
+
+1. A `never` member gives `never`. This is checked first, because `any & never` is `never`.
+2. Flatten: a member that is an intersection, seen through `Named` and `App` wrappers, is replaced by its members in place. A nested alias therefore prints flat.
+3. Remove `unknown`. If nothing remains the result is `unknown`.
+4. An `any` member gives `any`.
+5. Primitives and literals: two different primitive kinds give `never`; a literal with its own primitive gives the literal; two different literals give `never`; `null` or `undefined` with any member that is not itself gives `never`. An object-like member never cancels a primitive, so `string & { __brand: "x" }` stays an intersection.
+6. Distribute: if a member, seen through wrappers, is a union, the result is the union of the intersections of each choice, in written order. Each choice is built by this same function, so `("a" | "b" | "c") & string` reduces choice by choice. If the product of the union sizes reaches 100,000 (a `never` factor counts as zero) the result is the error type and the diagnostic is TS2590, as in tsc.
+7. Drop an anonymous `{}` (an `Object` with no properties) when another object-like member is present.
+8. Deduplicate by id, keeping the first occurrence. Never structurally: structural equality reads bodies.
+9. No members gives `unknown`, one member gives that member, otherwise the ordered list is interned.
+
+*Reduction*, in `reduced(id)`. It reads bodies, runs when a relation or a member access asks, and is cached per `(id, generation)` like any relation answer. What it decides is never written back into the intersection's identity:
+
+- A discriminant conflict (`{ kind: "a" } & { kind: "b" }`) reduces to `never`. tsc keeps the intersection node and reduces it on demand, which is why it prints as `never` while its flags still say intersection.
+- A property that appears in several members has the intersection of their types, built with `alloc_intersection`; `{ x: number } & { x: string }` has `x: never`.
+- The signatures of callable members are concatenated in member order.
+
+**Why the line is here.** Construction runs while declarations are still being resolved, when a `Ref` reads as an empty object. Any decision that needed a body would bake an answer about that empty object into the intern table, which is the old placeholder bug again, and it would be cached under a stable id where nothing invalidates it. So construction uses ids and wrappers only, and everything body-aware is lazy and generation-scoped.
+
+**Interning.** An intersection is interned by its ordered member ids, after construction. Anonymous members are hash-consed first, so two mentions of `{ a: 1 } & { b: 2 }` are one id; a `Ref` member is unique per declaration. Normalizing before interning means the table never holds a form that construction would have reduced.
+
+**Rule 3: one door.** Every intersection comes from `alloc_intersection`. Substitution rebuilds through it (`T & number` with `T := string` must be `never`), and so do narrowing and spread. No other code allocates the node.
+
+**Rule 4: hashing.** The encoding in 3.2 hashes the members in order, not sorted. Reordering the members of a written intersection therefore changes the `SigHash`. That is an extra recheck and never a stale result; sorting would be unsound for overloads.
+
+**Rule 5: display.** Members print in written order, a `Named` member prints its name, and no first-writer table is needed because identity is ordered.
+
+**Relations (for when they are written).** A source is assignable to an intersection when it is assignable to every member. An intersection is assignable to a target when some member is, or, for an object target, when the merged properties of the members satisfy it. Equality is structural, so `A & B` equals `B & A` as a relation; only call-signature order tells them apart.
+
+**Observed in tsc 5.9.3**
+
+| Input | Result | Rule |
+|---|---|---|
+| `A & B`, `B & A` | two ids, assignable both ways, members in written order | 1 |
+| `AB & C` with `type AB = A & B` | members `A, B, C`, the same id as `A & B & C` | construction 2 |
+| `A & A & B` | members `A, B`, the same id as `A & B` | construction 8 |
+| `string & number`, `"a" & "b"`, `null & string` | `never` | construction 5 |
+| `"a" & string`, `1 & number`, `true & boolean` | the literal | construction 5 |
+| `string & { __brand: "x" }` | stays an intersection | construction 5 |
+| `number & string & { z: 1 }` | `never` | construction 5 |
+| `A & unknown`, `unknown & unknown` | `A`, `unknown` | construction 3 |
+| `A & never`, `any & never` | `never` | construction 1 |
+| `any & A` | `any` | construction 4 |
+| `{} & A`, `A & {}` | `A`, the same id as `A` | construction 7 |
+| `object & A` | stays an intersection | not reduced |
+| `(A \| B) & C` | `A & C \| B & C`, written order inside each | construction 6 |
+| `("a" \| "b") & ("b" \| "c")` | `"b"` | construction 6 |
+| `{ kind: "a" } & { kind: "b" }` | an intersection node that prints as `never` | reduction |
+| `{ x: number } & { x: string }` | property `x` has type `never` | reduction |
+| callable members in either order | the first matching signature wins | 1 |
+| a product of union sizes of 100,000 or more | error TS2590, "too complex to represent" | construction 6 |
+
+**Open ([VERIFY]).** The 100,000 cap is tsc's; ts-rust's own budget (ADR-6) may set it lower after measurement. Rules 5 and 7 are written for the strict mode this checker runs in and for anonymous `{}` only; an empty interface is a `Ref` and is not dropped. Type parameters stay opaque members (`T & U` is kept), and the `T & {}` form used by `NonNullable<T>` needs its own case when generics reach it. Enum literal members are treated as literals through their `Named` wrapper and need a fixture.
 
 ---
 
@@ -353,6 +422,7 @@ node encoding = tag:u8 || payload
   0x21 Union     : n:u32le || n child hash128, sorted ascending by hash128
   0x22 Object    : flags:u8 || n:u32le || n * (name_len:u32le || name bytes || optional:u8 || is_method:u8 || child hash128), props sorted by name bytes
   0x23 Function  : n_params:u32le || n * (optional:u8 || rest:u8 || child hash128) || ret hash128 || n_tparams:u32le || tparam keys
+  0x24 Intersection : n:u32le || n child hash128, in member order, NOT sorted (1.13)
   0x30 DeclRef   : DeclKey (16 bytes le)           // named reference: identity only
   0x31 App       : DeclKey || n:u32le || n child hash128
   0x32 TypeParam : DeclKey || index:u32le
@@ -455,6 +525,7 @@ Properties of this design:
 | Hash is the same across process runs | no random seeds |
 | Hash is the same before and after a reset and rebuild | no pointer or slot dependence |
 | Property or union order permutations give the same hash | canonical ordering works |
+| Reordering the members of an intersection changes the hash | order is identity for intersections (1.13) |
 | Export, import, export round trip gives the same hash | materialize is faithful |
 | Body-only edit keeps `SigHash`; signature edit changes it | cutoff behavior |
 | Recursive interface hashes without recursion | cycle breaking at `DeclRef` |

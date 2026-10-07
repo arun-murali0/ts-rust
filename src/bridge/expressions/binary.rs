@@ -1,9 +1,110 @@
-use oxc_ast::ast::BinaryOperator;
-use oxc_span::Span;
+use oxc_ast::ast::{BinaryOperator, Expression};
+use oxc_span::{GetSpan, Span};
 
 use crate::arena::TypeId;
+use crate::types::Type;
+
+use super::super::narrow::narrow_to_non_nullish;
 
 use super::super::context::CheckContext;
+
+// tsc reports an operand that may be null or undefined where the operator needs a
+// number once, on the operand, and then goes on with the operand's type without them,
+// so `a + 1` with `a: number | undefined` is that one error and not an operator
+// mismatch. Applies when the other operand is not a string (`"s" + a` concatenates) and
+// what is left of the operand is a number (or, for a comparison, a string).
+//
+// Returns the operand types to carry on with.
+pub(super) fn strip_possibly_nullish(
+    operator: BinaryOperator,
+    operands: [(&Expression, TypeId); 2],
+    ctx: &mut CheckContext<'_, '_>,
+) -> (TypeId, TypeId) {
+    let relational = matches!(
+        operator,
+        BinaryOperator::LessThan
+            | BinaryOperator::LessEqualThan
+            | BinaryOperator::GreaterThan
+            | BinaryOperator::GreaterEqualThan
+    );
+    let numeric = relational
+        || matches!(
+            operator,
+            BinaryOperator::Addition
+                | BinaryOperator::Subtraction
+                | BinaryOperator::Multiplication
+                | BinaryOperator::Division
+                | BinaryOperator::Remainder
+                | BinaryOperator::Exponential
+        );
+    if !numeric {
+        return (operands[0].1, operands[1].1);
+    }
+
+    let string_ty = ctx.arena.string();
+    let number_ty = ctx.arena.number();
+    let is_string = |ctx: &mut CheckContext<'_, '_>, ty: TypeId| {
+        ty != ctx.arena.any() && ctx.semantic().is_assignable(ty, string_ty)
+    };
+    let sides_are_strings = [is_string(ctx, operands[0].1), is_string(ctx, operands[1].1)];
+
+    let mut result = [operands[0].1, operands[1].1];
+    for (index, (expr, ty)) in operands.into_iter().enumerate() {
+        // `+` with a string on the other side is concatenation, which accepts anything.
+        if operator == BinaryOperator::Addition && sides_are_strings[1 - index] {
+            continue;
+        }
+        let (has_null, has_undefined) = nullish_members(ctx, ty);
+        if !has_null && !has_undefined {
+            continue;
+        }
+        let rest = narrow_to_non_nullish(&mut ctx.arena, ty);
+        let fits = ctx.semantic().is_assignable(rest, number_ty)
+            || (relational && ctx.semantic().is_assignable(rest, string_ty));
+        if !fits {
+            continue;
+        }
+        let name = entity_name(expr);
+        ctx.error(
+            crate::diagnostic_messages::messages::possibly_nullish(
+                name.as_deref(),
+                has_null,
+                has_undefined,
+            ),
+            expr.span(),
+        );
+        result[index] = rest;
+    }
+    (result[0], result[1])
+}
+
+fn nullish_members(ctx: &CheckContext<'_, '_>, ty: TypeId) -> (bool, bool) {
+    let members = match ctx.arena.get(ty) {
+        Type::Union(members) => members.clone(),
+        _ => vec![ty],
+    };
+    let has = |wanted: fn(&Type) -> bool| members.iter().any(|&m| wanted(ctx.arena.get(m)));
+    (
+        has(|t| matches!(t, Type::Null)),
+        has(|t| matches!(t, Type::Undefined)),
+    )
+}
+
+// The source text tsc names an operand by: a plain name, or a chain of property
+// accesses on one (`o.v`, `this.items`). Anything else (a call, an index) has none.
+fn entity_name(expr: &Expression) -> Option<String> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.to_string()),
+        Expression::ThisExpression(_) => Some("this".to_string()),
+        Expression::ParenthesizedExpression(inner) => entity_name(&inner.expression),
+        Expression::StaticMemberExpression(member) if !member.optional => Some(format!(
+            "{}.{}",
+            entity_name(&member.object)?,
+            member.property.name
+        )),
+        _ => None,
+    }
+}
 
 pub(super) fn infer_binary_expression_type(
     operator: BinaryOperator,

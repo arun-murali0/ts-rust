@@ -158,6 +158,11 @@ pub struct TypeArena {
     // The declaration behind every Ref, indexed by DeclSlot.
     decls: Vec<DeclInfo>,
 
+    // The Named ids that are enums. An enum prints and relates as a union of its member
+    // literals like an alias of one does, but tsc treats it as a primitive and does not
+    // elaborate a mismatch below it, so the two have to be told apart.
+    enum_types: Vec<TypeId>,
+
     // What a Ref reads as while its declaration has no body. Kept here so get() can hand
     // out a reference to it instead of building one per call.
     empty_object: Type,
@@ -178,6 +183,7 @@ impl TypeArena {
             equality_cache: FxHashMap::default(),
             generation: 0,
             decls: Vec::new(),
+            enum_types: Vec::new(),
             empty_object: Type::Object(ObjectType::new(Vec::new())),
         };
 
@@ -437,6 +443,14 @@ impl TypeArena {
         }
     }
 
+    pub fn mark_enum(&mut self, type_id: TypeId) {
+        self.enum_types.push(type_id);
+    }
+
+    pub fn is_enum(&self, type_id: TypeId) -> bool {
+        self.enum_types.contains(&type_id)
+    }
+
     // Whether `id` prints under a name and not as its structure.
     pub fn is_named(&self, type_id: TypeId) -> bool {
         self.display_name(type_id).is_some() || self.app_parts(type_id).is_some()
@@ -662,6 +676,7 @@ impl TypeArena {
         self.generation = self.generation.wrapping_add(1);
         self.types.truncate(FIXED_SLOTS as usize);
         self.decls.clear();
+        self.enum_types.clear();
         self.builtin_slots.clear();
         self.interned.clear();
         self.interned_unions.clear();

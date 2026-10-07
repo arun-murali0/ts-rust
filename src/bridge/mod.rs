@@ -131,7 +131,12 @@ pub fn check_program_with_state(
         "check complete"
     );
 
-    let diagnostics = std::mem::take(&mut ctx.diagnostics);
+    // tsc reports in source order. Checking is not in source order (declarations are
+    // resolved ahead of bodies, and a call reports its own error before its arguments'),
+    // so the list is put in order here. The sort is stable: two diagnostics at one
+    // position keep the order they were found in.
+    let mut diagnostics = std::mem::take(&mut ctx.diagnostics);
+    diagnostics.sort_by_key(|diagnostic| diagnostic.start);
     *arena = ctx.arena;
     Ok((diagnostics, metrics))
 }

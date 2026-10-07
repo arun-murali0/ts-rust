@@ -11,12 +11,14 @@ mod assignment;
 mod binary;
 mod calls;
 mod core;
+mod elaborate;
 mod excess;
 mod functions;
 mod logical;
 mod members;
 mod objects;
 
+pub(super) use elaborate::report_mismatch;
 pub(super) use excess::check_excess_properties;
 pub(super) use members::infer_member_access_type;
 
@@ -80,6 +82,11 @@ pub fn infer_expression_type(
         Expression::BinaryExpression(bin) => {
             let left = infer_expression_type(&bin.left, scoping, ctx);
             let right = infer_expression_type(&bin.right, scoping, ctx);
+            let (left, right) = binary::strip_possibly_nullish(
+                bin.operator,
+                [(&bin.left, left), (&bin.right, right)],
+                ctx,
+            );
             infer_binary_expression_type(bin.operator, left, right, bin.span(), ctx)
         }
 

@@ -109,7 +109,7 @@ fn enum_and_type_alias_with_the_same_name_is_an_error() {
     assert_both_declarations_flagged(
         "enum_and_type_alias_with_the_same_name_is_an_error.ts",
         fixture!("enum_and_type_alias_with_the_same_name_is_an_error.ts"),
-        DiagnosticCode::DuplicateTypeDeclaration,
+        DiagnosticCode::EnumDeclarationMerge,
     );
 }
 

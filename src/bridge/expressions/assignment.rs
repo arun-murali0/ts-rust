@@ -40,13 +40,18 @@ pub(super) fn infer_assignment_expression_type(
             let declared = declared_identifier_target(&assign.left, scoping, ctx);
             let check_against = declared.map_or(target_type, |(_, declared_type)| declared_type);
             if !ctx.semantic().is_assignable(right_type, check_against) {
-                ctx.error(
-                    crate::diagnostic_messages::messages::declared_type_mismatch(
-                        &ctx.arena,
-                        right_type,
-                        check_against,
-                    ),
+                let whole = crate::diagnostic_messages::messages::declared_type_mismatch(
+                    &ctx.arena,
+                    right_type,
+                    check_against,
+                );
+                super::elaborate::report_mismatch(
+                    Some(&assign.right),
+                    right_type,
+                    check_against,
+                    whole,
                     assign.span(),
+                    ctx,
                 );
             }
             if let Some((symbol_id, declared_type)) = declared {

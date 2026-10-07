@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ts_rust::{Diagnostic, LineIndex, Severity, TypeChecker};
 
@@ -23,6 +24,9 @@ struct Options {
     cycles: bool,
 }
 
+// Set once from `--tsc-codes`: print each diagnostic under the tsc code it maps to.
+static TSC_CODES: AtomicBool = AtomicBool::new(false);
+
 // What a run found, kept apart from printing so both ways of checking (file by file,
 // or through the module graph) report in the same shape.
 #[derive(Default)]
@@ -42,7 +46,10 @@ impl Tally {
                 Severity::Error => self.errors += 1,
                 Severity::Warning => self.warnings += 1,
             }
-            println!("{}", diagnostic.format_with_position(&line_index, source));
+            println!(
+                "{}",
+                diagnostic.format_with_code(&line_index, source, TSC_CODES.load(Ordering::Relaxed))
+            );
         }
     }
 
@@ -65,6 +72,11 @@ fn main() -> ExitCode {
         print_help();
         return ExitCode::from(2);
     };
+
+    TSC_CODES.store(
+        args.iter().any(|arg| arg == "--tsc-codes"),
+        Ordering::Relaxed,
+    );
 
     let tsconfig_path = PathBuf::from(&options.project);
     if !tsconfig_path.is_file() {
@@ -304,7 +316,7 @@ fn print_help() {
     println!(
         "ts-rust: a from-scratch TypeScript type checker (experimental CLI)\n\n\
          USAGE:\n    \
-         ts-rust --project <path-to-tsconfig.json> [--flat] [--cycles]\n\n\
+         ts-rust --project <path-to-tsconfig.json> [--flat] [--cycles] [--tsc-codes]\n\n\
          OPTIONS:\n    \
          --project <path>    Locate the project root from a tsconfig.json path.\n                         \
          Its contents are not parsed; every .ts/.tsx file under\n                         \
@@ -314,6 +326,8 @@ fn print_help() {
          The only mode in a build without the `module-resolution`\n                         \
          feature.\n    \
          --cycles            Print each import cycle (module graph builds only).\n    \
+         --tsc-codes         Print each diagnostic under the tsc code it maps to\n                         \
+         (TS2322) instead of ts-rust's own (TSR1003).\n    \
          -h, --help          Show this message.\n\n\
          EXIT CODES:\n    \
          0    no errors (warnings may still have been printed)\n    \

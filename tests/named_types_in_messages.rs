@@ -21,15 +21,14 @@ fn single_error(diagnostics: &[Diagnostic], code: DiagnosticCode) -> &Diagnostic
 }
 
 // An interface prints as its own declared name on the *expected* side of a
-// mismatch, not the member list its shape happens to be. tsc's own message
-// here is a different diagnostic (TS2741, missing property) than ts-rust's
-// (a single declared-type-mismatch code covers both) -- unrelated to this
-// test, which only checks that the name shows up where it should.
+// mismatch, not the member list its shape happens to be. Like tsc, a missing
+// property is reported as TS2741 (MissingProperty); this test checks that the
+// name shows up where it should.
 #[test]
 fn interface_prints_its_own_name() {
     let source = include_str!("fixtures/named-types/interface_prints_its_own_name.ts");
     let diagnostics = check(source, "interface_prints_its_own_name.ts");
-    let error = single_error(&diagnostics, DiagnosticCode::DeclaredTypeMismatch);
+    let error = single_error(&diagnostics, DiagnosticCode::MissingProperty);
     assert!(error.message.contains("'Dog'"), "got: {error:?}");
     assert!(
         !error.message.contains("breed: string"),
@@ -41,7 +40,7 @@ fn interface_prints_its_own_name() {
 fn type_alias_prints_its_own_name() {
     let source = include_str!("fixtures/named-types/type_alias_prints_its_own_name.ts");
     let diagnostics = check(source, "type_alias_prints_its_own_name.ts");
-    let error = single_error(&diagnostics, DiagnosticCode::DeclaredTypeMismatch);
+    let error = single_error(&diagnostics, DiagnosticCode::MissingProperty);
     assert!(error.message.contains("'Pair'"), "got: {error:?}");
 }
 

@@ -1,19 +1,15 @@
 /// Stable identifiers for every diagnostic ts-rust can currently emit.
 ///
 /// This is ts-rust's own namespace ("TSR####"), not TypeScript's TS####
-/// numbering. Even where a code describes a condition tsc also reports
-/// (an argument arity mismatch, say), the number here is not intended to
-/// align with or imply equivalence to any specific tsc diagnostic code --
-/// tsc's numbering is Microsoft's own catalog, not something to mirror.
+/// numbering: ts-rust never emits tsc's codes as its own. What it does keep is a
+/// one-to-one map to them. Every variant here stands for exactly one tsc
+/// diagnostic (`tsc_code`), which is why a condition tsc reports under several codes
+/// (a missing property is TS2741, a missing list TS2739, ...) has several variants
+/// here and not one that is "mostly" right. A variant with no tsc equivalent (the
+/// 9000s, which are "not yet checked" markers) maps to `None`.
 ///
-/// Adding a variant here does not by itself make a diagnostic comparable to
-/// tsc's -- see bin/compare-tsc.rs's module doc comment for why message
-/// text still isn't compared verbatim. What this enables: stable
-/// programmatic identity for a diagnostic across runs (useful for an LSP's
-/// Diagnostic.code, for suppression comments, and for compare-tsc.rs to
-/// eventually upgrade from position+severity to position+code once a
-/// TSR-code <-> TS-code mapping table exists separately, without ever
-/// emitting tsc's own codes as ts-rust's own).
+/// The map is what lets scripts/ts-diag-tool/compare.js compare code and message
+/// text, and not only the line a diagnostic is on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub enum DiagnosticCode {
@@ -27,10 +23,23 @@ pub enum DiagnosticCode {
     TypeArgumentConstraintViolation,
     ExcessProperty,
     PropertyNotInitialized,
+    MissingProperty,
+    MissingProperties,
+    MissingPropertiesMany,
+    ArithmeticLeftOperandInvalid,
+    ArithmeticRightOperandInvalid,
+    PossiblyNull,
+    PossiblyUndefined,
+    PossiblyNullOrUndefined,
+    ObjectPossiblyNull,
+    ObjectPossiblyUndefined,
+    ObjectPossiblyNullOrUndefined,
 
     // 1100s -- calls
     NotCallable,
+    NotConstructor,
     ArgumentArityMismatch,
+    ArgumentArityAtLeast,
 
     // 1200s -- name / member resolution
     UnresolvedIdentifier,
@@ -41,8 +50,10 @@ pub enum DiagnosticCode {
 
     // 1500s -- generics
     TypeArgumentCountMismatch,
+    TypeArgumentCountRange,
     TypeIsNotGeneric,
     DuplicateTypeDeclaration,
+    EnumDeclarationMerge,
 
     // 1400s -- implicit any
     ImplicitAnyParameter,
@@ -82,9 +93,22 @@ impl DiagnosticCode {
             TypeArgumentConstraintViolation => "TSR1007",
             ExcessProperty => "TSR1008",
             PropertyNotInitialized => "TSR1009",
+            MissingProperty => "TSR1010",
+            MissingProperties => "TSR1011",
+            MissingPropertiesMany => "TSR1012",
+            ArithmeticLeftOperandInvalid => "TSR1013",
+            ArithmeticRightOperandInvalid => "TSR1014",
+            PossiblyNull => "TSR1015",
+            PossiblyUndefined => "TSR1016",
+            PossiblyNullOrUndefined => "TSR1017",
+            ObjectPossiblyNull => "TSR1018",
+            ObjectPossiblyUndefined => "TSR1019",
+            ObjectPossiblyNullOrUndefined => "TSR1020",
 
             NotCallable => "TSR1101",
             ArgumentArityMismatch => "TSR1102",
+            NotConstructor => "TSR1103",
+            ArgumentArityAtLeast => "TSR1104",
 
             UnresolvedIdentifier => "TSR1201",
             PropertyDoesNotExist => "TSR1202",
@@ -94,6 +118,8 @@ impl DiagnosticCode {
             TypeArgumentCountMismatch => "TSR1501",
             TypeIsNotGeneric => "TSR1502",
             DuplicateTypeDeclaration => "TSR1503",
+            TypeArgumentCountRange => "TSR1504",
+            EnumDeclarationMerge => "TSR1505",
 
             ImplicitAnyParameter => "TSR1401",
             ImplicitAnyElement => "TSR1402",
@@ -116,6 +142,82 @@ impl DiagnosticCode {
 
             UnreachableCode => "TSR1601",
         }
+    }
+}
+
+impl DiagnosticCode {
+    /// The tsc diagnostic number this code stands for, or `None` for a code that has
+    /// no tsc counterpart (the 9000s: "not yet checked" markers, always warnings).
+    ///
+    /// Several variants share a number on purpose where tsc has only one: the three
+    /// "type is not assignable" sites (declaration, return, static field) are all
+    /// TS2322, because tsc does not tell them apart either.
+    pub fn tsc_code(self) -> Option<u32> {
+        use DiagnosticCode::*;
+        Some(match self {
+            BinaryOperandTypeMismatch => 2365,
+            ArgumentNotAssignable => 2345,
+            ReturnTypeMismatch => 2322,
+            DeclaredTypeMismatch => 2322,
+            DestructuringPatternTypeMismatch => 2322,
+            StaticFieldInitializerMismatch => 2322,
+            TypeArgumentConstraintViolation => 2344,
+            ExcessProperty => 2353,
+            PropertyNotInitialized => 2564,
+            MissingProperty => 2741,
+            MissingProperties => 2739,
+            MissingPropertiesMany => 2740,
+            ArithmeticLeftOperandInvalid => 2362,
+            ArithmeticRightOperandInvalid => 2363,
+            PossiblyNull => 18047,
+            PossiblyUndefined => 18048,
+            PossiblyNullOrUndefined => 18049,
+            ObjectPossiblyNull => 2531,
+            ObjectPossiblyUndefined => 2532,
+            ObjectPossiblyNullOrUndefined => 2533,
+
+            NotCallable => 2349,
+            NotConstructor => 2351,
+            ArgumentArityMismatch => 2554,
+            ArgumentArityAtLeast => 2555,
+
+            UnresolvedIdentifier => 2304,
+            PropertyDoesNotExist => 2339,
+
+            ArrayDestructuringRequiresArray => 2488,
+
+            TypeArgumentCountMismatch => 2314,
+            TypeArgumentCountRange => 2707,
+            TypeIsNotGeneric => 2315,
+            DuplicateTypeDeclaration => 2300,
+            EnumDeclarationMerge => 2567,
+
+            ImplicitAnyParameter => 7006,
+            ImplicitAnyElement => 7053,
+            ImplicitAnyThis => 2683,
+
+            UnreachableCode => 7027,
+
+            UnimplementedCallExpressionKind
+            | UnimplementedNewExpressionTarget
+            | UntypedParameterSkipsArityCheck
+            | UnimplementedComputedMemberKey
+            | UnimplementedOptionalChainLink
+            | UnimplementedExpressionKind
+            | UnimplementedStaticAccessor
+            | UnimplementedClassShape
+            | UnimplementedDestructuringKey
+            | UnimplementedRestDestructuring
+            | UnimplementedStatementKind
+            | UnresolvableTypeAnnotation
+            | UnresolvableDestructuringTypeAnnotation
+            | UnresolvableTypeParameterConstraint => return None,
+        })
+    }
+
+    /// `TS2322`-style text, or `None` where there is no tsc counterpart.
+    pub fn tsc_str(self) -> Option<String> {
+        self.tsc_code().map(|code| format!("TS{code}"))
     }
 }
 

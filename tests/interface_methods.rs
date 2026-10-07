@@ -83,7 +83,7 @@ fn optional_method_may_be_omitted() {
 fn missing_required_method_is_caught() {
     let source = include_str!("fixtures/interface-methods/missing_required_method_is_caught.ts");
     let diagnostics = check(source, "missing_required_method_is_caught.ts");
-    assert_single_error(&diagnostics, DiagnosticCode::DeclaredTypeMismatch);
+    assert_single_error(&diagnostics, DiagnosticCode::MissingProperty);
 }
 
 // tsc compares method parameters bivariantly: a method taking the more specific

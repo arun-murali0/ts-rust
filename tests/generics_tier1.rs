@@ -186,9 +186,15 @@ fn constraint_violation_is_caught() {
          one diagnostic, got: {diagnostics:?}"
     );
     assert!(
+        diagnostics[0].message.contains(
+            "Argument of type 'NoLength' is not assignable to parameter of type 'HasLength'"
+        ),
+        "got: {diagnostics:?}"
+    );
+    assert!(
         diagnostics[0]
             .message
-            .contains("does not satisfy the constraint"),
+            .contains("Property 'length' is missing in type 'NoLength'"),
         "got: {diagnostics:?}"
     );
 }

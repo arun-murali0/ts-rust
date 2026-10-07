@@ -81,6 +81,8 @@ pub(super) fn infer_conditional_expression_type(
     let alternate_type = infer_expression_type(&conditional.alternate, scoping, ctx);
     ctx.narrow = outer_narrow;
 
+    ctx.conditional_arms
+        .insert(conditional.span.start, (consequent_type, alternate_type));
     ctx.arena.alloc_union(vec![consequent_type, alternate_type])
 }
 
