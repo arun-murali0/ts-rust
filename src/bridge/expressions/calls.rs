@@ -211,11 +211,28 @@ fn check_callable(
         Some(function_type.params.len())
     };
 
-    let arity_ok = arguments.len() >= required
-        && match max {
-            Some(max) => arguments.len() <= max,
+    // Problem: `f(...xs)` counted the spread as one argument, so a spread that
+    // stands for several (or none) tripped a false arity error.
+    // Picked: up to the first spread the arguments are positional and can be
+    // counted; the spread's own length is not known, so only "too many" can be
+    // decided, from the arguments written before it.
+    // Cost: a call like `f(...xs)` with too few values is not reported.
+    let first_spread = arguments
+        .iter()
+        .position(|arg| matches!(arg, oxc_ast::ast::Argument::SpreadElement(_)));
+    let arity_ok = match first_spread {
+        Some(first) => match max {
+            Some(max) => first <= max,
             None => true,
-        };
+        },
+        None => {
+            arguments.len() >= required
+                && match max {
+                    Some(max) => arguments.len() <= max,
+                    None => true,
+                }
+        }
+    };
     if !arity_ok {
         // The text is tsc's TS2554 verbatim, which never names the missing
         // parameter, so there is nothing to look up here.
@@ -239,11 +256,26 @@ fn check_callable(
     // than inferred again inside the parameter-checking loop, since inferring an
     // argument's type can itself report diagnostics; inferring it twice would
     // report the same problem in that argument twice.
+    //
+    // Now: a spread argument is inferred for its own errors but gets no type, and so
+    // does every argument after it, because once a spread has been seen the index of
+    // a later argument no longer lines up with a parameter position. A missing type
+    // is skipped by both the inference pass and the assignability pass below.
     let arg_types: Vec<Option<TypeId>> = arguments
         .iter()
-        .map(|arg| {
-            arg.as_expression()
-                .map(|expr| infer_expression_type(expr, scoping, ctx))
+        .enumerate()
+        .map(|(index, arg)| {
+            let after_spread = first_spread.is_some_and(|first| index >= first);
+            match arg {
+                oxc_ast::ast::Argument::SpreadElement(spread) => {
+                    infer_expression_type(&spread.argument, scoping, ctx);
+                    None
+                }
+                other => other.as_expression().and_then(|expr| {
+                    let inferred = infer_expression_type(expr, scoping, ctx);
+                    (!after_spread).then_some(inferred)
+                }),
+            }
         })
         .collect();
 

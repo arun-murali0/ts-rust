@@ -947,16 +947,29 @@ fn narrow_by_nullish(
             matches!(arena.get(t), Type::Undefined)
         }
     };
+    // Problem: `any` and `unknown` are not null and not undefined, so both branches
+    // of `x === null` filtered them out and `x` became never; a read of `x.foo` in
+    // the true branch then reported a property missing on never.
+    // Picked: a type that can hold anything (any, unknown), the error sentinel and a
+    // type parameter are kept in both branches, because the test cannot rule them
+    // in or out.
+    // Cost: the true branch keeps `unknown` as unknown where tsc would say null.
+    let is_open = |arena: &TypeArena, t: TypeId| {
+        matches!(
+            arena.get(t),
+            Type::Any | Type::Unknown | Type::Error | Type::GenericParameter(..)
+        )
+    };
     match union_members(arena, id) {
         Some(members) => {
             let filtered = members
                 .into_iter()
-                .filter(|&m| is_target(arena, m) == want_match)
+                .filter(|&m| is_open(arena, m) || is_target(arena, m) == want_match)
                 .collect();
             arena.alloc_union(filtered)
         }
         None => {
-            if is_target(arena, id) == want_match {
+            if is_open(arena, id) || is_target(arena, id) == want_match {
                 id
             } else {
                 arena.never()
