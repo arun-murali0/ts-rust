@@ -34,11 +34,13 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
         }
     }
 
-    for (name, span) in ctx.namespace.take_declaration_collisions() {
-        ctx.error(
-            crate::diagnostic_messages::messages::duplicate_type_declaration(&name),
-            span,
-        );
+    for (name, span, involves_enum) in ctx.namespace.take_declaration_collisions() {
+        let message = if involves_enum {
+            crate::diagnostic_messages::messages::enum_declaration_merge()
+        } else {
+            crate::diagnostic_messages::messages::duplicate_type_declaration(&name)
+        };
+        ctx.error(message, span);
     }
 
     for stmt in &program.body {
@@ -198,14 +200,19 @@ fn declare_enum(decl: &oxc_ast::ast::TSEnumDeclaration, ctx: &mut CheckContext<'
     // literal type, an id every identical literal shares, and that id stays unnamed.
     let name = ctx.arena.alloc_name(decl.id.name.to_string());
     let type_position = ctx.arena.alloc_named(name, type_position);
+    ctx.arena.mark_enum(type_position);
     ctx.namespace
         .insert_enum(&decl.id.name, type_position, decl.id.span);
 
+    // A member read off the enum (`Color.Red`) prints as `Color` in a message, the way
+    // tsc widens an enum literal when it is the source of a mismatch, so each member's
+    // type carries the enum's name. The wrapper is transparent to every relation.
+    let enum_name = ctx.arena.alloc_name(decl.id.name.to_string());
     let properties = members
         .into_iter()
         .map(|(name, type_id)| PropertyEntry {
             name: name.into(),
-            type_id,
+            type_id: ctx.arena.alloc_named(enum_name, type_id),
             optional: false,
             is_method: false,
         })
@@ -215,6 +222,9 @@ fn declare_enum(decl: &oxc_ast::ast::TSEnumDeclaration, ctx: &mut CheckContext<'
     // subtyping::object_is_subtype misaligns on unsorted input, which made an enum
     // object wrongly fail to be assignable to a structural type it satisfies.
     let value_type = ctx.arena.alloc(Type::Object(ObjectType::new(properties)));
+    // The enum object itself prints as `typeof Color`.
+    let object_name = ctx.arena.alloc_name(format!("typeof {}", decl.id.name));
+    let value_type = ctx.arena.alloc_named(object_name, value_type);
     ctx.symbols.declare(symbol_id, value_type);
 }
 

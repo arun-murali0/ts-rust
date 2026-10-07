@@ -143,7 +143,11 @@ fn required_param_count(params: &[Param]) -> usize {
 // position past the end of the declared list, and its own declared type is the
 // array type, such as number[], not the per-argument type, so it gets unwrapped to
 // the element type here.
-fn param_type_at(arena: &TypeArena, params: &[Param], position: usize) -> Option<TypeId> {
+pub(crate) fn param_type_at(
+    arena: &TypeArena,
+    params: &[Param],
+    position: usize,
+) -> Option<TypeId> {
     let param = match params.get(position) {
         Some(param) => param,
         None => params.last().filter(|p| p.rest)?,
@@ -227,6 +231,17 @@ fn property_is_subtype(
         return function_is_subtype_with(arena, sub_function, sup_function, true, seen);
     }
     is_subtype_inner(arena, sub_type, sup_property.type_id, seen)
+}
+
+// The same property rule `object_is_subtype` applies, for a caller that has already
+// found a mismatch and needs to know which property it is (see explain.rs). Kept next
+// to `property_is_subtype` so the two cannot drift apart.
+pub(crate) fn property_relates(
+    arena: &TypeArena,
+    sub_type: TypeId,
+    sup_property: &crate::types::PropertyEntry,
+) -> bool {
+    property_is_subtype(arena, sub_type, sup_property, &mut PairStack::new())
 }
 
 fn is_sorted_by_name(properties: &[crate::types::PropertyEntry]) -> bool {

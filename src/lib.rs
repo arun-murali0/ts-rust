@@ -5,6 +5,7 @@ mod diagnostic_messages;
 mod diagnostic_view;
 mod diagnostics;
 mod error;
+mod explain;
 mod fxhash;
 #[cfg(feature = "incremental")]
 mod incremental;

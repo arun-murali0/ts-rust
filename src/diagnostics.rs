@@ -27,7 +27,22 @@ impl Diagnostic {
         line_index: &crate::line_index::LineIndex,
         source: &str,
     ) -> String {
+        self.format_with_code(line_index, source, false)
+    }
+
+    /// The same line with the code written as tsc's (`TS2322`) when `tsc_codes` is set
+    /// and the diagnostic has one; a diagnostic with none (a "not yet checked" marker)
+    /// keeps its own code. A message that is a chain of reasons continues on the
+    /// following lines, indented, exactly as tsc prints it.
+    pub fn format_with_code(
+        &self,
+        line_index: &crate::line_index::LineIndex,
+        source: &str,
+        tsc_codes: bool,
+    ) -> String {
         let view = self.to_view(line_index, source);
+        let code = if tsc_codes { self.code.tsc_str() } else { None }
+            .unwrap_or_else(|| self.code.to_string());
         format!(
             "{}:{}:{}: {}: {} {}",
             self.file_name,
@@ -37,7 +52,7 @@ impl Diagnostic {
                 Severity::Error => "error",
                 Severity::Warning => "warning",
             },
-            self.code,
+            code,
             view.message
         )
     }

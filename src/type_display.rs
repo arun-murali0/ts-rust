@@ -85,20 +85,69 @@ fn union_display_order(arena: &TypeArena, members: &[TypeId]) -> Vec<TypeId> {
     let has_number = has(|t| matches!(t, Type::Number));
     let has_boolean = has(|t| matches!(t, Type::Boolean));
     let mut ordered: Vec<TypeId> = Vec::with_capacity(members.len());
+    let (mut string, mut number, mut boolean) = (None, None, None);
     let (mut null, mut undefined) = (None, None);
     for &member in members {
         match arena.get(member) {
             Type::StringLiteral(_) if has_string => {}
             Type::NumberLiteral(_) if has_number => {}
             Type::BooleanLiteral(_) if has_boolean => {}
+            Type::String => string = Some(member),
+            Type::Number => number = Some(member),
+            Type::Boolean => boolean = Some(member),
             Type::Null => null = Some(member),
             Type::Undefined => undefined = Some(member),
             _ => ordered.push(member),
         }
     }
-    ordered.extend(null);
-    ordered.extend(undefined);
-    ordered
+    // tsc orders a union by type id, and the primitives are the lowest ids there are:
+    // `number | string` prints as `string | number`, and `Dog | string` as
+    // `string | Dog`. Everything else keeps the order it was written in; null and
+    // undefined are the exception on the other side, printed last.
+    let mut front: Vec<TypeId> = Vec::with_capacity(members.len());
+    front.extend(string);
+    front.extend(number);
+    front.extend(boolean);
+    front.extend(ordered);
+    front.extend(null);
+    front.extend(undefined);
+    front
+}
+
+// `(a: number, b?: string) => void` for a function type and `(a: number): void` for a
+// method: the same parameter list, with the token before the return type as the
+// only difference.
+fn write_signature(
+    arena: &TypeArena,
+    function: &crate::types::FunctionType,
+    is_method: bool,
+    out: &mut String,
+    depth: usize,
+) {
+    out.push('(');
+    for (index, param) in function.params.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        match &param.name {
+            Some(name) => out.push_str(name),
+            // Every resolved parameter has a name today (see Param's own doc comment);
+            // this only guards against a future caller that doesn't, so the printer
+            // degrades instead of panicking.
+            None => out.push_str(&format!("arg{index}")),
+        }
+        if param.optional && !param.rest {
+            out.push('?');
+        }
+        out.push_str(": ");
+        if param.rest {
+            out.push_str("...");
+        }
+        write_type(arena, param.type_id, out, depth);
+    }
+    out.push(')');
+    out.push_str(if is_method { ": " } else { " => " });
+    write_type(arena, function.return_type, out, depth);
 }
 
 fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize) {
@@ -205,6 +254,15 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
                 if property.optional {
                     out.push('?');
                 }
+                // A member written with method syntax prints the way it was written,
+                // `peek(): string;`, and not as a function-typed property.
+                if property.is_method
+                    && let Type::Function(function) = arena.get(property.type_id)
+                {
+                    write_signature(arena, function, true, out, depth - 1);
+                    out.push_str("; ");
+                    continue;
+                }
                 out.push_str(": ");
                 write_type(arena, property.type_id, out, depth - 1);
                 out.push_str("; ");
@@ -212,32 +270,7 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
             out.push('}');
         }
 
-        Type::Function(function) => {
-            out.push('(');
-            for (index, param) in function.params.iter().enumerate() {
-                if index > 0 {
-                    out.push_str(", ");
-                }
-                match &param.name {
-                    Some(name) => out.push_str(name),
-                    // Every resolved parameter has a name today (see Param's
-                    // own doc comment); this only guards against a future
-                    // caller that doesn't, so the printer degrades instead of
-                    // panicking.
-                    None => out.push_str(&format!("arg{index}")),
-                }
-                if param.optional && !param.rest {
-                    out.push('?');
-                }
-                out.push_str(": ");
-                if param.rest {
-                    out.push_str("...");
-                }
-                write_type(arena, param.type_id, out, depth - 1);
-            }
-            out.push_str(") => ");
-            write_type(arena, function.return_type, out, depth - 1);
-        }
+        Type::Function(function) => write_signature(arena, function, false, out, depth - 1),
 
         Type::GenericParameter(_, name, _) => out.push_str(name),
 
@@ -350,14 +383,12 @@ mod tests {
     fn array_of_union_gets_parens() {
         let mut arena = TypeArena::new();
         let (number, string) = (arena.number(), arena.string());
-        // Built directly rather than via alloc_union: alloc_union flattens and
-        // dedups by popping a stack, which reverses member order. That reversal
-        // is alloc_union's own behavior, not something display_type should
-        // second-guess -- it prints members in whatever order the Union holds
-        // them.
+        // Built directly rather than via alloc_union, which flattens and dedups.
+        // display_type orders primitives the way tsc does (string before number),
+        // whatever order the Union holds them in.
         let union = arena.alloc(Type::Union(vec![number, string]));
         let arr = arena.alloc(Type::Array(union));
-        assert_eq!(render(&arena, arr), "(number | string)[]");
+        assert_eq!(render(&arena, arr), "(string | number)[]");
     }
 
     #[test]
@@ -366,7 +397,7 @@ mod tests {
         let (number, string) = (arena.number(), arena.string());
         // See array_of_union_gets_parens on why this bypasses alloc_union.
         let union = arena.alloc(Type::Union(vec![number, string]));
-        assert_eq!(render(&arena, union), "number | string");
+        assert_eq!(render(&arena, union), "string | number");
     }
 
     #[test]

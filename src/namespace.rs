@@ -149,7 +149,7 @@ pub struct TypeNamespace<'a> {
     // comparable line for line. Kept here, not reported, because resolving names has no
     // access to the diagnostics list; bridge::declare drains it into real diagnostics.
     // Only collisions that are certainly illegal are recorded. See note_collision.
-    declaration_collisions: Vec<(String, Span)>,
+    declaration_collisions: Vec<(String, Span, bool)>,
 
     // Where each name was first declared, so a later collision can point back at it,
     // and which names have already had that first declaration reported (a third
@@ -467,7 +467,9 @@ impl<'a> TypeNamespace<'a> {
         std::mem::take(&mut self.type_argument_issues)
     }
 
-    pub fn take_declaration_collisions(&mut self) -> Vec<(String, Span)> {
+    // The flag says an enum is one side of the collision, which tsc words differently
+    // (TS2567) from two other declarations of one name (TS2300).
+    pub fn take_declaration_collisions(&mut self) -> Vec<(String, Span, bool)> {
         std::mem::take(&mut self.declaration_collisions)
     }
 
@@ -493,16 +495,20 @@ impl<'a> TypeNamespace<'a> {
         if !illegal {
             return;
         }
+        let involves_enum =
+            matches!(existing.kind, DeclKind::Resolved) || matches!(new_kind, NewKind::Enum);
         if let Some(&first) = self.declaration_spans.get(name)
             && !self
                 .reported_first_declaration
                 .iter()
                 .any(|seen| seen == name)
         {
-            self.declaration_collisions.push((name.to_string(), first));
+            self.declaration_collisions
+                .push((name.to_string(), first, involves_enum));
             self.reported_first_declaration.push(name.to_string());
         }
-        self.declaration_collisions.push((name.to_string(), span));
+        self.declaration_collisions
+            .push((name.to_string(), span, involves_enum));
     }
 
     // Remembers where `name` was first declared. Called after note_collision, so the
