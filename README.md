@@ -385,6 +385,7 @@ This pins `typescript@5.9.3` deliberately: the plain `typescript` package now re
 ./scripts/compare-local.sh tests/fixtures/generics-tier1 # one folder
 ./scripts/compare-local.sh path/to/one_file.ts           # one file
 ./scripts/compare-local.sh tests/fixtures --only-differ  # hide fixtures where both sides fully agree
+./scripts/compare-local.sh tests/fixtures --differ       # list only the lines where ts-rust and tsc disagree (gap / false positive / mismatch)
 ./scripts/compare-local.sh tests/fixtures --json         # structured output, e.g. for scripting
 ```
 

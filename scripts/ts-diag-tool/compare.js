@@ -27,7 +27,12 @@
 // document, so don't pipe --json-stream output into something expecting a
 // single JSON.parse().
 //
-// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ]
+// --differ prints just the lines where ts-rust and tsc disagree -- no table -- each
+// as GAP (tsc only), FALSE POSITIVE (ts-rust only) or MISMATCH (both report an error
+// there, but the code or message text differs), with both sides' text. It is the
+// quick way to see exactly what is left to align; the summary still follows.
+//
+// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ]
 
 const fs = require("fs");
 const path = require("path");
@@ -41,11 +46,12 @@ const strictOnly = args.includes("--strict-only");
 const asJson = args.includes("--json");
 const jsonStream = args.includes("--json-stream");
 const onlyDiffer = args.includes("--only-differ");
+const showDiffer = args.includes("--differ");
 
 const [target, tsRustBin] = positional;
 if (!target || !tsRustBin) {
   console.error(
-    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ]",
+    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ]",
   );
   process.exit(2);
 }
@@ -103,9 +109,13 @@ fs.writeFileSync(tsconfigPath, "");
 
 let tsRustRaw = "";
 try {
-  tsRustRaw = execFileSync(tsRustBin, ["--project", tsconfigPath, "--tsc-codes"], {
-    encoding: "utf8",
-  });
+  tsRustRaw = execFileSync(
+    tsRustBin,
+    ["--project", tsconfigPath, "--tsc-codes"],
+    {
+      encoding: "utf8",
+    },
+  );
 } catch (err) {
   // ts-rust exits 1 when it found real type errors -- expected, and its
   // diagnostics are still on stdout, so only bail if stdout never came back.
@@ -133,7 +143,8 @@ for (const rawLine of tsRustRaw.split("\n")) {
   if (!m) {
     // A message that is a chain of reasons continues on indented lines, the way
     // tsc prints it; they belong to the diagnostic above.
-    if (lastDiag && /^ {2,}\S/.test(rawLine)) lastDiag.message += "\n" + rawLine;
+    if (lastDiag && /^ {2,}\S/.test(rawLine))
+      lastDiag.message += "\n" + rawLine;
     else lastDiag = null;
     continue;
   }
@@ -194,6 +205,7 @@ function displayName(file, t) {
 }
 
 const report = []; // per-file structured verdicts, for --json
+const differences = []; // --differ: one entry per line where the two sides disagree
 // Beyond "is there an error on this line": a line is `exact` when ts-rust and tsc
 // report the same codes and the same message text on it, in the same order.
 let exactFiles = 0,
@@ -201,7 +213,8 @@ let exactFiles = 0,
   comparedLines = 0;
 const lineKey = (d) => `${d.code} ${d.message}`;
 const lineIsExact = (rust, tsc) =>
-  rust.length === tsc.length && rust.every((d, i) => lineKey(d) === lineKey(tsc[i]));
+  rust.length === tsc.length &&
+  rust.every((d, i) => lineKey(d) === lineKey(tsc[i]));
 
 let totalAgree = 0,
   totalDiffer = 0,
@@ -265,11 +278,33 @@ function ensureTierHeader() {
   }
 }
 
+function printDifference(entry) {
+  const color = entry.kind === "GAP" ? c.yellow : c.red;
+  log(
+    `${c.bold}${entry.file}:${entry.line}${c.reset}  ${color}${entry.kind}${c.reset}`,
+  );
+  const side = (label, items) => {
+    if (items.length === 0) {
+      log(`  ${label} ${c.dim}—${c.reset}`);
+      return;
+    }
+    for (const text of items) {
+      // A chained message continues on indented lines; keep them under the label.
+      const [first, ...rest] = text.split("\n");
+      log(`  ${label} ${first}`);
+      for (const more of rest)
+        log(`  ${" ".repeat(label.length)} ${more.trim()}`);
+    }
+  };
+  side("tsc:    ", entry.tsc);
+  side("ts-rust:", entry.tsRust);
+}
+
 function renderFile(file, tsRustLines, tscLines) {
   const t = tier(file);
 
   if (t !== currentTier) {
-    if (!asJson && !jsonStream) {
+    if (!asJson && !jsonStream && !showDiffer) {
       flushTier();
       pendingTierHeader = `${c.bold}== ${t} ==${c.reset}`;
       tierTable = newTierTable();
@@ -281,7 +316,7 @@ function renderFile(file, tsRustLines, tscLines) {
     totalAgree++;
     exactFiles++;
     if (!onlyDiffer) jsonLine({ file, verdict: "MATCH", lines: [] });
-    if (!asJson && !jsonStream && !onlyDiffer) {
+    if (!asJson && !jsonStream && !onlyDiffer && !showDiffer) {
       ensureTierHeader();
       tierFileCount++;
       const clean = `${c.dim}did not produce any error or warning${c.reset}`;
@@ -312,10 +347,34 @@ function renderFile(file, tsRustLines, tscLines) {
   let fileExact = true;
   for (const ln of allLineNumbers) {
     comparedLines++;
-    if (lineIsExact(tsRustLines.get(ln) || [], tscLines.get(ln) || [])) exactLines++;
+    if (lineIsExact(tsRustLines.get(ln) || [], tscLines.get(ln) || []))
+      exactLines++;
     else fileExact = false;
   }
   if (fileExact) exactFiles++;
+
+  if (showDiffer) {
+    for (const ln of allLineNumbers) {
+      const left = tsRustLines.get(ln) || [];
+      const right = tscLines.get(ln) || [];
+      if (lineIsExact(left, right)) continue;
+      const kind =
+        left.length === 0
+          ? "GAP"
+          : right.length === 0
+            ? "FALSE POSITIVE"
+            : "MISMATCH";
+      const entry = {
+        file,
+        line: ln,
+        kind,
+        tsc: right.map((d) => `${d.code} ${d.message}`),
+        tsRust: left.map((d) => `${d.code} ${d.message}`),
+      };
+      differences.push(entry);
+      if (!asJson && !jsonStream) printDifference(entry);
+    }
+  }
 
   const fileOk = !hasFp && !hasGap;
   if (fileOk) totalAgree++;
@@ -355,7 +414,7 @@ function renderFile(file, tsRustLines, tscLines) {
     jsonLine(fileReport);
   }
 
-  if (asJson || jsonStream) return;
+  if (asJson || jsonStream || showDiffer) return;
   if (onlyDiffer && fileOk) return; // --only-differ: hide files that fully MATCH from the table too
 
   ensureTierHeader();
@@ -440,11 +499,14 @@ if (asJson) {
           comparedLines,
           strictOnly,
           onlyDiffer,
+          showDiffer,
           // `files` below is filtered to just the differing ones when
           // onlyDiffer is set -- totalFiles/agree/etc. above still reflect
           // the whole run, not just what's listed.
         },
         files: report,
+        // Only present under --differ: every line where the two sides disagree.
+        ...(showDiffer ? { differences } : {}),
       },
       null,
       2,
@@ -491,6 +553,12 @@ log(
   `  ${exactFiles} of ${files.length} file(s) are exact (same tsc code and message on every line); ` +
     `${exactLines} of ${comparedLines} line(s)`,
 );
+if (showDiffer) {
+  const n = (k) => differences.filter((d) => d.kind === k).length;
+  log(
+    `  ${differences.length} line(s) differ: ${n("GAP")} gap, ${n("FALSE POSITIVE")} false positive, ${n("MISMATCH")} mismatch (code or message)`,
+  );
+}
 log(
   `  ${totalGap} with a gap (tsc reports an error ts-rust does not -- a check not built yet)`,
 );
