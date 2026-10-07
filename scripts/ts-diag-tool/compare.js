@@ -32,12 +32,16 @@
 // there, but the code or message text differs), with both sides' text. It is the
 // quick way to see exactly what is left to align; the summary still follows.
 //
-// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ]
+// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache]
 
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
-const { checkFiles, collectTsFiles } = require("./check-fixtures");
+const {
+  checkFiles,
+  collectTsFiles,
+  defaultCachePath,
+} = require("./check-fixtures");
 const Table = require("cli-table3");
 
 const args = process.argv.slice(2);
@@ -47,11 +51,13 @@ const asJson = args.includes("--json");
 const jsonStream = args.includes("--json-stream");
 const onlyDiffer = args.includes("--only-differ");
 const showDiffer = args.includes("--differ");
+// tsc results are cached per fixture (see check-fixtures.js); --no-cache forces a full run.
+const noCache = args.includes("--no-cache");
 
 const [target, tsRustBin] = positional;
 if (!target || !tsRustBin) {
   console.error(
-    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ]",
+    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache]",
   );
   process.exit(2);
 }
@@ -462,8 +468,9 @@ function renderFile(file, tsRustLines, tscLines) {
   ]);
 }
 
-const { files } = checkFiles(target, {
+const { files, stats } = checkFiles(target, {
   strictOnly,
+  cachePath: noCache ? undefined : defaultCachePath(),
   onFile: (fsPath, fileResults, index, total) => {
     const file = stat.isFile() ? target : path.relative(process.cwd(), fsPath);
     const tscLines = byLine(
@@ -481,6 +488,8 @@ const { files } = checkFiles(target, {
   },
 });
 flushTier();
+if (!noCache)
+  status(`      tsc: ${stats.cached} from cache, ${stats.ran} checked.`);
 
 // === Final summary ===========================================================
 
