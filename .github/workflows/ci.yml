@@ -105,3 +105,48 @@ jobs:
 
       - name: Enforce known-differences baseline
         run: node scripts/ts-diag-tool/check-baseline.js < /tmp/tsc-drift-result.json
+
+      # The differences are the list of what is not compatible with tsc yet. They are kept as
+      # a run artifact and a job summary instead of a branch, so nothing has to be committed
+      # to see the remaining work. always(): the list is most useful when the gate failed.
+      - name: Summarize differences from tsc
+        if: ${{ always() }}
+        run: |
+          node - <<'JS' >> "$GITHUB_STEP_SUMMARY"
+          const fs = require("fs");
+          let r;
+          try { r = JSON.parse(fs.readFileSync("/tmp/tsc-drift-result.json", "utf8")); }
+          catch { console.log("No compare result was produced."); process.exit(0); }
+          const d = r.differences || [];
+          const n = (k) => d.filter((x) => x.kind === k).length;
+          console.log("## Differences from tsc\n");
+          console.log(`${d.length} line(s): ${n("GAP")} gap, ${n("FALSE POSITIVE")} false positive, ${n("MISMATCH")} mismatch\n`);
+          const byCode = new Map();
+          for (const x of d.filter((x) => x.kind === "GAP"))
+            for (const t of x.tsc) {
+              const code = t.split(" ")[0];
+              byCode.set(code, (byCode.get(code) || 0) + 1);
+            }
+          if (byCode.size) {
+            console.log("| tsc code the checker misses | lines |\n|---|---|");
+            for (const [code, c] of [...byCode].sort((a, b) => b[1] - a[1]))
+              console.log(`| ${code} | ${c} |`);
+          }
+          for (const kind of ["FALSE POSITIVE", "MISMATCH", "GAP"]) {
+            const list = d.filter((x) => x.kind === kind);
+            if (!list.length) continue;
+            console.log(`\n<details><summary>${kind} (${list.length})</summary>\n`);
+            for (const x of list)
+              console.log(`- \`${x.file}:${x.line}\` tsc: ${x.tsc.map((t) => t.split("\n")[0]).join("; ") || "-"} / ts-rust: ${x.tsRust.map((t) => t.split("\n")[0]).join("; ") || "-"}`);
+            console.log("\n</details>");
+          }
+          JS
+
+      - name: Keep the differences as a run artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: differences-from-tsc
+          path: /tmp/tsc-drift-result.json
+          if-no-files-found: ignore
+          retention-days: 30
