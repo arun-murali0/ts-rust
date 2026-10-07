@@ -1,0 +1,57 @@
+name: tsc cache
+
+# Keeps the tsc result cache current so the compare-tsc gate in ci.yml (which runs on
+# merge-tmp/* branches) only has to run tsc on fixtures a branch changed.
+#
+# Why a separate workflow: a branch can restore caches made on main but not caches made on
+# another branch, and every merge-tmp/* branch is a new one. The cache therefore has to be
+# saved from main. This runs after each merge and never blocks one.
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "15 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tsc-cache
+  cancel-in-progress: true
+
+jobs:
+  warm:
+    name: Refresh tsc result cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: scripts/ts-diag-tool/package-lock.json
+
+      - name: Install ts-diag-tool dependencies
+        working-directory: scripts/ts-diag-tool
+        run: npm ci
+
+      - name: Restore previous cache
+        uses: actions/cache/restore@v4
+        with:
+          path: scripts/ts-diag-tool/.tsc-cache.json
+          key: tsc-diag-${{ hashFiles('scripts/ts-diag-tool/package-lock.json', 'scripts/ts-diag-tool/check-fixtures.js') }}-${{ github.sha }}
+          restore-keys: |
+            tsc-diag-${{ hashFiles('scripts/ts-diag-tool/package-lock.json', 'scripts/ts-diag-tool/check-fixtures.js') }}-
+
+      - name: Run tsc over fixtures that are new or changed
+        run: node scripts/ts-diag-tool/check-fixtures.js tests/fixtures --warm-cache
+
+      - name: Save cache
+        uses: actions/cache/save@v4
+        with:
+          path: scripts/ts-diag-tool/.tsc-cache.json
+          key: tsc-diag-${{ hashFiles('scripts/ts-diag-tool/package-lock.json', 'scripts/ts-diag-tool/check-fixtures.js') }}-${{ github.sha }}
