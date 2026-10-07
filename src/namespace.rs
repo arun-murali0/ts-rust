@@ -961,6 +961,58 @@ impl<'a> TypeNamespace<'a> {
                     );
                 }
 
+                // Problem: `get total(): number { ... }` was dropped without a word, so
+                // `order.total` reported a missing property even though the class
+                // plainly declares it.
+                // Picked: a getter is an ordinary property of its return type. A setter
+                // alone is a property of its parameter type, and when both exist the
+                // getter's type wins. As with a field, an accessor this checker cannot
+                // type (no return annotation, a computed name) makes the class
+                // unresolvable instead of dropping a member the source declares.
+                // Cost: nothing marks the property read-only when there is no setter,
+                // and the accessor bodies are not checked yet.
+                ClassElement::MethodDefinition(method)
+                    if !method.r#static && method.kind == MethodDefinitionKind::Get =>
+                {
+                    let PropertyKey::StaticIdentifier(key) = &method.key else {
+                        return None;
+                    };
+                    let type_id = method
+                        .value
+                        .return_type
+                        .as_ref()
+                        .and_then(|rt| resolve_type_annotation(rt, self, arena))?;
+                    upsert_property(&mut properties, key.name.to_string(), type_id, false, false);
+                }
+                ClassElement::MethodDefinition(method)
+                    if !method.r#static && method.kind == MethodDefinitionKind::Set =>
+                {
+                    let PropertyKey::StaticIdentifier(key) = &method.key else {
+                        return None;
+                    };
+                    let has_getter = class.body.body.iter().any(|other| {
+                        matches!(
+                            other,
+                            ClassElement::MethodDefinition(getter)
+                                if !getter.r#static
+                                    && getter.kind == MethodDefinitionKind::Get
+                                    && matches!(&getter.key, PropertyKey::StaticIdentifier(k) if k.name == key.name)
+                        )
+                    });
+                    if !has_getter {
+                        let param = method.value.params.items.first()?;
+                        let annotation = param.type_annotation.as_ref()?;
+                        let type_id = resolve_type_annotation(annotation, self, arena)?;
+                        upsert_property(
+                            &mut properties,
+                            key.name.to_string(),
+                            type_id,
+                            false,
+                            false,
+                        );
+                    }
+                }
+
                 // `constructor(public x: number, readonly y: string)` declares the
                 // instance properties `x` and `y` as well as the parameters. A parameter
                 // with no modifier is only a parameter. As with a field, a parameter

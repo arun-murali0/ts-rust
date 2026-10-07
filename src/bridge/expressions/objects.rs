@@ -105,6 +105,26 @@ pub(super) fn infer_array_expression_type(
     let mut element_types = Vec::with_capacity(array.elements.len());
 
     for element in &array.elements {
+        // Problem: `[...xs, 1]` ignored the spread, so the element type left out
+        // whatever xs held and a later assignment was checked against a type that
+        // was too narrow.
+        // Picked: a spread of an array contributes that array's element type. A
+        // spread of anything else (any, an error, a tuple-like or iterable type this
+        // checker does not model) contributes any, which keeps the result usable
+        // without guessing a shape.
+        // Cost: iterables such as a Set or a string spread to any, not their item type.
+        if let oxc_ast::ast::ArrayExpressionElement::SpreadElement(spread) = element {
+            let spread_type = infer_expression_type(&spread.argument, scoping, ctx);
+            let item = match ctx.arena.get(spread_type) {
+                Type::Array(item) => *item,
+                _ => ctx.arena.any(),
+            };
+            let item = crate::types::widen(&ctx.arena, item);
+            if !element_types.contains(&item) {
+                element_types.push(item);
+            }
+            continue;
+        }
         let Some(expr) = element.as_expression() else {
             continue;
         };

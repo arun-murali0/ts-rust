@@ -170,6 +170,53 @@ pub fn infer_expression_type(
             ctx.arena.boolean()
         }
 
+        // Problem: `-x`, `+x`, `~x`, `void x` and `delete x` reached the catch-all, so
+        // anything built on them (`-1`, `const n = -total`) was an error type and
+        // lost its checking.
+        // Picked: the operand is still checked for its own errors. `-1` keeps the
+        // literal -1 so `const x = -1` reads as a literal like `const x = 1` does;
+        // every other numeric operator gives number, void gives undefined, delete
+        // gives boolean.
+        // Cost: the operand's own type is not checked to be number-like; tsc reports
+        // that for `-"a"` only under stricter rules, so nothing is lost today.
+        Expression::UnaryExpression(unary) => {
+            use oxc_ast::ast::UnaryOperator;
+            let operand = infer_expression_type(&unary.argument, scoping, ctx);
+            match unary.operator {
+                UnaryOperator::UnaryNegation => match &unary.argument {
+                    Expression::NumericLiteral(n) => ctx.arena.alloc(Type::NumberLiteral(-n.value)),
+                    _ => ctx.arena.number(),
+                },
+                UnaryOperator::UnaryPlus | UnaryOperator::BitwiseNot => ctx.arena.number(),
+                UnaryOperator::Void => ctx.arena.undefined(),
+                UnaryOperator::Delete => ctx.arena.boolean(),
+                _ => {
+                    let _ = operand;
+                    ctx.arena.error()
+                }
+            }
+        }
+
+        // Problem: a template literal hit the catch-all, and an interpolated
+        // expression inside it was never checked at all.
+        // Picked: every interpolation is checked for its own errors. A template with
+        // no interpolation is the string literal it spells; one with interpolation is
+        // string, the way tsc types it.
+        // Cost: a template with no interpolation and a bad escape (no cooked text)
+        // falls back to string.
+        Expression::TemplateLiteral(template) => {
+            for inner in &template.expressions {
+                infer_expression_type(inner, scoping, ctx);
+            }
+            if template.expressions.is_empty()
+                && let Some(only) = template.quasis.first()
+                && let Some(cooked) = &only.value.cooked
+            {
+                return ctx.arena.alloc(Type::StringLiteral(cooked.to_string()));
+            }
+            ctx.arena.string()
+        }
+
         // oxc keeps parens as their own node instead of discarding them, so without
         // this a parenthesized condition (`!(typeof x === "number")`) would hit the
         // catch-all below purely because of the parens, on top of narrow_condition

@@ -27,6 +27,28 @@ pub(crate) fn check_excess_properties(
     let Expression::ObjectExpression(object) = expr else {
         return;
     };
+    // Problem: Record<K, V> and Promise<T> have an empty body here (see
+    // type_annotation::resolve_builtin_generic), so every key of a literal assigned
+    // to one looked like an excess property.
+    // Picked: a Record accepts any key, so only each value is checked against V; a
+    // Promise has no members this checker models, so the literal is left alone.
+    // Cost: a user generic that happens to be named Promise is skipped too, which is
+    // less precise and never wrong.
+    if let Some(value_type) = ctx.arena.record_value_type(target) {
+        for property in &object.properties {
+            if let ObjectPropertyKind::ObjectProperty(property) = property {
+                check_excess_properties(&property.value, value_type, ctx);
+            }
+        }
+        return;
+    }
+    if ctx
+        .arena
+        .app_parts(target)
+        .is_some_and(|(name, _)| name == "Promise")
+    {
+        return;
+    }
     let Type::Object(target_object) = ctx.arena.get(target).clone() else {
         return;
     };
