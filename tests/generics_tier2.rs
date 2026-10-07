@@ -308,9 +308,9 @@ fn constraint_is_checked_with_the_other_parameters_substituted() {
         .collect();
     assert_eq!(errors.len(), 1, "got: {diagnostics:?}");
     assert!(
-        errors[0]
-            .message
-            .contains("does not satisfy the constraint"),
+        errors[0].message.contains(
+            "Argument of type 'number[]' is not assignable to parameter of type 'string[]'"
+        ),
         "got: {diagnostics:?}"
     );
 }

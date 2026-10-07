@@ -1,4 +1,4 @@
-use ts_rust::TypeChecker;
+use ts_rust::{DiagnosticCode, TypeChecker};
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -156,13 +156,26 @@ fn array_destructuring_binds_element_type_but_includes_undefined() {
     // past the end of a real array yields undefined at runtime, the same as a
     // numeric-literal index does, so each element includes undefined and using
     // it directly in arithmetic is an error.
+    // Under noUncheckedIndexedAccess (the reference config) tsc reports TS18048 on
+    // each operand: `first` and `second` are both possibly undefined.
     assert_eq!(
         diagnostics.len(),
-        1,
-        "expected exactly one diagnostic, got: {diagnostics:?}"
+        2,
+        "expected one diagnostic per operand, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("cannot be applied"),
+        diagnostics
+            .iter()
+            .all(|d| d.code == DiagnosticCode::PossiblyUndefined),
+        "got: {diagnostics:?}"
+    );
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("'first' is possibly 'undefined'")
+            && diagnostics[1]
+                .message
+                .contains("'second' is possibly 'undefined'"),
         "got: {diagnostics:?}"
     );
 }

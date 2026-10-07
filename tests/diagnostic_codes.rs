@@ -111,7 +111,7 @@ fn generics_diagnostic_codes_are_stable() {
 fn constraint_violation_reports_its_code() {
     assert_reports(
         "generics-tier1/constraint_violation_is_caught.ts",
-        DiagnosticCode::TypeArgumentConstraintViolation,
+        DiagnosticCode::ArgumentNotAssignable,
         Severity::Error,
     );
     assert_reports(

@@ -1,4 +1,4 @@
-use ts_rust::{Severity, TypeChecker};
+use ts_rust::{DiagnosticCode, Severity, TypeChecker};
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -37,7 +37,12 @@ fn missing_required_property_is_caught() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].severity, Severity::Error);
-    assert!(diagnostics[0].message.contains("not assignable"));
+    assert_eq!(diagnostics[0].code, DiagnosticCode::MissingProperty);
+    assert!(
+        diagnostics[0].message.contains(
+            "Property 'y' is missing in type '{ x: number; }' but required in type 'Point'"
+        )
+    );
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use ts_rust::{Severity, TypeChecker};
+use ts_rust::{DiagnosticCode, Severity, TypeChecker};
 
 fn init_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -281,13 +281,20 @@ fn ternary_result_type_mismatch_is_caught() {
     let source =
         include_str!("fixtures/expression-program-checking/ternary_result_type_mismatch.ts");
     let diagnostics = check(source, "ternary_result_type_mismatch.ts");
+    // tsc reports a ternary mismatch on each offending branch (TS2322 twice here).
     assert_eq!(
         diagnostics.len(),
-        1,
-        "expected exactly one diagnostic, got: {diagnostics:?}"
+        2,
+        "expected one diagnostic per branch, got: {diagnostics:?}"
     );
     assert!(
-        diagnostics[0].message.contains("is not assignable to type"),
+        diagnostics
+            .iter()
+            .all(|d| d.message.contains("is not assignable to type")),
+        "got: {diagnostics:?}"
+    );
+    assert_ne!(
+        diagnostics[0].start, diagnostics[1].start,
         "got: {diagnostics:?}"
     );
 }
@@ -810,8 +817,15 @@ fn enum_object_missing_a_required_member_is_still_caught() {
         "expected exactly one diagnostic, got: {diagnostics:?}"
     );
     assert_eq!(diagnostics[0].severity, Severity::Error);
+    assert_eq!(
+        diagnostics[0].code,
+        DiagnosticCode::MissingProperty,
+        "got: {diagnostics:?}"
+    );
     assert!(
-        diagnostics[0].message.contains("not assignable"),
+        diagnostics[0]
+            .message
+            .contains("Property 'Medium' is missing"),
         "got: {diagnostics:?}"
     );
 }

@@ -66,7 +66,7 @@ fn compound_assignment_type_mismatch_is_caught() {
         "fixtures/assignment-expressions/compound_assignment_type_mismatch_is_caught.ts"
     );
     let diagnostics = check(source, "compound_assignment_type_mismatch_is_caught.ts");
-    single_error(&diagnostics, DiagnosticCode::BinaryOperandTypeMismatch);
+    single_error(&diagnostics, DiagnosticCode::ArithmeticRightOperandInvalid);
 }
 
 #[test]
