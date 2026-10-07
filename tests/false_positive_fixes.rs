@@ -41,15 +41,20 @@ fn the_one_error(diagnostics: &[Diagnostic]) -> &Diagnostic {
 
 #[test]
 fn a_record_literal_has_no_excess_properties() {
-    let source = include_str!("fixtures/false-positive-fixes/record_literal_has_no_excess_properties.ts");
+    let source =
+        include_str!("fixtures/false-positive-fixes/record_literal_has_no_excess_properties.ts");
     assert_clean(&check(source, "record_literal_has_no_excess_properties.ts"));
 }
 
 #[test]
 fn a_record_value_literal_is_still_checked_for_excess() {
-    let source =
-        include_str!("fixtures/false-positive-fixes/record_value_literal_is_still_checked_for_excess.ts");
-    let diagnostics = check(source, "record_value_literal_is_still_checked_for_excess.ts");
+    let source = include_str!(
+        "fixtures/false-positive-fixes/record_value_literal_is_still_checked_for_excess.ts"
+    );
+    let diagnostics = check(
+        source,
+        "record_value_literal_is_still_checked_for_excess.ts",
+    );
     let error = the_one_error(&diagnostics);
     assert!(
         error.message.contains("'y' does not exist"),
@@ -59,8 +64,9 @@ fn a_record_value_literal_is_still_checked_for_excess() {
 
 #[test]
 fn a_spread_argument_is_not_counted_as_one_argument() {
-    let source =
-        include_str!("fixtures/false-positive-fixes/spread_argument_is_not_counted_as_one_argument.ts");
+    let source = include_str!(
+        "fixtures/false-positive-fixes/spread_argument_is_not_counted_as_one_argument.ts"
+    );
     assert_clean(&check(
         source,
         "spread_argument_is_not_counted_as_one_argument.ts",
@@ -69,7 +75,8 @@ fn a_spread_argument_is_not_counted_as_one_argument() {
 
 #[test]
 fn an_array_spread_contributes_its_element_type() {
-    let source = include_str!("fixtures/false-positive-fixes/array_spread_contributes_its_element_type.ts");
+    let source =
+        include_str!("fixtures/false-positive-fixes/array_spread_contributes_its_element_type.ts");
     assert_clean(&check(
         source,
         "array_spread_contributes_its_element_type.ts",
@@ -78,7 +85,8 @@ fn an_array_spread_contributes_its_element_type() {
 
 #[test]
 fn an_array_spread_element_type_is_not_dropped() {
-    let source = include_str!("fixtures/false-positive-fixes/array_spread_element_type_is_not_dropped.ts");
+    let source =
+        include_str!("fixtures/false-positive-fixes/array_spread_element_type_is_not_dropped.ts");
     let diagnostics = check(source, "array_spread_element_type_is_not_dropped.ts");
     let error = the_one_error(&diagnostics);
     assert!(
@@ -118,7 +126,8 @@ fn a_setter_alone_is_a_property() {
 
 #[test]
 fn unary_and_template_literals_have_types() {
-    let source = include_str!("fixtures/false-positive-fixes/unary_and_template_literals_have_types.ts");
+    let source =
+        include_str!("fixtures/false-positive-fixes/unary_and_template_literals_have_types.ts");
     assert_clean(&check(source, "unary_and_template_literals_have_types.ts"));
 }
 
