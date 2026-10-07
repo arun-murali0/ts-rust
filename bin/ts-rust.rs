@@ -73,7 +73,10 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    TSC_CODES.store(args.iter().any(|arg| arg == "--tsc-codes"), Ordering::Relaxed);
+    TSC_CODES.store(
+        args.iter().any(|arg| arg == "--tsc-codes"),
+        Ordering::Relaxed,
+    );
 
     let tsconfig_path = PathBuf::from(&options.project);
     if !tsconfig_path.is_file() {
