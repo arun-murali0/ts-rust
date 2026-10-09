@@ -100,16 +100,16 @@ fn an_array_spread_must_land_on_a_rest_parameter() {
     );
 }
 
-// #[test]
-// fn a_spread_after_every_parameter_is_still_reported() {
-//     let source = include_str!(
-//         "fixtures/false-positive-fixes/spread_after_every_parameter_is_still_reported.ts"
-//     );
-//     assert_only_spread_errors(
-//         &check(source, "spread_after_every_parameter_is_still_reported.ts"),
-//         1,
-//     );
-// }
+#[test]
+fn a_spread_after_every_parameter_is_still_reported() {
+    let source = include_str!(
+        "fixtures/false-positive-fixes/spread_after_every_parameter_is_still_reported.ts"
+    );
+    assert_only_spread_errors(
+        &check(source, "spread_after_every_parameter_is_still_reported.ts"),
+        1,
+    );
+}
 
 #[test]
 fn an_array_spread_contributes_its_element_type() {
