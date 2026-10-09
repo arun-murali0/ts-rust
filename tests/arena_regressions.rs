@@ -108,20 +108,25 @@ fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
             0,
         ),
         ("complex_mixed_scale_200", complex_source(200), 5),
+        // One diagnostic per copy plus one shared: the `permissions` property that does
+        // not exist on the Account union, and the `T | undefined` return in `first`.
+        // These counts used to be two per copy because `total + account.permissions`
+        // typed as string once its operand was already an error, which reported a second,
+        // unrelated mismatch for the same mistake. tsc reports the one.
         (
             "connected_application_scale_10",
             connected_application_source(10),
-            21,
+            11,
         ),
         (
             "connected_application_scale_50",
             connected_application_source(50),
-            101,
+            51,
         ),
         (
             "connected_application_scale_100",
             connected_application_source(100),
-            201,
+            101,
         ),
     ];
 

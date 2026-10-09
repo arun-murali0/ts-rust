@@ -86,10 +86,12 @@ fn binary_operator_mismatch_is_caught() {
 }
 
 // A statement kind this checker doesn't handle must warn, not vanish. The
-// fixture is a do-while, which still goes to push_unsupported. It used to be a
-// for loop whose `i = i + 1` update happened to hit the "unimplemented
-// expression" warning, so the test passed only because assignments were
-// unchecked -- once they were checked it stopped testing anything real.
+// fixture is a namespace, which still goes to push_unsupported. It used to be a
+// do-while, and before that a for loop whose `i = i + 1` update happened to hit
+// the "unimplemented expression" warning, so the test passed only because
+// assignments were unchecked -- each time the checker learned the construct the
+// fixture stopped testing anything real, so it should be something with no plan to
+// be supported soon.
 #[test]
 fn unsupported_statement_degrades_honestly_not_silently() {
     let source = include_str!("fixtures/foundation/unsupported_statement.ts");

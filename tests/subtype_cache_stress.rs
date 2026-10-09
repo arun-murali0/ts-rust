@@ -154,10 +154,13 @@ fn wide_union_assignments_in_both_directions_stay_correct() {
     }
     source.push_str(";\n\n");
 
-    source.push_str("const n: Narrow = \"variant3\";\n");
-    source.push_str("const w1: Wide = n;\n"); // Narrow -> Wide: fine.
-    source.push_str("const w2: Wide = \"variant0\";\n");
-    source.push_str("const n2: Narrow = w2;\n"); // Wide -> Narrow: not fine.
+    // Parameters, not initialized constants: tsc narrows `const w2: Wide = "variant0"`
+    // to the literal it was given, so a constant would make Wide -> Narrow legal and
+    // this test would stop exercising the relation it is here for.
+    source.push_str("function widen(n: Narrow, w2: Wide): void {\n");
+    source.push_str("    const w1: Wide = n;\n"); // Narrow -> Wide: fine.
+    source.push_str("    const n2: Narrow = w2;\n"); // Wide -> Narrow: not fine.
+    source.push_str("}\n");
 
     let diagnostics = assert_identical_across_runs(&source, "wide_union_both_directions.ts", 10);
     assert_eq!(
