@@ -25,6 +25,18 @@ pub(crate) fn resolve_identifier_type(
         if ident.name == "undefined" {
             return ctx.arena.undefined();
         }
+        // Problem: a name the language provides without any declaration in the file
+        // (`Error`, `console`, `Math`) is unresolved to oxc's scope analysis, so a
+        // body that throws `new Error(...)` or logs reported "Cannot find name".
+        // That was hidden while try/throw bodies were skipped and showed as soon as
+        // they were checked.
+        // Picked: these ambient globals read as `any`. This checker has no lib
+        // declarations yet, so any is the honest answer: nothing is checked about
+        // them, and nothing false is reported.
+        // Cost: `Math.foo()` and `new Error(1, 2, 3)` are not caught.
+        if is_ambient_global(&ident.name) {
+            return ctx.arena.any();
+        }
         ctx.error(
             crate::diagnostic_messages::messages::unresolved_identifier(&ident.name),
             ident.span(),
@@ -51,4 +63,50 @@ pub(crate) fn resolve_identifier_type(
             ctx.arena.error()
         }
     }
+}
+
+// Values the runtime provides in every script. A name is only here if a program can use
+// it with no import and no declaration; anything else is a real unresolved name.
+fn is_ambient_global(name: &str) -> bool {
+    matches!(
+        name,
+        "Error"
+            | "TypeError"
+            | "RangeError"
+            | "SyntaxError"
+            | "ReferenceError"
+            | "EvalError"
+            | "URIError"
+            | "AggregateError"
+            | "console"
+            | "Math"
+            | "JSON"
+            | "Object"
+            | "Array"
+            | "Promise"
+            | "Date"
+            | "Map"
+            | "Set"
+            | "WeakMap"
+            | "WeakSet"
+            | "RegExp"
+            | "Number"
+            | "String"
+            | "Boolean"
+            | "Symbol"
+            | "BigInt"
+            | "Reflect"
+            | "Proxy"
+            | "globalThis"
+            | "NaN"
+            | "Infinity"
+            | "parseInt"
+            | "parseFloat"
+            | "isNaN"
+            | "isFinite"
+            | "setTimeout"
+            | "clearTimeout"
+            | "setInterval"
+            | "clearInterval"
+    )
 }

@@ -6,7 +6,7 @@ use crate::arena::TypeId;
 use crate::types::Type;
 
 use super::super::context::CheckContext;
-use super::super::narrow::resolve_symbol_id;
+use super::super::narrow::{path_of_member, resolve_symbol_id};
 use super::binary::infer_binary_expression_type;
 use super::core::resolve_identifier_type;
 use super::infer_expression_type;
@@ -57,6 +57,7 @@ pub(super) fn infer_assignment_expression_type(
             if let Some((symbol_id, declared_type)) = declared {
                 narrow_on_assignment(symbol_id, declared_type, right_type, ctx);
             }
+            narrow_member_on_assignment(&assign.left, target_type, right_type, scoping, ctx);
             right_type
         }
         // `x op= y` is `x = x op y`: whatever the operator's own rule is,
@@ -103,12 +104,14 @@ fn declared_identifier_target(
 // type when that leaves nothing or the declared type is not a union. Either way
 // this replaces any overlay entry a guard left behind, which would otherwise be
 // stale the moment x holds a new value.
-fn narrow_on_assignment(
+pub(crate) fn narrow_on_assignment(
     symbol_id: SymbolId,
     declared: TypeId,
     assigned: TypeId,
     ctx: &mut CheckContext<'_, '_>,
 ) {
+    // Whatever was known about `x.a`, `x.a.b` described the old value of x.
+    ctx.narrow.remove_paths_of(symbol_id);
     let members = match ctx.arena.get(declared) {
         Type::Union(members) => members.clone(),
         _ => {
@@ -128,6 +131,46 @@ fn narrow_on_assignment(
         ctx.arena.alloc_union(kept)
     };
     ctx.narrow.insert(symbol_id, narrowed);
+}
+
+// `user.address = value`: what was known about `user.address` (and anything under it) ends,
+// and a union-typed property then reads as the members the assigned type fits, the same
+// rule narrow_on_assignment applies to a variable. `declared` is the property's declared
+// type, which resolve_assignment_target_type reads without consulting any path narrowing.
+fn narrow_member_on_assignment(
+    target: &AssignmentTarget,
+    declared: TypeId,
+    assigned: TypeId,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) {
+    let AssignmentTarget::StaticMemberExpression(member) = target else {
+        return;
+    };
+    let Some(reference) = path_of_member(member, scoping) else {
+        return;
+    };
+    ctx.narrow
+        .remove_path_prefix(reference.symbol_id, &reference.path);
+
+    let Type::Union(members) = ctx.arena.get(declared) else {
+        return;
+    };
+    let members = members.clone();
+    let mut kept = Vec::with_capacity(members.len());
+    for member_type in members {
+        if ctx.semantic().is_assignable(assigned, member_type) {
+            kept.push(member_type);
+        }
+    }
+    if kept.is_empty() {
+        return;
+    }
+    let narrowed = ctx.arena.alloc_union(kept);
+    if narrowed != declared {
+        ctx.narrow
+            .insert_path(reference.symbol_id, reference.path, narrowed);
+    }
 }
 
 fn resolve_assignment_target_type(

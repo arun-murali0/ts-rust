@@ -18,6 +18,7 @@ mod logical;
 mod members;
 mod objects;
 
+pub(super) use assignment::narrow_on_assignment;
 pub(super) use elaborate::report_mismatch;
 pub(super) use excess::check_excess_properties;
 pub(super) use members::infer_member_access_type;
@@ -94,15 +95,22 @@ pub fn infer_expression_type(
 
         Expression::NewExpression(new_expr) => infer_new_expression_type(new_expr, scoping, ctx),
 
+        // `user.address` narrowed by an earlier `user.address !== null` reads as that
+        // narrowed type; every other access is typed from its object as before.
         Expression::StaticMemberExpression(member) => {
-            let object_type = infer_expression_type(&member.object, scoping, ctx);
-            infer_member_access_type_with_optional(
-                object_type,
-                &member.property.name,
-                member.optional,
-                member.span(),
-                ctx,
-            )
+            match super::narrow::narrowed_member_type(member, scoping, ctx) {
+                Some(narrowed) => narrowed,
+                None => {
+                    let object_type = infer_expression_type(&member.object, scoping, ctx);
+                    infer_member_access_type_with_optional(
+                        object_type,
+                        &member.property.name,
+                        member.optional,
+                        member.span(),
+                        ctx,
+                    )
+                }
+            }
         }
 
         Expression::ComputedMemberExpression(member) => {

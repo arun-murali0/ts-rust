@@ -9,7 +9,7 @@ use crate::semantic::queries::RelationCache;
 use crate::symbol_map::SymbolTypeMap;
 use crate::types::FileId;
 
-use super::narrow::NarrowState;
+use super::narrow::{JumpFrame, NarrowState, WriteMap};
 
 // The shared mutable state for checking one program. Every feature module
 // (expressions, statements, narrowing) takes &mut CheckContext rather than owning
@@ -52,6 +52,13 @@ pub struct CheckContext<'ast, 'src> {
     pub relation_cache: RelationCache,
 
     pub current_return_type: Option<TypeId>,
+    // Problem: a function with no return annotation has no declared type to check its
+    // `return` statements against, and none to give its callers.
+    // Picked: while such a function's body is walked, every returned type lands here,
+    // and enter_return_scope / leave_return_scope keep it per function, so a nested
+    // function, arrow or method never adds its returns to the enclosing one.
+    // Cost: a caller checked before the body is walked sees the placeholder `any`.
+    pub inferred_returns: Option<Vec<TypeId>>,
 
     pub current_class_instance: Option<TypeId>,
 
@@ -74,9 +81,47 @@ pub struct CheckContext<'ast, 'src> {
     // the union the whole expression has, and inferring them again would report their
     // own errors twice, so they are kept when they are first inferred.
     pub conditional_arms: std::collections::HashMap<u32, (TypeId, TypeId)>,
+
+    // The `break` and `continue` targets the walker is currently inside, innermost last.
+    // A jump records the narrowing in force where it happens into its target's frame, so
+    // the code after a loop (and the head of its next pass) can join those states in
+    // instead of only seeing the state at the end of the body. See control_flow.rs.
+    pub jump_frames: Vec<JumpFrame>,
+
+    // The label of a `label: while (...)` waiting for its loop, so a `continue label` can
+    // find the loop. Set by the labeled statement and consumed by the loop it labels.
+    pub pending_loop_label: Option<String>,
+
+    // Where each variable is written, collected once per file by check_top_level. Empty
+    // until then, which makes every loop and closure behave as if nothing were assigned.
+    pub writes: WriteMap,
+}
+
+// What a function body replaces on entry and gives back on exit, so the two pieces
+// of return bookkeeping can never be restored out of step with each other.
+pub struct ReturnScope {
+    outer_type: Option<TypeId>,
+    outer_inferred: Option<Vec<TypeId>>,
 }
 
 impl<'ast, 'src> CheckContext<'ast, 'src> {
+    // `infer` is true only for a function declaration with no return annotation, the one
+    // place that collects what its body returns. Every other function leaves the
+    // collection off, which also hides the enclosing function's list from its body.
+    pub fn enter_return_scope(&mut self, return_type: Option<TypeId>, infer: bool) -> ReturnScope {
+        ReturnScope {
+            outer_type: std::mem::replace(&mut self.current_return_type, return_type),
+            outer_inferred: std::mem::replace(&mut self.inferred_returns, infer.then(Vec::new)),
+        }
+    }
+
+    // Restores the enclosing function's state and hands back the types this function
+    // returned (empty unless it was entered with `infer`).
+    pub fn leave_return_scope(&mut self, scope: ReturnScope) -> Vec<TypeId> {
+        self.current_return_type = scope.outer_type;
+        std::mem::replace(&mut self.inferred_returns, scope.outer_inferred).unwrap_or_default()
+    }
+
     // Takes an arena the caller already owns, so a session can hand the same
     // allocation to each check in turn. The arena must already be cleared: this does
     // not reset it, because the caller is the one who knows whether it is reusing one.
@@ -90,10 +135,14 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             narrow: NarrowState::new(),
             relation_cache: RelationCache::default(),
             current_return_type: None,
+            inferred_returns: None,
             current_class_instance: None,
             implicit_this: false,
             next_function_has_no_this: false,
             conditional_arms: std::collections::HashMap::new(),
+            jump_frames: Vec::new(),
+            pending_loop_label: None,
+            writes: WriteMap::default(),
         }
     }
 

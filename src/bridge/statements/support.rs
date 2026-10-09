@@ -42,6 +42,45 @@ pub(crate) fn statement_always_exits(stmt: &Statement) -> bool {
     }
 }
 
+// Whether nothing after `stmt` in the same statement list can run, because it returns,
+// throws, breaks or continues. statement_always_exits above answers the same question
+// for the unreachable-code report and is left as it was; this one also counts `break`
+// and `continue` and sees through `try`, which is what narrowing needs: a branch that
+// ends in `break` hands its state to the loop's exit, and contributes nothing to the
+// statement after the `if`.
+pub(crate) fn statement_leaves_flow(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::ReturnStatement(_)
+        | Statement::ThrowStatement(_)
+        | Statement::BreakStatement(_)
+        | Statement::ContinueStatement(_) => true,
+        Statement::BlockStatement(block) => block.body.last().is_some_and(statement_leaves_flow),
+        Statement::IfStatement(if_stmt) => match &if_stmt.alternate {
+            Some(alternate) => {
+                statement_leaves_flow(&if_stmt.consequent) && statement_leaves_flow(alternate)
+            }
+            None => false,
+        },
+        Statement::TryStatement(try_stmt) => {
+            let finalizer_leaves = try_stmt
+                .finalizer
+                .as_ref()
+                .is_some_and(|finalizer| finalizer.body.last().is_some_and(statement_leaves_flow));
+            let block_leaves = try_stmt
+                .block
+                .body
+                .last()
+                .is_some_and(statement_leaves_flow);
+            let handler_leaves = try_stmt
+                .handler
+                .as_ref()
+                .is_none_or(|handler| handler.body.body.last().is_some_and(statement_leaves_flow));
+            finalizer_leaves || (block_leaves && handler_leaves)
+        }
+        _ => false,
+    }
+}
+
 // Whether a `break` appears anywhere inside `stmt`. Deliberately generous: a break
 // that belongs to a nested loop or switch is counted too, and a `try` or `with` is
 // assumed to hide one, because the only use of this answer is to decide that a loop

@@ -1,9 +1,71 @@
-use oxc_ast::ast::{BinaryOperator, BindingPattern, Expression, Program, Statement, UnaryOperator};
+use oxc_ast::ast::{
+    BinaryOperator, BindingPattern, Class, Declaration, ExportDefaultDeclarationKind, Expression,
+    Function, Program, Statement, TSEnumDeclaration, TSInterfaceDeclaration,
+    TSTypeAliasDeclaration, UnaryOperator, VariableDeclaration,
+};
 
 use crate::type_annotation::{resolve_function_params, resolve_type_annotation};
 use crate::types::{ObjectType, PropertyEntry, Type};
 
 use super::context::CheckContext;
+
+// One declaration the declare pass cares about, whether it stands alone or sits
+// behind `export` / `export default`.
+//
+// Problem: both passes matched on Statement::FunctionDeclaration and friends, and an
+// exported declaration is a different statement kind that wraps the same payload, so
+// `export function f(...)` and `export interface I {...}` were never declared at all
+// (and the check pass then warned they were unsupported).
+// Picked: look through the export wrapper once, here, and hand both passes the same
+// flat list, so a declaration is treated the same whether or not it is exported.
+// Cost: a list of references is built per pass; `export { a, b }` and
+// `export * from` declare nothing and are skipped, which is correct for one file.
+#[derive(Clone, Copy)]
+enum TopLevelItem<'a> {
+    Alias(&'a TSTypeAliasDeclaration<'a>),
+    Interface(&'a TSInterfaceDeclaration<'a>),
+    Class(&'a Class<'a>),
+    Enum(&'a TSEnumDeclaration<'a>),
+    Variable(&'a VariableDeclaration<'a>),
+    Function(&'a Function<'a>),
+}
+
+fn top_level_items<'a>(program: &'a Program<'a>) -> Vec<TopLevelItem<'a>> {
+    let mut items = Vec::new();
+    for stmt in &program.body {
+        match stmt {
+            Statement::TSTypeAliasDeclaration(d) => items.push(TopLevelItem::Alias(d)),
+            Statement::TSInterfaceDeclaration(d) => items.push(TopLevelItem::Interface(d)),
+            Statement::ClassDeclaration(d) => items.push(TopLevelItem::Class(d)),
+            Statement::TSEnumDeclaration(d) => items.push(TopLevelItem::Enum(d)),
+            Statement::VariableDeclaration(d) => items.push(TopLevelItem::Variable(d)),
+            Statement::FunctionDeclaration(d) => items.push(TopLevelItem::Function(d)),
+            Statement::ExportDeclaration(export) => match &export.declaration {
+                Declaration::TSTypeAliasDeclaration(d) => items.push(TopLevelItem::Alias(d)),
+                Declaration::TSInterfaceDeclaration(d) => items.push(TopLevelItem::Interface(d)),
+                Declaration::ClassDeclaration(d) => items.push(TopLevelItem::Class(d)),
+                Declaration::TSEnumDeclaration(d) => items.push(TopLevelItem::Enum(d)),
+                Declaration::VariableDeclaration(d) => items.push(TopLevelItem::Variable(d)),
+                Declaration::FunctionDeclaration(d) => items.push(TopLevelItem::Function(d)),
+                _ => {}
+            },
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(d) => {
+                    items.push(TopLevelItem::Function(d))
+                }
+                ExportDefaultDeclarationKind::ClassDeclaration(d) => {
+                    items.push(TopLevelItem::Class(d))
+                }
+                ExportDefaultDeclarationKind::TSInterfaceDeclaration(d) => {
+                    items.push(TopLevelItem::Interface(d))
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    items
+}
 
 // Two passes over the same statement list. The first registers every named type
 // (interfaces, aliases, classes, enums) before anything is resolved, so a
@@ -11,9 +73,10 @@ use super::context::CheckContext;
 // second pass resolves function and variable signatures, which can look up
 // any of those names regardless of source order.
 pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckContext<'ast, '_>) {
-    for stmt in &program.body {
-        match stmt {
-            Statement::TSTypeAliasDeclaration(decl) => {
+    let items = top_level_items(program);
+    for item in items.iter().copied() {
+        match item {
+            TopLevelItem::Alias(decl) => {
                 ctx.namespace.insert_type_alias(
                     &decl.id.name,
                     &decl.type_annotation,
@@ -21,19 +84,18 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
                     decl.id.span,
                 );
             }
-            Statement::TSInterfaceDeclaration(decl) => {
+            TopLevelItem::Interface(decl) => {
                 ctx.namespace.insert_interface(&decl.id.name, decl);
             }
-            Statement::ClassDeclaration(class) => {
+            TopLevelItem::Class(class) => {
                 if let Some(id) = &class.id {
                     ctx.namespace.insert_class(&id.name, class);
                 }
             }
-            Statement::TSEnumDeclaration(decl) => declare_enum(decl, ctx),
+            TopLevelItem::Enum(decl) => declare_enum(decl, ctx),
             _ => {}
         }
     }
-
     for (name, span, involves_enum) in ctx.namespace.take_declaration_collisions() {
         let message = if involves_enum {
             crate::diagnostic_messages::messages::enum_declaration_merge()
@@ -42,10 +104,9 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
         };
         ctx.error(message, span);
     }
-
-    for stmt in &program.body {
-        match stmt {
-            Statement::VariableDeclaration(decl) => {
+    for item in items.iter().copied() {
+        match item {
+            TopLevelItem::Variable(decl) => {
                 for declarator in &decl.declarations {
                     let BindingPattern::BindingIdentifier(id) = &declarator.id else {
                         continue;
@@ -56,7 +117,6 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
                     let Some(symbol_id) = id.symbol_id.get() else {
                         continue;
                     };
-
                     if let Some(type_id) =
                         resolve_type_annotation(annotation, &mut ctx.namespace, &mut ctx.arena)
                     {
@@ -64,109 +124,116 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
                     }
                 }
             }
-
-            Statement::FunctionDeclaration(func) => {
-                let Some(name) = func.id.as_ref() else {
-                    continue;
-                };
-                let Some(symbol_id) = name.symbol_id.get() else {
-                    continue;
-                };
-
-                // A generic function's own type parameters need to be resolvable
-                // by name while its parameter and return type annotations are
-                // being resolved, then removed again immediately afterward so
-                // they do not leak into any other declaration's resolution.
-                let scope = ctx.namespace.push_type_params(&mut ctx.arena, func);
-
-                let params =
-                    resolve_function_params(&func.params, &mut ctx.namespace, &mut ctx.arena);
-                let return_type = func
-                    .return_type
-                    .as_ref()
-                    .and_then(|rt| resolve_type_annotation(rt, &mut ctx.namespace, &mut ctx.arena));
-
-                ctx.namespace.pop_type_params(scope);
-
-                // Any parameter or the return type failing to resolve, an unknown
-                // name in an annotation for example, means the whole function is
-                // left undeclared rather than declared with a guessed type. A
-                // later call to it will report an honest unresolved-name problem
-                // instead of silently passing or failing arity checks it should
-                // not be subject to.
-                let (Some(params), Some(return_type)) = (params, return_type) else {
-                    continue;
-                };
-
-                let function_type =
-                    ctx.arena
-                        .alloc(crate::types::Type::Function(crate::types::FunctionType {
-                            params,
-                            return_type,
-                            is_untyped: false,
-                        }));
-                ctx.symbols.declare(symbol_id, function_type);
-            }
-
-            Statement::ClassDeclaration(class) => {
-                let Some(name) = class.id.as_ref() else {
-                    continue;
-                };
-                let Some(symbol_id) = name.symbol_id.get() else {
-                    continue;
-                };
-
-                let instance_type = match ctx.namespace.resolve(&name.name, &mut ctx.arena) {
-                    crate::namespace::Resolution::Resolved(type_id) => type_id,
-                    _ => continue,
-                };
-
-                let (constructor_params, constructor_is_untyped) = match find_constructor(class) {
-                    None => (Vec::new(), false),
-                    Some(ctor) => {
-                        // A generic class's own type parameters need to be in
-                        // scope while its constructor's parameters are
-                        // resolved, the same as a generic function's are just
-                        // above -- otherwise `T` in `constructor(value: T)`
-                        // fails to resolve, the whole signature falls back to
-                        // "untyped, can't check arity", and `new Box(1)` never
-                        // gets the inference-and-substitution treatment a
-                        // generic function call already gets in
-                        // check_callable. This only re-declares the same
-                        // shadow namespace::resolve already set up while
-                        // computing instance_type above; type_param_cache
-                        // means it resolves to the identical GenericParameter
-                        // TypeId, not a second, disconnected one.
-                        let scope = ctx.namespace.push_decl_type_params(
-                            &mut ctx.arena,
-                            class.type_parameters.as_deref(),
-                        );
-                        let params = resolve_function_params(
-                            &ctor.params,
-                            &mut ctx.namespace,
-                            &mut ctx.arena,
-                        );
-                        ctx.namespace.pop_type_params(scope);
-                        match params {
-                            Some(params) => (params, false),
-                            None => (Vec::new(), true),
-                        }
-                    }
-                };
-
-                let constructor_type =
-                    ctx.arena
-                        .alloc(crate::types::Type::Function(crate::types::FunctionType {
-                            params: constructor_params,
-                            return_type: instance_type,
-                            is_untyped: constructor_is_untyped,
-                        }));
-                ctx.symbols.declare(symbol_id, constructor_type);
-            }
-
+            TopLevelItem::Function(func) => declare_function(func, ctx),
+            TopLevelItem::Class(class) => declare_class_constructor(class, ctx),
             _ => {}
         }
     }
+}
+
+// Registers a function's signature under its symbol. Shared by the top-level pass
+// and by check_function_declaration / hoist_function_declarations, which call it
+// for a function declared inside another body: the same signature rules apply
+// there, and nothing but this pass would ever give such a function a type.
+//
+// Problem: a nested `function helper(...) {}` was never declared, so its body was
+// skipped without a word and every call to it read as an unknown type.
+// Picked: declare it on the way into the enclosing body, before any statement in
+// that body is checked, so a call written above the declaration still sees it
+// (function declarations hoist).
+pub(super) fn declare_function(func: &Function<'_>, ctx: &mut CheckContext<'_, '_>) {
+    let Some(name) = func.id.as_ref() else {
+        return;
+    };
+    let Some(symbol_id) = name.symbol_id.get() else {
+        return;
+    };
+    // A generic function's own type parameters need to be resolvable
+    // by name while its parameter and return type annotations are
+    // being resolved, then removed again immediately afterward so
+    // they do not leak into any other declaration's resolution.
+    let scope = ctx.namespace.push_type_params(&mut ctx.arena, func);
+    let params = resolve_function_params(&func.params, &mut ctx.namespace, &mut ctx.arena);
+    let return_type = match &func.return_type {
+        Some(rt) => resolve_type_annotation(rt, &mut ctx.namespace, &mut ctx.arena),
+        // Problem: with no return annotation the function was left undeclared, so
+        // its body was never checked and a call to it read as an unknown type.
+        // Picked: declare it with `any` as a placeholder return type; the body is
+        // then checked against `any` (so nothing in it is a false mismatch) and
+        // check_function_declaration re-declares the function with the union of
+        // what the body returned once it has been walked.
+        // Cost: a call checked before the body is walked sees `any`, and an async
+        // or generator function stays undeclared because its real return type
+        // (a Promise or an iterator) is not something this checker models.
+        None if func.r#async || func.generator => None,
+        None => Some(ctx.arena.any()),
+    };
+    ctx.namespace.pop_type_params(scope);
+    // Any parameter or the return type failing to resolve, an unknown
+    // name in an annotation for example, means the whole function is
+    // left undeclared rather than declared with a guessed type. A
+    // later call to it will report an honest unresolved-name problem
+    // instead of silently passing or failing arity checks it should
+    // not be subject to.
+    let (Some(params), Some(return_type)) = (params, return_type) else {
+        return;
+    };
+    let function_type = ctx
+        .arena
+        .alloc(crate::types::Type::Function(crate::types::FunctionType {
+            params,
+            return_type,
+            is_untyped: false,
+        }));
+    ctx.symbols.declare(symbol_id, function_type);
+}
+
+fn declare_class_constructor(class: &Class<'_>, ctx: &mut CheckContext<'_, '_>) {
+    let Some(name) = class.id.as_ref() else {
+        return;
+    };
+    let Some(symbol_id) = name.symbol_id.get() else {
+        return;
+    };
+    let instance_type = match ctx.namespace.resolve(&name.name, &mut ctx.arena) {
+        crate::namespace::Resolution::Resolved(type_id) => type_id,
+        _ => return,
+    };
+    let (constructor_params, constructor_is_untyped) = match find_constructor(class) {
+        None => (Vec::new(), false),
+        Some(ctor) => {
+            // A generic class's own type parameters need to be in
+            // scope while its constructor's parameters are
+            // resolved, the same as a generic function's are just
+            // above -- otherwise `T` in `constructor(value: T)`
+            // fails to resolve, the whole signature falls back to
+            // "untyped, can't check arity", and `new Box(1)` never
+            // gets the inference-and-substitution treatment a
+            // generic function call already gets in
+            // check_callable. This only re-declares the same
+            // shadow namespace::resolve already set up while
+            // computing instance_type above; type_param_cache
+            // means it resolves to the identical GenericParameter
+            // TypeId, not a second, disconnected one.
+            let scope = ctx
+                .namespace
+                .push_decl_type_params(&mut ctx.arena, class.type_parameters.as_deref());
+            let params = resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena);
+            ctx.namespace.pop_type_params(scope);
+            match params {
+                Some(params) => (params, false),
+                None => (Vec::new(), true),
+            }
+        }
+    };
+    let constructor_type =
+        ctx.arena
+            .alloc(crate::types::Type::Function(crate::types::FunctionType {
+                params: constructor_params,
+                return_type: instance_type,
+                is_untyped: constructor_is_untyped,
+            }));
+    ctx.symbols.declare(symbol_id, constructor_type);
 }
 
 pub(super) fn find_constructor<'a>(

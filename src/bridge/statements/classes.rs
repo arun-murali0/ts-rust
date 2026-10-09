@@ -123,13 +123,13 @@ pub(super) fn check_class_declaration(
                 };
 
                 bind_params(&method.value.params, &method_type.params, scoping, ctx);
-                let outer_return_type = ctx.current_return_type.replace(method_type.return_type);
+                let return_scope = ctx.enter_return_scope(Some(method_type.return_type), false);
                 let outer_narrow = std::mem::take(&mut ctx.narrow);
                 for body_stmt in &method_body.statements {
                     check_statement(body_stmt, scoping, ctx);
                 }
                 ctx.narrow = outer_narrow;
-                ctx.current_return_type = outer_return_type;
+                ctx.leave_return_scope(return_scope);
             }
 
             // A static method lives on the class itself, not on instances, so it
@@ -156,8 +156,7 @@ pub(super) fn check_class_declaration(
                     method.value.return_type.as_ref().and_then(|rt| {
                         resolve_type_annotation(rt, &mut ctx.namespace, &mut ctx.arena)
                     });
-                let outer_return_type =
-                    std::mem::replace(&mut ctx.current_return_type, return_type);
+                let return_scope = ctx.enter_return_scope(return_type, false);
                 // `this` inside a static method is not the instance -- tsc types
                 // it as the class's constructor type, which this checker does
                 // not model. Clearing current_class_instance to None for just
@@ -174,7 +173,7 @@ pub(super) fn check_class_declaration(
                 }
                 ctx.narrow = outer_narrow;
                 ctx.current_class_instance = outer_class_instance_for_this;
-                ctx.current_return_type = outer_return_type;
+                ctx.leave_return_scope(return_scope);
             }
 
             ClassElement::MethodDefinition(method) if method.r#static => {

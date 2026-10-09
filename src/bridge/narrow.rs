@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use oxc_ast::ast::{
-    BinaryExpression, BinaryOperator, Expression, IdentifierReference, LogicalOperator,
-    UnaryOperator,
+    AssignmentExpression, AssignmentTarget, BinaryExpression, BinaryOperator, Expression,
+    IdentifierReference, LogicalOperator, Program, StaticMemberExpression, UnaryOperator,
 };
+use oxc_ast_visit::{Visit, walk};
 use oxc_semantic::{Scoping, SymbolId};
 
 use crate::arena::{TypeArena, TypeId};
@@ -13,16 +16,38 @@ use crate::types::Type;
 // small association list, not a full map, since only a handful of variables are
 // ever narrowed within one branch. Looked up before falling back to a symbol's
 // declared type wherever narrowing might apply.
+//
+// Besides the per-symbol entries there are per-property-path entries (`user.address`,
+// `a.b.c`), kept in their own list so the symbol API below is unchanged: a path entry is
+// only ever read through get_path and never shadows a symbol's own entry.
 #[derive(Default, Clone)]
-pub struct NarrowState(Vec<(SymbolId, TypeId)>);
+pub struct NarrowState(Vec<(SymbolId, TypeId)>, Vec<PathEntry>);
+
+#[derive(Clone)]
+struct PathEntry {
+    symbol_id: SymbolId,
+    path: Vec<String>,
+    type_id: TypeId,
+}
 
 impl NarrowState {
     pub fn new() -> Self {
-        Self(Vec::new())
+        Self(Vec::new(), Vec::new())
     }
 
     fn from_single(symbol_id: SymbolId, type_id: TypeId) -> Self {
-        Self(vec![(symbol_id, type_id)])
+        Self(vec![(symbol_id, type_id)], Vec::new())
+    }
+
+    fn from_path(symbol_id: SymbolId, path: Vec<String>, type_id: TypeId) -> Self {
+        Self(
+            Vec::new(),
+            vec![PathEntry {
+                symbol_id,
+                path,
+                type_id,
+            }],
+        )
     }
 
     pub fn get(&self, symbol_id: SymbolId) -> Option<TypeId> {
@@ -44,6 +69,198 @@ impl NarrowState {
         for (symbol_id, type_id) in other.0 {
             self.insert(symbol_id, type_id);
         }
+        for entry in other.1 {
+            self.insert_path(entry.symbol_id, entry.path, entry.type_id);
+        }
+    }
+
+    // What `a.b.c` is narrowed to, where `path` is `["b", "c"]` and `symbol_id` is `a`.
+    pub fn get_path(&self, symbol_id: SymbolId, path: &[String]) -> Option<TypeId> {
+        self.1
+            .iter()
+            .find(|entry| entry.symbol_id == symbol_id && entry.path == path)
+            .map(|entry| entry.type_id)
+    }
+
+    pub fn insert_path(&mut self, symbol_id: SymbolId, path: Vec<String>, type_id: TypeId) {
+        if let Some(entry) = self
+            .1
+            .iter_mut()
+            .find(|entry| entry.symbol_id == symbol_id && entry.path == path)
+        {
+            entry.type_id = type_id;
+        } else {
+            self.1.push(PathEntry {
+                symbol_id,
+                path,
+                type_id,
+            });
+        }
+    }
+
+    pub fn has_paths(&self) -> bool {
+        !self.1.is_empty()
+    }
+
+    // Whether anything is recorded about this symbol, its own entry or one of its paths.
+    pub fn mentions(&self, symbol_id: SymbolId) -> bool {
+        self.get(symbol_id).is_some() || self.1.iter().any(|entry| entry.symbol_id == symbol_id)
+    }
+
+    // Forgets everything known about a symbol: its own entry and every path under it.
+    pub fn remove(&mut self, symbol_id: SymbolId) {
+        self.0.retain(|&(id, _)| id != symbol_id);
+        self.remove_paths_of(symbol_id);
+    }
+
+    // Forgets the paths under a symbol but keeps its own entry: what an assignment to
+    // the symbol itself does to `x.a`, `x.a.b`, since those described the old value.
+    pub fn remove_paths_of(&mut self, symbol_id: SymbolId) {
+        self.1.retain(|entry| entry.symbol_id != symbol_id);
+    }
+
+    // Forgets `path` and every path below it: assigning `user.address` ends what was
+    // known about `user.address` and `user.address.city` alike.
+    pub fn remove_path_prefix(&mut self, symbol_id: SymbolId, path: &[String]) {
+        self.1
+            .retain(|entry| !(entry.symbol_id == symbol_id && entry.path.starts_with(path)));
+    }
+
+    // The part of this state a closure may keep seeing: symbol entries `keep` accepts, and
+    // no property paths at all, since a property can be reassigned by anything that runs
+    // between the closure being made and called.
+    pub fn for_closure(&self, keep: impl Fn(SymbolId) -> bool) -> NarrowState {
+        NarrowState(
+            self.0
+                .iter()
+                .filter(|&&(id, _)| keep(id))
+                .copied()
+                .collect(),
+            Vec::new(),
+        )
+    }
+
+    // Whether two states record the same types. Order does not matter. Used to see that a
+    // loop's head state has stopped changing.
+    pub fn same_as(&self, other: &NarrowState) -> bool {
+        self.0.len() == other.0.len()
+            && self.1.len() == other.1.len()
+            && self.0.iter().all(|&(id, ty)| other.get(id) == Some(ty))
+            && self
+                .1
+                .iter()
+                .all(|entry| other.get_path(entry.symbol_id, &entry.path) == Some(entry.type_id))
+    }
+}
+
+// One enclosing construct a `break` or `continue` can jump to. While the walker is inside
+// it, a jump records the narrowing in force at that point here, so the code after the
+// construct (or the next pass of a loop) can join it in. See control_flow.rs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FrameKind {
+    Loop,
+    Switch,
+    // `label: { ... }`, a target for `break label` only.
+    Label,
+}
+
+pub struct JumpFrame {
+    pub label: Option<String>,
+    pub kind: FrameKind,
+    pub breaks: Vec<NarrowState>,
+    pub continues: Vec<NarrowState>,
+}
+
+impl JumpFrame {
+    pub fn new(label: Option<String>, kind: FrameKind) -> Self {
+        Self {
+            label,
+            kind,
+            breaks: Vec::new(),
+            continues: Vec::new(),
+        }
+    }
+}
+
+// Where in the source each variable is written, found once per file before checking. Two
+// questions are asked of it: which variables does a loop (or try block) assign, so its
+// head state can be settled, and is a variable assigned after a given point, which decides
+// whether a closure may keep an outer narrowing.
+//
+// `member` records `a.b = v` against `a`, because that write does not change `a` itself
+// but does end what is known about its properties.
+#[derive(Default)]
+pub struct WriteMap {
+    direct: HashMap<SymbolId, Vec<u32>>,
+    member: HashMap<SymbolId, Vec<u32>>,
+}
+
+impl WriteMap {
+    pub fn collect(program: &Program, scoping: &Scoping) -> Self {
+        let mut collector = WriteCollector {
+            scoping,
+            map: WriteMap::default(),
+        };
+        collector.visit_program(program);
+        collector.map
+    }
+
+    // Every symbol written, directly or through a property, between the two offsets.
+    pub fn written_in(&self, start: u32, end: u32) -> Vec<SymbolId> {
+        let mut found = Vec::new();
+        for map in [&self.direct, &self.member] {
+            for (&symbol_id, positions) in map {
+                if positions.iter().any(|&p| p >= start && p < end) && !found.contains(&symbol_id) {
+                    found.push(symbol_id);
+                }
+            }
+        }
+        found
+    }
+
+    // A direct write to the symbol at or after `position`.
+    pub fn assigned_at_or_after(&self, symbol_id: SymbolId, position: u32) -> bool {
+        self.direct
+            .get(&symbol_id)
+            .is_some_and(|positions| positions.iter().any(|&p| p >= position))
+    }
+}
+
+struct WriteCollector<'s> {
+    scoping: &'s Scoping,
+    map: WriteMap,
+}
+
+impl<'a> Visit<'a> for WriteCollector<'_> {
+    // Every assignment, update, destructuring target and for-in/of head reaches here as an
+    // identifier reference the semantic pass has flagged as a write.
+    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+        let Some(reference_id) = it.reference_id.get() else {
+            return;
+        };
+        let reference = self.scoping.get_reference(reference_id);
+        if reference.is_write()
+            && let Some(symbol_id) = reference.symbol_id()
+        {
+            self.map
+                .direct
+                .entry(symbol_id)
+                .or_default()
+                .push(it.span.start);
+        }
+    }
+
+    fn visit_assignment_expression(&mut self, it: &AssignmentExpression<'a>) {
+        if let AssignmentTarget::StaticMemberExpression(member) = &it.left
+            && let Some(target) = path_of_member(member, self.scoping)
+        {
+            self.map
+                .member
+                .entry(target.symbol_id)
+                .or_default()
+                .push(it.span.start);
+        }
+        walk::walk_assignment_expression(self, it);
     }
 }
 
@@ -60,6 +277,15 @@ pub fn join_states(a: &NarrowState, b: &NarrowState, arena: &mut TypeArena) -> N
             joined.insert(symbol_id, arena.alloc_union(vec![a_type, b_type]));
         }
     }
+    for entry in &a.1 {
+        if let Some(b_type) = b.get_path(entry.symbol_id, &entry.path) {
+            joined.insert_path(
+                entry.symbol_id,
+                entry.path.clone(),
+                arena.alloc_union(vec![entry.type_id, b_type]),
+            );
+        }
+    }
     joined
 }
 
@@ -70,6 +296,22 @@ pub fn join_states(a: &NarrowState, b: &NarrowState, arena: &mut TypeArena) -> N
 // wrapping any of those); anything else narrows nothing in either branch, which
 // is always safe, just less precise.
 pub fn narrow_condition(
+    test: &Expression,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> (NarrowState, NarrowState) {
+    let (mut on_true, mut on_false) = narrow_condition_by_symbol(test, scoping, ctx);
+    // Property paths (`user.address !== null`) are narrowed alongside, never instead:
+    // a shape the symbol layer already understands yields nothing here.
+    let (path_true, path_false) = narrow_condition_by_path(test, scoping, ctx);
+    on_true.extend(path_true);
+    on_false.extend(path_false);
+    (on_true, on_false)
+}
+
+// The condition shapes that narrow a plain variable. Its own recursion (`!`, `&&`, `||`,
+// parentheses) goes back through narrow_condition, so the path layer applies at every level.
+fn narrow_condition_by_symbol(
     test: &Expression,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
@@ -249,6 +491,180 @@ pub fn narrow_condition(
 
         _ => empty_pair(),
     }
+}
+
+// A property chain rooted at a variable: `user.address.city` is the variable `user` with
+// the path ["address", "city"]. Only plain `.name` accesses count; an optional chain,
+// a computed access or a call in the middle of it has no stable identity to narrow.
+pub(crate) struct PathRef {
+    pub symbol_id: SymbolId,
+    pub path: Vec<String>,
+}
+
+pub(crate) fn path_of_member(
+    member: &StaticMemberExpression,
+    scoping: &Scoping,
+) -> Option<PathRef> {
+    if member.optional {
+        return None;
+    }
+    let mut path = vec![member.property.name.to_string()];
+    let mut object = &member.object;
+    loop {
+        match object {
+            Expression::StaticMemberExpression(inner) if !inner.optional => {
+                path.push(inner.property.name.to_string());
+                object = &inner.object;
+            }
+            Expression::ParenthesizedExpression(inner) => object = &inner.expression,
+            Expression::Identifier(ident) => {
+                let symbol_id = resolve_symbol_id(ident, scoping)?;
+                path.reverse();
+                return Some(PathRef { symbol_id, path });
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn path_ref(expr: &Expression, scoping: &Scoping) -> Option<PathRef> {
+    match expr {
+        Expression::ParenthesizedExpression(inner) => path_ref(&inner.expression, scoping),
+        Expression::StaticMemberExpression(member) => path_of_member(member, scoping),
+        _ => None,
+    }
+}
+
+// What `a.b` currently reads as because a condition or an assignment narrowed that exact
+// path, if one did. None costs one length check when no path was ever narrowed.
+pub(crate) fn narrowed_member_type(
+    member: &StaticMemberExpression,
+    scoping: &Scoping,
+    ctx: &CheckContext<'_, '_>,
+) -> Option<TypeId> {
+    if !ctx.narrow.has_paths() {
+        return None;
+    }
+    let target = path_of_member(member, scoping)?;
+    ctx.narrow.get_path(target.symbol_id, &target.path)
+}
+
+// `typeof a.b === "string"`, `a.b === null`, `a.b !== undefined`, `a.b === "x"` and the
+// truthiness of `a.b`, for a chain `path_ref` accepts. These are the shapes the symbol
+// layer handles for a bare variable; the narrowing functions are the same ones.
+fn narrow_condition_by_path(
+    test: &Expression,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> (NarrowState, NarrowState) {
+    match test {
+        Expression::BinaryExpression(bin) => {
+            let is_equality = matches!(
+                bin.operator,
+                BinaryOperator::Equality
+                    | BinaryOperator::Inequality
+                    | BinaryOperator::StrictEquality
+                    | BinaryOperator::StrictInequality
+            );
+            if !is_equality {
+                return empty_pair();
+            }
+            let negated = matches!(
+                bin.operator,
+                BinaryOperator::Inequality | BinaryOperator::StrictInequality
+            );
+            let is_loose = matches!(
+                bin.operator,
+                BinaryOperator::Equality | BinaryOperator::Inequality
+            );
+
+            for (first, second) in [(&bin.left, &bin.right), (&bin.right, &bin.left)] {
+                if let Expression::UnaryExpression(unary) = first
+                    && unary.operator == UnaryOperator::Typeof
+                    && let Some(target) = path_ref(&unary.argument, scoping)
+                    && let Expression::StringLiteral(tag) = second
+                {
+                    let tag = tag.value.to_string();
+                    if !is_known_typeof_tag(&tag) {
+                        return empty_pair();
+                    }
+                    return by_path(
+                        ctx,
+                        scoping,
+                        &unary.argument,
+                        target,
+                        move |arena, current, want| {
+                            narrow_by_typeof(arena, current, &tag, want != negated)
+                        },
+                    );
+                }
+            }
+
+            for (first, second) in [(&bin.left, &bin.right), (&bin.right, &bin.left)] {
+                let Some(target) = path_ref(first, scoping) else {
+                    continue;
+                };
+                let is_null = match second {
+                    Expression::NullLiteral(_) => true,
+                    Expression::Identifier(other) if other.name == "undefined" => false,
+                    _ => continue,
+                };
+                return by_path(ctx, scoping, first, target, move |arena, current, want| {
+                    narrow_by_nullish(arena, current, is_null, is_loose, want != negated)
+                });
+            }
+
+            // Strict equality only, for the same coercion reason the variable form gives.
+            if !is_loose {
+                for (first, second) in [(&bin.left, &bin.right), (&bin.right, &bin.left)] {
+                    let Some(target) = path_ref(first, scoping) else {
+                        continue;
+                    };
+                    let Some(literal) = resolve_literal(second, &mut ctx.arena) else {
+                        continue;
+                    };
+                    return by_path(ctx, scoping, first, target, move |arena, current, want| {
+                        narrow_by_literal(arena, current, literal, want != negated)
+                    });
+                }
+            }
+            empty_pair()
+        }
+
+        Expression::StaticMemberExpression(_) => match path_ref(test, scoping) {
+            Some(target) => by_path(ctx, scoping, test, target, narrow_truthy),
+            None => empty_pair(),
+        },
+
+        _ => empty_pair(),
+    }
+}
+
+// The path counterpart of by_symbol. The path's current type comes from inferring the
+// expression, which already reads an earlier narrowing of the same path, and whose own
+// errors are dropped: the statement being checked reports them once, and this is a second
+// look at the same expression.
+fn by_path(
+    ctx: &mut CheckContext<'_, '_>,
+    scoping: &Scoping,
+    expr: &Expression,
+    target: PathRef,
+    narrow: impl Fn(&mut TypeArena, TypeId, bool) -> TypeId,
+) -> (NarrowState, NarrowState) {
+    let mark = ctx.diagnostics.len();
+    let current = crate::bridge::expressions::infer_expression_type(expr, scoping, ctx);
+    ctx.diagnostics.truncate(mark);
+    // A gap in this checker's model of the property would otherwise turn into errors on
+    // the source, as the instanceof comment above describes.
+    if current == ctx.arena.error() {
+        return empty_pair();
+    }
+    let true_type = narrow(&mut ctx.arena, current, true);
+    let false_type = narrow(&mut ctx.arena, current, false);
+    (
+        NarrowState::from_path(target.symbol_id, target.path.clone(), true_type),
+        NarrowState::from_path(target.symbol_id, target.path, false_type),
+    )
 }
 
 fn empty_pair() -> (NarrowState, NarrowState) {
@@ -484,14 +900,32 @@ fn typeof_check(
     Some((symbol_id, tag.value.to_string()))
 }
 
+// The variable a comparison is really about. `(line = read()) !== null` compares the
+// value just assigned to `line`, so the check narrows `line`; parentheses around a plain
+// name change nothing. Only a plain `=` to a plain name counts: `+=` stores something
+// other than the right-hand side, and a member target is a property path's business.
+fn narrowed_identifier<'a, 'b>(expr: &'a Expression<'b>) -> Option<&'a IdentifierReference<'b>> {
+    match expr {
+        Expression::Identifier(ident) => Some(ident),
+        Expression::ParenthesizedExpression(inner) => narrowed_identifier(&inner.expression),
+        Expression::AssignmentExpression(assign)
+            if assign.operator == oxc_ast::ast::AssignmentOperator::Assign =>
+        {
+            match &assign.left {
+                AssignmentTarget::AssignmentTargetIdentifier(ident) => Some(ident),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn nullish_check(
     maybe_ident: &Expression,
     maybe_nullish: &Expression,
     scoping: &Scoping,
 ) -> Option<(SymbolId, bool)> {
-    let Expression::Identifier(ident) = maybe_ident else {
-        return None;
-    };
+    let ident = narrowed_identifier(maybe_ident)?;
     let symbol_id = resolve_symbol_id(ident, scoping)?;
     match maybe_nullish {
         Expression::NullLiteral(_) => Some((symbol_id, true)),

@@ -82,6 +82,14 @@ pub fn resolve_ts_type(
             })))
         }
 
+        // Problem: `(string | null)[]` was unresolvable, because oxc keeps the parentheses
+        // as their own node and nothing here looked through it. Any function with such a
+        // parameter was left undeclared and its body went unchecked.
+        // Picked: a parenthesized type is the type inside it.
+        TSType::TSParenthesizedType(inner) => {
+            resolve_ts_type(&inner.type_annotation, namespace, arena)
+        }
+
         TSType::TSLiteralType(literal) => resolve_literal_type(&literal.literal, arena),
 
         TSType::TSTypeReference(reference) => {

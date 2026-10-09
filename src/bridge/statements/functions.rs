@@ -1,7 +1,8 @@
-use oxc_ast::ast::Function;
+use oxc_ast::ast::{Function, Statement};
 use oxc_semantic::Scoping;
 
 use super::super::context::CheckContext;
+use super::super::declare::declare_function;
 use super::support::report_implicit_any_params;
 use super::{bind_params, check_statement};
 
@@ -18,9 +19,14 @@ pub(super) fn check_function_declaration(
         return;
     };
 
-    // Reuses the signature declare_top_level already resolved, rather than
+    // Reuses the signature the declare pass already resolved, rather than
     // re-resolving parameter and return types here, so the body is checked
-    // against exactly the same types the function was declared with.
+    // against exactly the same types the function was declared with. A function
+    // nested in another body was not part of that pass and is declared now if
+    // hoist_function_declarations has not already done it.
+    if ctx.symbols.get(symbol_id).is_none() {
+        declare_function(func, ctx);
+    }
     let Some(function_type) = ctx.symbols.get(symbol_id) else {
         tracing::trace!(name = %name.name, "function signature not fully annotated, body not checked");
         return;
@@ -38,7 +44,7 @@ pub(super) fn check_function_declaration(
     // would otherwise leak into the next one checked after it.
     let outer_narrow = std::mem::take(&mut ctx.narrow);
 
-    // Pushed again here, separately from declare_top_level's own push, since the
+    // Pushed again here, separately from the declare pass's own push, since the
     // declare pass and this body-check pass are two independent traversals. Both
     // must resolve func's own T to the exact same GenericParameter node, which is
     // what TypeNamespace's per-parameter identity cache guarantees; without it, a
@@ -46,12 +52,54 @@ pub(super) fn check_function_declaration(
     // came from.
     let type_param_scope = ctx.namespace.push_type_params(&mut ctx.arena, func);
 
-    let outer_return_type = ctx.current_return_type.replace(function_type.return_type);
+    // No return annotation means the signature carries the placeholder `any` and the
+    // body's returned types are collected to replace it (see declare_function).
+    let infers_return = func.return_type.is_none();
+    let return_scope = ctx.enter_return_scope(Some(function_type.return_type), infers_return);
+    hoist_function_declarations(&body.statements, ctx);
     for body_stmt in &body.statements {
         check_statement(body_stmt, scoping, ctx);
     }
-    ctx.current_return_type = outer_return_type;
+    let returned = ctx.leave_return_scope(return_scope);
     ctx.narrow = outer_narrow;
 
+    if infers_return {
+        // Every `return` contributed its widened type; a body that never returns a
+        // value (or only falls off the end) returns void, the way tsc infers it.
+        // Re-declaring replaces the placeholder, so calls checked after this point
+        // see the real return type.
+        let inferred = if returned.is_empty() {
+            ctx.arena.void()
+        } else {
+            ctx.arena.alloc_union(returned)
+        };
+        let updated = ctx
+            .arena
+            .alloc(crate::types::Type::Function(crate::types::FunctionType {
+                params: function_type.params,
+                return_type: inferred,
+                is_untyped: function_type.is_untyped,
+            }));
+        ctx.symbols.declare(symbol_id, updated);
+    }
+
     ctx.namespace.pop_type_params(type_param_scope);
+}
+
+// Declares every function declared directly in `statements` before any of them is
+// checked, because function declarations hoist: `helper()` may be called above the
+// line that declares it. Top-level functions were declared by the declare pass, so
+// only a function without a type yet is declared here.
+pub(super) fn hoist_function_declarations(
+    statements: &[Statement],
+    ctx: &mut CheckContext<'_, '_>,
+) {
+    for stmt in statements {
+        if let Statement::FunctionDeclaration(func) = stmt
+            && let Some(symbol_id) = func.id.as_ref().and_then(|id| id.symbol_id.get())
+            && ctx.symbols.get(symbol_id).is_none()
+        {
+            declare_function(func, ctx);
+        }
+    }
 }

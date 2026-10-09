@@ -7,7 +7,9 @@ use crate::type_annotation::resolve_type_annotation;
 use crate::types::Type;
 
 use super::super::context::CheckContext;
-use super::super::expressions::{check_excess_properties, infer_expression_type, report_mismatch};
+use super::super::expressions::{
+    check_excess_properties, infer_expression_type, narrow_on_assignment, report_mismatch,
+};
 use super::bind_pattern;
 use super::support::{find_unresolved_type_name, report_implicit_any_params};
 
@@ -125,6 +127,19 @@ fn check_identifier_declarator(
 
             if let Some(symbol_id) = id.symbol_id.get() {
                 ctx.symbols.declare(symbol_id, declared);
+                // Problem: `let x: string | null = "a"` left x as `string | null`, so a
+                // read of `x.length` on the next line was reported, though tsc knows x
+                // holds the string it was just given.
+                // Picked: the initializer narrows a declared union the same way a later
+                // assignment does (narrow_on_assignment), and only when the value is
+                // assignable, so a mismatch is reported once and narrows nothing.
+                // Cost: a declared type that is not a union is left alone, since there
+                // is nothing to narrow.
+                if matches!(ctx.arena.get(declared), crate::types::Type::Union(_))
+                    && ctx.semantic().is_assignable(actual, declared)
+                {
+                    narrow_on_assignment(symbol_id, declared, actual, ctx);
+                }
             }
         }
 

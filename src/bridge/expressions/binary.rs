@@ -133,6 +133,16 @@ pub(super) fn infer_binary_expression_type(
             // so ctx.arena can't be reached again (even just to read a fixed
             // primitive id) while a SemanticQueries value from an earlier call
             // in this same expression is still alive.
+            // Problem: after `total + x.length` reported `x` as possibly null, `x.length`
+            // was the error type, which is assignable to string, so the sum counted as a
+            // string concatenation and `total = ...` reported a second, unrelated
+            // mismatch.
+            // Picked: an operand that is already an error makes the sum an error too,
+            // which every later check treats as silent, so one mistake reports once.
+            let error_ty = ctx.arena.error();
+            if left == error_ty || right == error_ty {
+                return error_ty;
+            }
             let any_ty = ctx.arena.any();
             if left == any_ty || right == any_ty {
                 // Checked before the string/number rules below, not after: `any`

@@ -1,4 +1,4 @@
-use oxc_ast::ast::{Program, Statement};
+use oxc_ast::ast::{Declaration, ExportDefaultDeclarationKind, Program, Statement};
 use oxc_semantic::Scoping;
 use oxc_span::GetSpan;
 
@@ -13,16 +13,22 @@ mod support;
 mod variables;
 
 pub(super) use patterns::{bind_params, bind_pattern};
-pub(super) use support::{contains_break, statement_always_exits};
+pub(super) use support::{contains_break, statement_always_exits, statement_leaves_flow};
 
 use classes::check_class_declaration;
 use control_flow::{
-    check_for_statement, check_if_statement, check_switch_statement, check_while_statement,
+    check_do_while_statement, check_for_in_statement, check_for_of_statement, check_for_statement,
+    check_if_statement, check_labeled_statement, check_switch_statement, check_try_statement,
+    check_while_statement, record_break, record_continue,
 };
-use functions::check_function_declaration;
+use functions::{check_function_declaration, hoist_function_declarations};
 use variables::check_variable_declaration;
 
 pub fn check_top_level(program: &Program, scoping: &Scoping, ctx: &mut CheckContext<'_, '_>) {
+    // Where every variable is written, found before any statement is checked: loops and
+    // try blocks ask which variables they assign, and closures whether a variable is
+    // assigned after they are made.
+    ctx.writes = super::narrow::WriteMap::collect(program, scoping);
     for stmt in &program.body {
         check_statement(stmt, scoping, ctx);
     }
@@ -39,6 +45,16 @@ pub(super) fn check_return_statement(
         Some(expr) => infer_expression_type(expr, scoping, ctx),
         None => ctx.arena.undefined(),
     };
+
+    // A function with no return annotation learns its return type from what its body
+    // returns; the type is widened so `return 1` makes the function return number,
+    // not the literal 1, the way tsc infers it.
+    if ctx.inferred_returns.is_some() {
+        let widened = crate::types::widen(&ctx.arena, actual);
+        if let Some(returns) = ctx.inferred_returns.as_mut() {
+            returns.push(widened);
+        }
+    }
 
     if let Some(expected) = ctx.current_return_type {
         if !ctx.semantic().is_assignable(actual, expected) {
@@ -77,12 +93,21 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
         Statement::TSTypeAliasDeclaration(_)
         | Statement::TSInterfaceDeclaration(_)
         | Statement::TSEnumDeclaration(_) => {}
-        // Neither has a type of its own to check; the type-level work already
-        // happened at whatever they jump out of or back to (the enclosing
-        // switch/loop, or check_switch_statement's own per-case narrowing). A
-        // labelled break/continue (`break outer;`) is still just this variant
-        // with a label attached, so it needs nothing extra here either.
-        Statement::BreakStatement(_) | Statement::ContinueStatement(_) => {}
+        // Neither has a type of its own to check, but each one carries the narrowing in
+        // force where it happens to the loop, switch or label it jumps to, so the code
+        // after that construct (or the next pass of the loop) can join it in. A labelled
+        // `break outer;` is still just this variant with a label attached.
+        Statement::BreakStatement(jump) => {
+            record_break(jump.label.as_ref().map(|label| label.name.as_str()), ctx)
+        }
+        Statement::ContinueStatement(jump) => {
+            record_continue(jump.label.as_ref().map(|label| label.name.as_str()), ctx)
+        }
+        // The thrown value is an expression like any other; what a throw does to the
+        // code after it is statement_always_exits' and statement_leaves_flow's business.
+        Statement::ThrowStatement(throw) => {
+            infer_expression_type(&throw.argument, scoping, ctx);
+        }
         Statement::BlockStatement(block) => {
             // Deliberately no save/restore of ctx.narrow here, despite variable
             // declarations genuinely being block-scoped: TypeScript's narrowing
@@ -94,9 +119,7 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
             // tests/fixtures/narrowing-scopes/guard_clause_in_block_does_survive.ts),
             // unlike the while/for/switch/function cases nearby, each of which
             // really is a distinct control-flow construct.
-            for inner in &block.body {
-                check_statement(inner, scoping, ctx);
-            }
+            check_block_statements(&block.body, scoping, ctx);
         }
         Statement::IfStatement(if_stmt) => check_if_statement(if_stmt, scoping, ctx),
         Statement::VariableDeclaration(decl) => check_variable_declaration(decl, scoping, ctx),
@@ -108,9 +131,71 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
         Statement::ClassDeclaration(class) => check_class_declaration(class, scoping, ctx),
         Statement::WhileStatement(while_stmt) => check_while_statement(while_stmt, scoping, ctx),
         Statement::ForStatement(for_stmt) => check_for_statement(for_stmt, scoping, ctx),
+        Statement::DoWhileStatement(do_while) => check_do_while_statement(do_while, scoping, ctx),
+        Statement::ForOfStatement(for_of) => check_for_of_statement(for_of, scoping, ctx),
+        Statement::ForInStatement(for_in) => check_for_in_statement(for_in, scoping, ctx),
+        Statement::TryStatement(try_stmt) => check_try_statement(try_stmt, scoping, ctx),
+        Statement::LabeledStatement(labeled) => check_labeled_statement(labeled, scoping, ctx),
         Statement::SwitchStatement(switch_stmt) => {
             check_switch_statement(switch_stmt, scoping, ctx)
         }
+        Statement::EmptyStatement(_) | Statement::DebuggerStatement(_) => {}
+        // Problem: `export function f() {}` and friends were an unsupported statement,
+        // so an exported declaration was neither declared nor checked, and everything
+        // in a module that exports its API went unchecked.
+        // Picked: look through the export to the declaration it wraps and check that
+        // exactly as if it were not exported. A re-export list (`export { a }`,
+        // `export * from "m"`) holds no code of its own, so it needs nothing here.
+        Statement::ExportDeclaration(export) => {
+            check_declaration(&export.declaration, scoping, ctx)
+        }
+        Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+            ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                check_function_declaration(func, scoping, ctx)
+            }
+            ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+                check_class_declaration(class, scoping, ctx)
+            }
+            ExportDefaultDeclarationKind::TSInterfaceDeclaration(_) => {}
+            other => {
+                if let Some(expr) = other.as_expression() {
+                    infer_expression_type(expr, scoping, ctx);
+                }
+            }
+        },
+        Statement::ExportNamedDeclaration(_)
+        | Statement::ExportFromDeclaration(_)
+        | Statement::ExportAllDeclaration(_) => {}
         other => support::push_unsupported(other, ctx),
+    }
+}
+
+// The declaration behind an `export`. Type-only kinds did their work in the declare
+// pass, the same as when they are not exported.
+fn check_declaration(declaration: &Declaration, scoping: &Scoping, ctx: &mut CheckContext<'_, '_>) {
+    match declaration {
+        Declaration::VariableDeclaration(decl) => check_variable_declaration(decl, scoping, ctx),
+        Declaration::FunctionDeclaration(func) => check_function_declaration(func, scoping, ctx),
+        Declaration::ClassDeclaration(class) => check_class_declaration(class, scoping, ctx),
+        Declaration::TSTypeAliasDeclaration(_)
+        | Declaration::TSInterfaceDeclaration(_)
+        | Declaration::TSEnumDeclaration(_) => {}
+        other => ctx.warning(
+            crate::diagnostic_messages::messages::unimplemented_statement_kind("Other"),
+            other.span(),
+        ),
+    }
+}
+
+// A statement list that opens a scope: a block, a try/catch/finally section. Function
+// declarations in it hoist, so they are declared before any statement is checked.
+pub(super) fn check_block_statements(
+    statements: &[Statement],
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) {
+    hoist_function_declarations(statements, ctx);
+    for stmt in statements {
+        check_statement(stmt, scoping, ctx);
     }
 }

@@ -7,8 +7,32 @@ use crate::type_annotation::{resolve_params_with_any_fallback, resolve_type_anno
 use crate::types::{FunctionType, Type};
 
 use super::super::context::CheckContext;
+use super::super::narrow::NarrowState;
 use super::super::statements::{bind_params, check_statement};
 use super::infer_expression_type;
+
+// What a closure body is allowed to keep of the narrowing where it was written.
+//
+// Problem: a closure used to see every narrowing in force at the point it was written, so
+// `if (x === null) return; const g = () => x.length; x = null;` looked safe, though by the
+// time g runs x is null again.
+// Picked: tsc's rule. A `const` keeps its narrowing, and so does any other variable that is
+// not assigned again after the closure is created (writes inside the closure count, as
+// they are textually after its start). Property-path narrowing is never kept, since any
+// call between creating and running the closure can change a property.
+// Cost: a variable assigned in another closure is judged by position alone, and
+// preserving a narrowing tsc would drop only hides an error, never invents one.
+fn closure_view(
+    outer: &NarrowState,
+    closure_start: u32,
+    scoping: &Scoping,
+    ctx: &CheckContext<'_, '_>,
+) -> NarrowState {
+    outer.for_closure(|symbol_id| {
+        scoping.symbol_flags(symbol_id).is_const_variable()
+            || !ctx.writes.assigned_at_or_after(symbol_id, closure_start)
+    })
+}
 
 // Arrow functions lexically inherit `this` from their enclosing scope in real
 // JavaScript, so current_class_instance is deliberately left untouched here,
@@ -20,9 +44,11 @@ pub(super) fn infer_arrow_function_type(
 ) -> TypeId {
     // Narrowing a guard clause establishes inside the body must not survive past
     // the function expression, and there is more than one exit path below, so
-    // the save and restore wrap the whole body rather than each return. Cloned,
-    // not cleared: an arrow still sees what the enclosing scope had narrowed.
+    // the save and restore wrap the whole body rather than each return. Not cleared:
+    // an arrow still sees what the enclosing scope narrowed, as far as closure_view allows.
     let outer_narrow = ctx.narrow.clone();
+    let visible = closure_view(&outer_narrow, arrow.span().start, scoping, ctx);
+    ctx.narrow = visible;
     let result = infer_arrow_function_type_inner(arrow, scoping, ctx);
     ctx.narrow = outer_narrow;
     result
@@ -63,11 +89,11 @@ fn infer_arrow_function_type_inner(
             return ctx.arena.error();
         };
         let return_type = declared_return.unwrap_or_else(|| ctx.arena.any());
-        let outer_return_type = ctx.current_return_type.replace(return_type);
+        let return_scope = ctx.enter_return_scope(Some(return_type), false);
         for body_stmt in &body.statements {
             check_statement(body_stmt, scoping, ctx);
         }
-        ctx.current_return_type = outer_return_type;
+        ctx.leave_return_scope(return_scope);
         return_type
     };
 
@@ -86,6 +112,8 @@ pub(super) fn infer_function_expression_type(
     // Narrowing from the body must not outlive the function; it is saved and
     // restored around the whole body, as in infer_arrow_function_type.
     let outer_narrow = ctx.narrow.clone();
+    let visible = closure_view(&outer_narrow, func.span().start, scoping, ctx);
+    ctx.narrow = visible;
     let result = infer_function_expression_type_inner(func, scoping, ctx);
     ctx.narrow = outer_narrow;
     result
@@ -113,7 +141,7 @@ fn infer_function_expression_type_inner(
     let return_type = declared_return.unwrap_or_else(|| ctx.arena.any());
 
     if let Some(body) = &func.body {
-        let outer_return_type = ctx.current_return_type.replace(return_type);
+        let return_scope = ctx.enter_return_scope(Some(return_type), false);
 
         // Unlike an arrow function, a plain function expression gets its own
         // `this` binding at call time rather than inheriting the enclosing one,
@@ -126,7 +154,7 @@ fn infer_function_expression_type_inner(
         }
         ctx.implicit_this = outer_implicit_this;
         ctx.current_class_instance = outer_class_instance;
-        ctx.current_return_type = outer_return_type;
+        ctx.leave_return_scope(return_scope);
     }
 
     ctx.arena.alloc(Type::Function(FunctionType {
