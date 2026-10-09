@@ -48,8 +48,8 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 - [ ] Labeled tuple elements
 - [x] Union types
 - [ ] Union reduction / subsumption (beyond flatten + dedupe)
-- [ ] Intersection types
-- [ ] Intersection reduction
+- [x] Intersection types: `A & B` annotations, flattening, distribution over unions, primitive and literal rules, `{}` dropped next to an object, member access, calls through function members, generic inference and substitution (checked against tsc, `tests/intersection_types.rs`)
+- [~] Intersection reduction: discriminant conflicts reduce to `never` lazily; TS2590 is not reported, and narrowing does not look into intersections
 - [ ] `keyof T`
 - [ ] Indexed access `T[K]`
 - [ ] Non-null assertion type effect (`!`) — expression exists; full model `[~]`
@@ -198,7 +198,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 - [ ] Optional property assignability edge cases
 - [ ] Excess property checking (all positions)
 - [ ] Weak type detection
-- [ ] Intersection/union distribute over relations
+- [~] Intersection/union distribute over relations: relations through intersections are done; union distribution happens at construction
 - [ ] Recursive type relations (coinductive) `[x]` basic
 
 ---

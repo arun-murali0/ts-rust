@@ -271,6 +271,7 @@ Start with the [documentation index](docs/README.md), then inspect the relevant 
 | Expression and Program Checking | `tests/expression_program_checking.rs` | `tests/fixtures/expression-program-checking/` | [Expression and Program Checking](docs/expression-program-checking.md) |
 | Parameters and Destructuring | `tests/parameters_destructuring.rs` | `tests/fixtures/parameters-destructuring/` | [Parameters and Destructuring](docs/parameters-destructuring.md) |
 | Module Resolution | `tests/module_resolution.rs` (feature `module-resolution`) | `tests/module-resolution-fixtures/` | [Module Resolution](docs/module-resolution.md) |
+| Intersection Types | `tests/intersection_types.rs` | `tests/fixtures/intersection-types/` | [Intersection Types](docs/intersection-types.md) |
 | Architecture Foundation | unit tests in `src/topology.rs`, `src/incremental.rs`, `src/scratchpad.rs` | none | [Architecture Foundation](docs/architecture-foundation.md) |
 | Generics | `tests/generics_tier1.rs`, `tests/generics_tier2.rs`, `tests/generic_classes.rs`, `tests/recursive_types.rs`, `tests/builtin_generics.rs`, `tests/interface_methods.rs` | `tests/fixtures/generics-tier1/`, `generics-tier2/`, `generic-classes/`, `recursive-types/`, `builtin-generics/`, `interface-methods/` | [Generics](docs/generics.md) |
 

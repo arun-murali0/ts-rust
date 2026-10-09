@@ -35,6 +35,7 @@ pub enum Type {
     Array(TypeId),
 
     Union(Vec<TypeId>),
+
     StringLiteral(String),
 
     NumberLiteral(f64),
@@ -80,6 +81,21 @@ pub enum Type {
     // check that a text baked in earlier is still right. Two applications with the same
     // declaration, arguments and body are the same id.
     App(DeclSlot, Vec<TypeId>, TypeId),
+
+    // `A & B`. Last in the enum on purpose: adding a variant before others changes the
+    // position of every variant after it, and `benchmark_fixtures_report_the_expected_number_
+    // of_diagnostics` changes from 5 to 1 when that happens. Something upstream depends on
+    // variant order (the four `Property 'payloadNN' does not exist on type 'never'` it
+    // reports are ones tsc does not), and until that is found the new variant must not
+    // move anything that exists.
+    // The members are in the order they were written and are never sorted:
+    // `A & B` and `B & A` are two ids that are assignable both ways, because the call
+    // signatures of the members are tried in member order and a union's sorting would
+    // lose that. Built only by TypeArena::alloc_intersection, which has already
+    // flattened, distributed over unions, reduced primitives and dropped duplicates, so
+    // there are at least two members and none of them is a union, an intersection,
+    // `never`, `unknown` or `any`. LLD 1.13 has the rules and the reasons.
+    Intersection(Vec<TypeId>),
 }
 
 impl PartialEq for Type {
@@ -100,6 +116,7 @@ impl PartialEq for Type {
             (Type::Object(a), Type::Object(b)) => a == b,
             (Type::Array(a), Type::Array(b)) => a == b,
             (Type::Union(a), Type::Union(b)) => a == b,
+            (Type::Intersection(a), Type::Intersection(b)) => a == b,
             (Type::StringLiteral(a), Type::StringLiteral(b)) => a == b,
             // Bit pattern, not IEEE ==: keeps this consistent with Hash below, and
             // makes 0.0 and -0.0 distinct while a NaN literal equals itself.
@@ -135,6 +152,7 @@ impl PartialEq for Type {
                 | Type::Object(_)
                 | Type::Array(_)
                 | Type::Union(_)
+                | Type::Intersection(_)
                 | Type::StringLiteral(_)
                 | Type::NumberLiteral(_)
                 | Type::BooleanLiteral(_)
@@ -173,6 +191,7 @@ impl Hash for Type {
             // them by their finished member list instead), so this exists only to
             // keep Hash total.
             Type::Union(members) => members.hash(state),
+            Type::Intersection(members) => members.hash(state),
             Type::StringLiteral(text) => text.hash(state),
             Type::NumberLiteral(value) => value.to_bits().hash(state),
             Type::BooleanLiteral(value) => value.hash(state),

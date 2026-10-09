@@ -335,3 +335,15 @@ guarantee they protected: an alias never renames a shared id, an application is 
 by its declaration and arguments, and `Box<Node>` prints as `Box<Node>` once `Node` has
 its name.
 
+## 16. Intersections: reduce lazily, and keep identity to what an id shows
+
+**Problem.** An intersection can reduce (`string & number`, `{ kind: "a" } & { kind: "b" }`), and the type has to be built while declarations are still being resolved. Reducing at construction time would read a `Ref` that is still an empty object and bake that into the intern table, under an id nothing invalidates: the placeholder bug from section 15, turned around.
+
+**Choice.** Two levels. Construction uses only what an id and its alias wrappers show: kinds, primitives, literals, unions. That part is identity. Anything that needs a body (a discriminant conflict, property merging, which member is callable) is decided on demand, cached per generation, and never written back. tsc does the same, which is why `{ kind: "a" } & { kind: "b" }` is still an intersection that prints as `never`.
+
+**Order is identity.** Members are not sorted, because call signatures are tried in member order and callability needs a body. `A & B` and `B & A` are two ids that are assignable both ways.
+
+**Checked against the real compiler.** The rules were written down only after a probe over tsc 5.9.3, and every fixture was run through it. That caught two things a reading of the docs would not: `void & A` stays an intersection while `null & A` is `never`, and `string & {}` stays while `A & {}` is `A`.
+
+**One thing it found by accident.** Adding the variant to the type enum changed an unrelated test from 5 diagnostics to 1. The four that vanished are false positives that tsc does not report, so something depends on the order of the variants. It is not found; the variant goes last and the question is open.
+

@@ -15,6 +15,16 @@ pub struct TypeId(u32);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct DeclSlot(u32);
 
+// An intersection whose distribution over unions would be too large to build. tsc reports
+// this as TS2590, "Expression produces a union type that is too complex to represent".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TooComplex;
+
+// The product of the union sizes at which alloc_intersection refuses to distribute. This
+// is tsc's number (checkCrossProductUnion); LLD 1.13 notes it may be lowered once the
+// budgets are measured.
+const MAX_INTERSECTION_DISTRIBUTION: usize = 100_000;
+
 #[derive(Clone, Copy)]
 enum DeclState {
     // The members are still being resolved. The declaration reads as an empty object,
@@ -148,6 +158,13 @@ pub struct TypeArena {
     // existing id reads as, so it empties this table, same as param_scan above.
     equality_cache: FxHashMap<(TypeId, TypeId), bool>,
 
+    // Whether an intersection reduces to never because two members disagree about a
+    // discriminant (see intersection_reduces_to_never). Reads member bodies, so an
+    // answer from before a declaration was resolved can be wrong afterwards: it is
+    // emptied by resolve_ref and clear(), like param_scan above. A RefCell, because the
+    // relation code that asks only holds a shared reference to the arena.
+    empty_intersections: RefCell<FxHashMap<TypeId, bool>>,
+
     // Advances whenever an id that already exists changes meaning: resolve_ref()
     // giving a declaration its body, or clear() starting over. Anything that remembers
     // an answer about a TypeId (the relation cache) compares generations instead of
@@ -181,6 +198,7 @@ impl TypeArena {
             interned_unions: FxHashMap::default(),
             param_scan: RefCell::new(Vec::new()),
             equality_cache: FxHashMap::default(),
+            empty_intersections: RefCell::new(FxHashMap::default()),
             generation: 0,
             decls: Vec::new(),
             enum_types: Vec::new(),
@@ -303,6 +321,7 @@ impl TypeArena {
                 | Type::GenericParameter(..)
                 | Type::Named(..)
                 | Type::App(..)
+                | Type::Intersection(..)
         )
     }
 
@@ -370,6 +389,268 @@ impl TypeArena {
                 id
             }
         }
+    }
+
+    // An intersection in its canonical form (LLD 1.13), or TooComplex when distributing it
+    // over its unions would not fit. Every intersection is built here, so the node always
+    // arrives reduced: substitution and narrowing go through this too, which is how
+    // `T & number` with `T := string` becomes `never`.
+    //
+    // Everything below reads only what an id and its Named/App wrappers show, never the
+    // body behind a Ref. Construction runs while declarations are still being resolved,
+    // when a Ref reads as an empty object, and a decision that read it would be written
+    // into the intern table under an id nothing invalidates. What needs a body is
+    // answered later and on demand, see intersection_reduces_to_never.
+    pub fn alloc_intersection(&mut self, members: Vec<TypeId>) -> Result<TypeId, TooComplex> {
+        // `never` ends it, and a nested intersection is spread into its members in place.
+        let mut flat: Vec<TypeId> = Vec::with_capacity(members.len());
+        for member in members {
+            match self.shallow(member) {
+                Type::Never => return Ok(self.never()),
+                Type::Intersection(inner) => flat.extend(inner.iter().copied()),
+                _ => flat.push(member),
+            }
+        }
+
+        // `unknown` adds nothing. The error type then `any` absorb the rest, the error
+        // type first so a failure that was already reported stays the sentinel.
+        flat.retain(|&member| !matches!(self.shallow(member), Type::Unknown));
+        if flat
+            .iter()
+            .any(|&member| matches!(self.shallow(member), Type::Error))
+        {
+            return Ok(self.error());
+        }
+        if flat
+            .iter()
+            .any(|&member| matches!(self.shallow(member), Type::Any))
+        {
+            return Ok(self.any());
+        }
+
+        if self.primitives_cancel(&mut flat) {
+            return Ok(self.never());
+        }
+
+        // A union among the members is distributed: `(A | B) & C` is `A & C | B & C`, in
+        // written order. Each choice is built by this same function, so what is left to
+        // reduce after one member is replaced gets reduced.
+        if let Some(position) = flat
+            .iter()
+            .position(|&member| matches!(self.shallow(member), Type::Union(_)))
+        {
+            let size = flat
+                .iter()
+                .try_fold(1usize, |size, &member| match self.shallow(member) {
+                    Type::Union(alternatives) => size.checked_mul(alternatives.len()),
+                    _ => Some(size),
+                });
+            if size.is_none_or(|size| size >= MAX_INTERSECTION_DISTRIBUTION) {
+                return Err(TooComplex);
+            }
+            let Type::Union(alternatives) = self.shallow(flat[position]) else {
+                unreachable!("position found a union");
+            };
+            let alternatives = alternatives.clone();
+            let mut results = Vec::with_capacity(alternatives.len());
+            for alternative in alternatives {
+                let mut choice = flat.clone();
+                choice[position] = alternative;
+                results.push(self.alloc_intersection(choice)?);
+            }
+            // alloc_union keeps its members in the reverse of the order it is given, so
+            // handing it the results as they came would flip the union's stored order,
+            // and `("a" | "b") & string` would be a different id from `"a" | "b"` though
+            // it is the same type. Reversed, the result keeps the order of the union it
+            // was distributed from.
+            results.reverse();
+            return Ok(self.alloc_union(results));
+        }
+
+        // An anonymous `{}` says nothing next to another object-like member: `A & {}` is
+        // `A`. Next to a primitive or a type parameter it still means "not null", so
+        // `string & {}` and `T & {}` stay as they are.
+        if flat.len() > 1
+            && flat.iter().any(|&member| {
+                self.is_object_like(member) && !self.is_anonymous_empty_object(member)
+            })
+        {
+            flat.retain(|&member| !self.is_anonymous_empty_object(member));
+        }
+
+        // By id, keeping the first, and never structurally: structural equality reads
+        // bodies.
+        let mut unique: Vec<TypeId> = Vec::with_capacity(flat.len());
+        for member in flat {
+            if !unique.contains(&member) {
+                unique.push(member);
+            }
+        }
+
+        Ok(match unique.len() {
+            0 => self.unknown(),
+            1 => unique[0],
+            _ => self.alloc(Type::Intersection(unique)),
+        })
+    }
+
+    // Primitive and literal members that cancel each other, or collapse. True when the
+    // whole intersection is empty. Otherwise `flat` is left holding the more specific
+    // member of any pair that overlaps: `string & "a"` keeps `"a"`, and `void & undefined`
+    // keeps `undefined`.
+    //
+    // An object-like member never cancels a primitive, so a branded primitive such as
+    // `string & { __brand: "id" }` stays an intersection. `null` and `undefined` are the
+    // exception: nothing but themselves, `void` (for undefined) and a type parameter,
+    // which could be anything, shares a value with them. A union is left for the
+    // distribution step, since `null & (null | A)` is `null`.
+    fn primitives_cancel(&self, flat: &mut Vec<TypeId>) -> bool {
+        use crate::subtyping::{PrimitiveDomain, is_disjoint, primitive_domain};
+
+        for (index, &a) in flat.iter().enumerate() {
+            for &b in &flat[index + 1..] {
+                let both_primitive = primitive_domain(self.shallow(a)).is_some()
+                    && primitive_domain(self.shallow(b)).is_some();
+                if both_primitive && is_disjoint(self, a, b) {
+                    return true;
+                }
+            }
+        }
+
+        let only_themselves = |member: &Type, allowed: &[fn(&Type) -> bool]| {
+            matches!(member, Type::GenericParameter(..) | Type::Union(_))
+                || allowed.iter().any(|allows| allows(member))
+        };
+        for &member in flat.iter() {
+            let others_ok = match self.shallow(member) {
+                Type::Null => flat.iter().all(|&other| {
+                    only_themselves(self.shallow(other), &[|ty| matches!(ty, Type::Null)])
+                }),
+                Type::Undefined => flat.iter().all(|&other| {
+                    only_themselves(
+                        self.shallow(other),
+                        &[|ty| matches!(ty, Type::Undefined | Type::Void)],
+                    )
+                }),
+                _ => true,
+            };
+            if !others_ok {
+                return true;
+            }
+        }
+
+        // Of two members in the same domain the literal wins over its primitive, and
+        // `undefined` over `void`.
+        let literal_domains: Vec<PrimitiveDomain> = flat
+            .iter()
+            .filter(|&&member| {
+                matches!(
+                    self.shallow(member),
+                    Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_)
+                )
+            })
+            .filter_map(|&member| primitive_domain(self.shallow(member)))
+            .collect();
+        let has_undefined = flat
+            .iter()
+            .any(|&member| matches!(self.shallow(member), Type::Undefined));
+        flat.retain(|&member| {
+            let ty = self.shallow(member);
+            let is_plain_primitive = matches!(ty, Type::String | Type::Number | Type::Boolean);
+            let covered =
+                primitive_domain(ty).is_some_and(|domain| literal_domains.contains(&domain));
+            !(is_plain_primitive && covered) && !(has_undefined && matches!(ty, Type::Void))
+        });
+        false
+    }
+
+    // Looks through Named and App wrappers and stops at a Ref. That is the whole of what
+    // alloc_intersection may know about a member: a wrapper's contents exist when the
+    // wrapper does, and a Ref's body may not exist yet.
+    fn shallow(&self, id: TypeId) -> &Type {
+        let mut current = id;
+        loop {
+            match &self.types[current.0 as usize] {
+                Type::Named(_, inner) => current = *inner,
+                Type::App(_, _, body) => current = *body,
+                other => return other,
+            }
+        }
+    }
+
+    // Whether a member is a function, an array, an object or a declaration: the kinds a
+    // primitive can be branded with and that an empty `{}` adds nothing to. A type
+    // parameter is not, since `T & {}` has to stay.
+    fn is_object_like(&self, id: TypeId) -> bool {
+        matches!(
+            self.shallow(id),
+            Type::Object(_) | Type::Function(_) | Type::Array(_) | Type::Ref(_)
+        )
+    }
+
+    // The anonymous `{}` itself, read from the member's own node. A Promise<number> is an
+    // App over an empty body but is not the empty object, so this does not look through
+    // wrappers.
+    fn is_anonymous_empty_object(&self, id: TypeId) -> bool {
+        matches!(&self.types[id.0 as usize], Type::Object(object) if object.properties.is_empty())
+    }
+
+    // Whether an intersection of objects is empty because two members give the same
+    // property types that cannot meet and one of them is a literal: `{ kind: "a" } & { kind:
+    // "b" }`. tsc keeps such an intersection as it is and reduces it when something asks,
+    // which is why it prints as `never` while still being an intersection. So does this:
+    // the answer reads member bodies, which alloc_intersection must not, and it is
+    // cached per id until a declaration is resolved (see empty_intersections).
+    //
+    // A property whose types are not literals is not a discriminant: `{ x: number } & {
+    // x: string }` is not empty, it has an `x` of type never.
+    pub(crate) fn intersection_reduces_to_never(&self, id: TypeId) -> bool {
+        let Type::Intersection(members) = self.get(id) else {
+            return false;
+        };
+        if let Some(&known) = self.empty_intersections.borrow().get(&id) {
+            return known;
+        }
+
+        let objects: Vec<&crate::types::ObjectType> = members
+            .iter()
+            .filter_map(|&member| match self.get(member) {
+                Type::Object(object) => Some(object),
+                _ => None,
+            })
+            .collect();
+
+        let is_unit = |type_id: TypeId| match self.get(type_id) {
+            Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => true,
+            Type::Union(alternatives) => alternatives.iter().any(|&alternative| {
+                matches!(
+                    self.get(alternative),
+                    Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_)
+                )
+            }),
+            _ => false,
+        };
+
+        let mut empty = false;
+        'pairs: for (index, left) in objects.iter().enumerate() {
+            for right in &objects[index + 1..] {
+                for property in left.properties.iter() {
+                    let Some(other) = right.properties.iter().find(|p| p.name == property.name)
+                    else {
+                        continue;
+                    };
+                    if crate::subtyping::is_disjoint(self, property.type_id, other.type_id)
+                        && (is_unit(property.type_id) || is_unit(other.type_id))
+                    {
+                        empty = true;
+                        break 'pairs;
+                    }
+                }
+            }
+        }
+
+        self.empty_intersections.borrow_mut().insert(id, empty);
+        empty
     }
 
     // The type behind `id`. A declaration's Ref reads as its body once the body exists
@@ -507,6 +788,7 @@ impl TypeArena {
         // Two unfinished declarations compare equal (both read as empty objects), and
         // that answer stops being true the moment either one is resolved.
         self.equality_cache.clear();
+        self.empty_intersections.get_mut().clear();
     }
 
     // The declaration could not be resolved. Its Ref keeps reading as an empty object.
@@ -659,6 +941,17 @@ impl TypeArena {
                     })
             }
 
+            // As a relation an intersection is a set too: `A & B` and `B & A` are two ids
+            // but one type. Only the order of call signatures tells them apart, and that
+            // is not a question of equality. Members are deduplicated by alloc_intersection.
+            (Type::Intersection(xs), Type::Intersection(ys)) => {
+                xs.len() == ys.len()
+                    && xs.iter().all(|&x| {
+                        ys.iter()
+                            .any(|&y| self.structurally_equal_inner(x, y, seen))
+                    })
+            }
+
             (Type::GenericParameter(x, _, _), Type::GenericParameter(y, _, _)) => x == y,
 
             _ => false,
@@ -682,6 +975,7 @@ impl TypeArena {
         self.interned_unions.clear();
         self.param_scan.get_mut().clear();
         self.equality_cache.clear();
+        self.empty_intersections.get_mut().clear();
         debug_assert_eq!(self.types.len() as u32, FIXED_SLOTS);
     }
 
@@ -1680,5 +1974,456 @@ mod tests {
             );
             assert_eq!(arena.display_name(id), None);
         }
+    }
+}
+
+// The construction rules and the lazy reduction of intersections, one test per rule in
+// LLD 1.13. They go through alloc_intersection, which is the only way to build the node.
+#[cfg(test)]
+mod intersection_tests {
+    use super::*;
+    use crate::types::{ObjectType, PropertyEntry, TypeParameterId};
+
+    fn property(name: &str, type_id: TypeId) -> PropertyEntry {
+        PropertyEntry {
+            name: name.into(),
+            type_id,
+            optional: false,
+            is_method: false,
+        }
+    }
+
+    // `{ <name>: <type_id> }`, shared through alloc() like every anonymous shape.
+    fn shape(arena: &mut TypeArena, name: &str, type_id: TypeId) -> TypeId {
+        arena.alloc(Type::Object(ObjectType::new(vec![property(name, type_id)])))
+    }
+
+    fn literal(arena: &mut TypeArena, text: &str) -> TypeId {
+        arena.alloc(Type::StringLiteral(text.to_string()))
+    }
+
+    fn parameter(arena: &mut TypeArena, name: &str, at: u32) -> TypeId {
+        arena.alloc(Type::GenericParameter(
+            TypeParameterId::new(at, 0),
+            name.into(),
+            None,
+        ))
+    }
+
+    fn members(arena: &TypeArena, id: TypeId) -> Vec<TypeId> {
+        match arena.get(id) {
+            Type::Intersection(members) => members.clone(),
+            other => panic!("expected an intersection, found {other:?}"),
+        }
+    }
+
+    fn build(arena: &mut TypeArena, parts: &[TypeId]) -> TypeId {
+        arena
+            .alloc_intersection(parts.to_vec())
+            .expect("this intersection is small enough to build")
+    }
+
+    // Rule 1: the written order is the identity.
+    #[test]
+    fn two_orders_are_two_ids_and_one_order_is_one_id() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let string = arena.string();
+        let a = shape(&mut arena, "a", number);
+        let b = shape(&mut arena, "b", string);
+
+        let ab = build(&mut arena, &[a, b]);
+        let ba = build(&mut arena, &[b, a]);
+        assert_ne!(ab, ba);
+        assert_eq!(
+            build(&mut arena, &[a, b]),
+            ab,
+            "the same list is the same id"
+        );
+        assert_eq!(members(&arena, ab), [a, b]);
+        assert_eq!(members(&arena, ba), [b, a]);
+    }
+
+    // The relation view of the same two ids: equal, though not identical.
+    #[test]
+    fn as_a_relation_the_two_orders_are_one_type() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let a = shape(&mut arena, "a", number);
+        let b = shape(&mut arena, "b", string);
+        let ab = build(&mut arena, &[a, b]);
+        let ba = build(&mut arena, &[b, a]);
+        assert!(arena.structurally_equal(ab, ba));
+    }
+
+    #[test]
+    fn a_nested_intersection_is_spread_into_its_members() {
+        let mut arena = TypeArena::new();
+        let (number, string, boolean) = (arena.number(), arena.string(), arena.boolean());
+        let a = shape(&mut arena, "a", number);
+        let b = shape(&mut arena, "b", string);
+        let c = shape(&mut arena, "c", boolean);
+
+        let ab = build(&mut arena, &[a, b]);
+        let nested = build(&mut arena, &[ab, c]);
+        assert_eq!(nested, build(&mut arena, &[a, b, c]));
+        assert_eq!(members(&arena, nested), [a, b, c]);
+    }
+
+    // `type AB = A & B; AB & C` is `A & B & C`: the alias is a wrapper, and a wrapper's
+    // contents are known when it exists.
+    #[test]
+    fn an_alias_of_an_intersection_is_flattened_like_the_intersection_itself() {
+        let mut arena = TypeArena::new();
+        let (number, string, boolean) = (arena.number(), arena.string(), arena.boolean());
+        let a = shape(&mut arena, "a", number);
+        let b = shape(&mut arena, "b", string);
+        let c = shape(&mut arena, "c", boolean);
+
+        let ab = build(&mut arena, &[a, b]);
+        let slot = arena.alloc_name("AB");
+        let alias = arena.alloc_named(slot, ab);
+        assert_eq!(
+            build(&mut arena, &[alias, c]),
+            build(&mut arena, &[a, b, c])
+        );
+    }
+
+    #[test]
+    fn unknown_adds_nothing_and_only_unknown_is_unknown() {
+        let mut arena = TypeArena::new();
+        let (number, unknown) = (arena.number(), arena.unknown());
+        let a = shape(&mut arena, "a", number);
+        assert_eq!(build(&mut arena, &[a, unknown]), a);
+        assert_eq!(build(&mut arena, &[unknown, unknown]), unknown);
+        assert_eq!(build(&mut arena, &[]), unknown);
+    }
+
+    #[test]
+    fn never_wins_even_over_any_and_any_wins_over_the_rest() {
+        let mut arena = TypeArena::new();
+        let (number, any, never) = (arena.number(), arena.any(), arena.never());
+        let a = shape(&mut arena, "a", number);
+        assert_eq!(build(&mut arena, &[a, never]), never);
+        assert_eq!(build(&mut arena, &[any, never]), never);
+        assert_eq!(build(&mut arena, &[never, any]), never);
+        assert_eq!(build(&mut arena, &[any, a]), any);
+    }
+
+    // An error that was already reported stays the sentinel instead of turning into `any`.
+    #[test]
+    fn the_error_type_is_kept_over_any() {
+        let mut arena = TypeArena::new();
+        let (any, error) = (arena.any(), arena.error());
+        assert_eq!(build(&mut arena, &[any, error]), error);
+    }
+
+    // Rule 5: a literal is more specific than its own primitive.
+    #[test]
+    fn a_literal_wins_over_its_primitive() {
+        let mut arena = TypeArena::new();
+        let (string, number, boolean) = (arena.string(), arena.number(), arena.boolean());
+        let a = literal(&mut arena, "a");
+        let one = arena.alloc(Type::NumberLiteral(1.0));
+        let truth = arena.alloc(Type::BooleanLiteral(true));
+
+        assert_eq!(build(&mut arena, &[a, string]), a);
+        assert_eq!(build(&mut arena, &[string, a]), a);
+        assert_eq!(build(&mut arena, &[one, number]), one);
+        assert_eq!(build(&mut arena, &[truth, boolean]), truth);
+    }
+
+    #[test]
+    fn primitives_and_literals_that_cannot_meet_are_never() {
+        let mut arena = TypeArena::new();
+        let (string, number, never) = (arena.string(), arena.number(), arena.never());
+        let (a, b) = (literal(&mut arena, "a"), literal(&mut arena, "b"));
+        let one = arena.alloc(Type::NumberLiteral(1.0));
+        let branded = shape(&mut arena, "z", number);
+
+        assert_eq!(build(&mut arena, &[string, number]), never);
+        assert_eq!(build(&mut arena, &[a, b]), never);
+        assert_eq!(build(&mut arena, &[a, number]), never);
+        assert_eq!(build(&mut arena, &[one, string]), never);
+        // Anywhere in the list: an object does not rescue two primitives that cannot meet.
+        assert_eq!(build(&mut arena, &[number, string, branded]), never);
+    }
+
+    // `string & { __brand: "id" }` is how a branded primitive is written, so an object
+    // never cancels a primitive.
+    #[test]
+    fn a_branded_primitive_stays_an_intersection() {
+        let mut arena = TypeArena::new();
+        let string = arena.string();
+        let id = literal(&mut arena, "id");
+        let brand = shape(&mut arena, "__brand", id);
+        let branded = build(&mut arena, &[string, brand]);
+        assert_eq!(members(&arena, branded), [string, brand]);
+
+        let array = arena.alloc(Type::Array(string));
+        let built1 = build(&mut arena, &[string, array]);
+        assert_eq!(members(&arena, built1), [string, array]);
+    }
+
+    #[test]
+    fn null_and_undefined_share_a_value_with_nothing_but_themselves() {
+        let mut arena = TypeArena::new();
+        let (null, undefined, void, never) =
+            (arena.null(), arena.undefined(), arena.void(), arena.never());
+        let (number, string) = (arena.number(), arena.string());
+        let object = shape(&mut arena, "a", number);
+        let t = parameter(&mut arena, "T", 1);
+
+        assert_eq!(build(&mut arena, &[null, object]), never);
+        assert_eq!(build(&mut arena, &[undefined, object]), never);
+        assert_eq!(build(&mut arena, &[null, undefined]), never);
+        assert_eq!(build(&mut arena, &[null, string]), never);
+        // `undefined & void` is `undefined`, the more specific of the two.
+        assert_eq!(build(&mut arena, &[void, undefined]), undefined);
+        assert_eq!(build(&mut arena, &[undefined, void]), undefined);
+        // A type parameter could be null, so it is kept.
+        let built2 = build(&mut arena, &[null, t]);
+        assert_eq!(members(&arena, built2), [null, t]);
+    }
+
+    // tsc: `void & A` stays, `void & string` is never.
+    #[test]
+    fn void_is_kept_next_to_an_object_and_cancels_against_another_primitive() {
+        let mut arena = TypeArena::new();
+        let (void, string, number, never) =
+            (arena.void(), arena.string(), arena.number(), arena.never());
+        let object = shape(&mut arena, "a", number);
+        let built3 = build(&mut arena, &[void, object]);
+        assert_eq!(members(&arena, built3), [void, object]);
+        assert_eq!(build(&mut arena, &[void, string]), never);
+    }
+
+    // Rule 7.
+    #[test]
+    fn an_empty_object_is_dropped_next_to_an_object_but_not_next_to_a_primitive() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let empty = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+        let object = shape(&mut arena, "a", number);
+        let function = arena.alloc(Type::Function(crate::types::FunctionType {
+            params: Vec::new(),
+            return_type: number,
+            is_untyped: false,
+        }));
+        let t = parameter(&mut arena, "T", 1);
+
+        assert_eq!(build(&mut arena, &[object, empty]), object);
+        assert_eq!(build(&mut arena, &[empty, function]), function);
+        assert_eq!(build(&mut arena, &[empty, empty]), empty);
+        // `string & {}` and `T & {}` mean "not null", so the `{}` stays.
+        let built4 = build(&mut arena, &[string, empty]);
+        assert_eq!(members(&arena, built4), [string, empty]);
+        let built5 = build(&mut arena, &[t, empty]);
+        assert_eq!(members(&arena, built5), [t, empty]);
+    }
+
+    // A Promise<number> is an App over an empty body. It is not the anonymous `{}`.
+    #[test]
+    fn an_application_over_an_empty_body_is_not_mistaken_for_the_empty_object() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let body = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+        let slot = arena.builtin_slot("Promise");
+        let promise = arena.alloc_app(slot, vec![number], body);
+        let object = shape(&mut arena, "a", string);
+
+        let both = build(&mut arena, &[promise, object]);
+        assert_eq!(members(&arena, both), [promise, object]);
+    }
+
+    #[test]
+    fn duplicates_are_removed_by_id_and_the_first_one_stays_first() {
+        let mut arena = TypeArena::new();
+        let (number, string, boolean) = (arena.number(), arena.string(), arena.boolean());
+        let a = shape(&mut arena, "a", number);
+        let b = shape(&mut arena, "b", string);
+        let c = shape(&mut arena, "c", boolean);
+
+        let deduped = build(&mut arena, &[b, a, b, c, a]);
+        assert_eq!(members(&arena, deduped), [b, a, c]);
+        assert_eq!(
+            build(&mut arena, &[a, a]),
+            a,
+            "one member left is that member"
+        );
+    }
+
+    // Rule 6.
+    #[test]
+    fn a_union_is_distributed_and_member_order_inside_each_choice_is_the_written_one() {
+        let mut arena = TypeArena::new();
+        let (number, string, boolean) = (arena.number(), arena.string(), arena.boolean());
+        let a = shape(&mut arena, "a", number);
+        let b = shape(&mut arena, "b", string);
+        let c = shape(&mut arena, "c", boolean);
+        let a_or_b = arena.alloc_union(vec![a, b]);
+
+        let distributed = build(&mut arena, &[a_or_b, c]);
+        let ac = build(&mut arena, &[a, c]);
+        let bc = build(&mut arena, &[b, c]);
+        let expected = arena.alloc_union(vec![ac, bc]);
+        assert_eq!(distributed, expected);
+
+        let reversed = build(&mut arena, &[c, a_or_b]);
+        let ca = build(&mut arena, &[c, a]);
+        let cb = build(&mut arena, &[c, b]);
+        let expected_reversed = arena.alloc_union(vec![ca, cb]);
+        assert_eq!(reversed, expected_reversed);
+        assert_ne!(distributed, reversed);
+    }
+
+    // Each choice is built by the same function, so what is left to reduce is reduced.
+    #[test]
+    fn distribution_reduces_each_choice() {
+        let mut arena = TypeArena::new();
+        let string = arena.string();
+        let (a, b, c) = (
+            literal(&mut arena, "a"),
+            literal(&mut arena, "b"),
+            literal(&mut arena, "c"),
+        );
+        let abc = arena.alloc_union(vec![a, b, c]);
+        assert_eq!(build(&mut arena, &[abc, string]), abc);
+
+        let ab = arena.alloc_union(vec![a, b]);
+        let bc = arena.alloc_union(vec![b, c]);
+        assert_eq!(build(&mut arena, &[ab, bc]), b);
+    }
+
+    #[test]
+    fn a_distribution_that_is_too_large_is_refused() {
+        let mut arena = TypeArena::new();
+        // Six unions of ten distinct literals each: 10^6 combinations.
+        let unions: Vec<TypeId> = (0..6)
+            .map(|set| {
+                let literals: Vec<TypeId> = (0..10)
+                    .map(|index| literal(&mut arena, &format!("{set}_{index}")))
+                    .collect();
+                arena.alloc_union(literals)
+            })
+            .collect();
+        assert_eq!(arena.alloc_intersection(unions), Err(TooComplex));
+    }
+
+    #[test]
+    fn a_type_parameter_is_an_opaque_member() {
+        let mut arena = TypeArena::new();
+        let (unknown, never) = (arena.unknown(), arena.never());
+        let t = parameter(&mut arena, "T", 1);
+        let u = parameter(&mut arena, "U", 2);
+
+        let built6 = build(&mut arena, &[t, u]);
+        assert_eq!(members(&arena, built6), [t, u]);
+        assert_eq!(build(&mut arena, &[t, unknown]), t);
+        assert_eq!(build(&mut arena, &[t, t]), t);
+        assert_eq!(build(&mut arena, &[t, never]), never);
+    }
+
+    // The point of rule 2: construction decides from ids and wrappers, so an answer made
+    // while a declaration was unresolved is the answer after it is resolved.
+    #[test]
+    fn construction_gives_the_same_answer_before_and_after_a_declaration_is_resolved() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let empty = arena.alloc(Type::Object(ObjectType::new(Vec::new())));
+        let declaration = arena.alloc_ref();
+
+        let with_primitive = build(&mut arena, &[string, declaration]);
+        let with_empty = build(&mut arena, &[empty, declaration]);
+
+        let body = shape(&mut arena, "a", number);
+        arena.resolve_ref(declaration, body);
+
+        assert_eq!(build(&mut arena, &[string, declaration]), with_primitive);
+        assert_eq!(build(&mut arena, &[empty, declaration]), with_empty);
+        assert_eq!(
+            with_empty, declaration,
+            "`{{}} & Declaration` is the declaration"
+        );
+        assert_eq!(members(&arena, with_primitive), [string, declaration]);
+    }
+
+    // Reduction. tsc keeps `{ kind: "a" } & { kind: "b" }` as an intersection and reduces
+    // it when something asks.
+    #[test]
+    fn a_discriminant_conflict_is_never_but_the_node_stays_an_intersection() {
+        let mut arena = TypeArena::new();
+        let (a, b) = (literal(&mut arena, "a"), literal(&mut arena, "b"));
+        let kind_a = shape(&mut arena, "kind", a);
+        let kind_b = shape(&mut arena, "kind", b);
+
+        let both = build(&mut arena, &[kind_a, kind_b]);
+        assert!(matches!(arena.get(both), Type::Intersection(_)));
+        assert!(arena.intersection_reduces_to_never(both));
+    }
+
+    #[test]
+    fn a_conflict_between_types_that_are_not_literals_is_not_a_discriminant() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let x_number = shape(&mut arena, "x", number);
+        let x_string = shape(&mut arena, "x", string);
+        let both = build(&mut arena, &[x_number, x_string]);
+        assert!(!arena.intersection_reduces_to_never(both));
+    }
+
+    #[test]
+    fn members_that_agree_or_do_not_overlap_are_not_empty() {
+        let mut arena = TypeArena::new();
+        let (a, number) = (literal(&mut arena, "a"), arena.number());
+        let kind_a = shape(&mut arena, "kind", a);
+        let size = shape(&mut arena, "size", number);
+        let both = build(&mut arena, &[kind_a, size]);
+        assert!(!arena.intersection_reduces_to_never(both));
+        assert!(
+            !arena.intersection_reduces_to_never(kind_a),
+            "not an intersection"
+        );
+    }
+
+    // A union of literals is a discriminant too.
+    #[test]
+    fn a_property_of_overlapping_literal_unions_is_not_a_conflict_and_a_disjoint_one_is() {
+        let mut arena = TypeArena::new();
+        let (a, b, c) = (
+            literal(&mut arena, "a"),
+            literal(&mut arena, "b"),
+            literal(&mut arena, "c"),
+        );
+        let a_or_b = arena.alloc_union(vec![a, b]);
+        let b_or_c = arena.alloc_union(vec![b, c]);
+        let only_c = shape(&mut arena, "kind", c);
+        let left = shape(&mut arena, "kind", a_or_b);
+        let right = shape(&mut arena, "kind", b_or_c);
+
+        let overlapping = build(&mut arena, &[left, right]);
+        assert!(!arena.intersection_reduces_to_never(overlapping));
+        let disjoint = build(&mut arena, &[left, only_c]);
+        assert!(arena.intersection_reduces_to_never(disjoint));
+    }
+
+    // The reduction reads bodies, so an answer given while a declaration was unresolved
+    // must not survive its resolution (empty_intersections is emptied by resolve_ref).
+    #[test]
+    fn the_reduction_is_asked_again_after_a_declaration_is_resolved() {
+        let mut arena = TypeArena::new();
+        let (a, b) = (literal(&mut arena, "a"), literal(&mut arena, "b"));
+        let kind_a = shape(&mut arena, "kind", a);
+        let kind_b = shape(&mut arena, "kind", b);
+        let declaration = arena.alloc_ref();
+
+        let both = build(&mut arena, &[declaration, kind_a]);
+        assert!(
+            !arena.intersection_reduces_to_never(both),
+            "unresolved reads as `{{}}`"
+        );
+
+        arena.resolve_ref(declaration, kind_b);
+        assert!(arena.intersection_reduces_to_never(both));
     }
 }

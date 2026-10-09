@@ -214,8 +214,13 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
         }
 
         Type::Array(element) => {
-            // `A | B[]` reads as `A | (B[])`, not what an array of a union means.
-            let needs_parens = matches!(arena.get(*element), Type::Union(_));
+            // `A | B[]` reads as `A | (B[])`, not what an array of a union means, and
+            // `(A & B)[]` is not `A & B[]` either. A named intersection prints as its name.
+            let needs_parens = match arena.get(*element) {
+                Type::Union(_) => true,
+                Type::Intersection(_) => !arena.is_named(*element),
+                _ => false,
+            };
             if needs_parens {
                 out.push('(');
                 write_type(arena, *element, out, depth - 1);
@@ -232,6 +237,31 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
                     out.push_str(" | ");
                 }
                 write_type(arena, member, out, depth - 1);
+            }
+        }
+
+        // In written order, since that is the identity (LLD 1.13); a function member is
+        // parenthesized, `(() => void) & A`, as tsc writes it. One that reduces to never
+        // because its members disagree about a discriminant prints as `never`, which is
+        // how tsc shows an intersection it has not stopped treating as an intersection.
+        Type::Intersection(members) => {
+            if arena.intersection_reduces_to_never(type_id) {
+                out.push_str("never");
+                return;
+            }
+            for (index, &member) in members.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(" & ");
+                }
+                let parenthesize =
+                    matches!(arena.get(member), Type::Function(_)) && !arena.is_named(member);
+                if parenthesize {
+                    out.push('(');
+                }
+                write_type(arena, member, out, depth - 1);
+                if parenthesize {
+                    out.push(')');
+                }
             }
         }
 

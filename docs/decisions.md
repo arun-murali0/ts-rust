@@ -18,6 +18,7 @@ The design is in `HLD.md` and `LLD.md`. This page is the short list of what was 
 | 10 | Intersection identity is ordered, deduplicated by id, never sorted | Call-signature order depends on member order, and callability needs a body that may not exist yet. tsc 5.9.3 does the same | A fixture shows overload order through intersections is not needed |
 | 11 | Intersection reduction has two levels: ids and wrappers at construction, bodies lazily | A decision that read a body while a declaration was unresolved would bake a wrong answer into the intern table | Never expected; it is the placeholder bug turned around |
 | 12 | A product of union sizes of 100,000 or more is TS2590 | Same cap as tsc | The ADR-6 budgets need it lower |
+| 13 | A new `Type` variant goes at the end of the enum | Adding `Intersection` after `Union` changed an unrelated diagnostic count from 5 to 1, so something depends on variant order | The dependency is found and removed |
 
 ## The module key, in one place
 

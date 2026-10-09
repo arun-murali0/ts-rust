@@ -257,7 +257,7 @@ Intersections touch interning (1.4), unresolved declarations (1.7), generics (1.
 2. Flatten: a member that is an intersection, seen through `Named` and `App` wrappers, is replaced by its members in place. A nested alias therefore prints flat.
 3. Remove `unknown`. If nothing remains the result is `unknown`.
 4. An `any` member gives `any`.
-5. Primitives and literals: two different primitive kinds give `never`; a literal with its own primitive gives the literal; two different literals give `never`; `null` or `undefined` with any member that is not itself gives `never`. An object-like member never cancels a primitive, so `string & { __brand: "x" }` stays an intersection.
+5. Primitives and literals (`void` is kept next to an object, `void & A`, and cancels only against another primitive, as in tsc 5.9.3): two different primitive kinds give `never`; a literal with its own primitive gives the literal; two different literals give `never`; `null` or `undefined` with any member that is not itself gives `never`. An object-like member never cancels a primitive, so `string & { __brand: "x" }` stays an intersection.
 6. Distribute: if a member, seen through wrappers, is a union, the result is the union of the intersections of each choice, in written order. Each choice is built by this same function, so `("a" | "b" | "c") & string` reduces choice by choice. If the product of the union sizes reaches 100,000 (a `never` factor counts as zero) the result is the error type and the diagnostic is TS2590, as in tsc.
 7. Drop an anonymous `{}` (an `Object` with no properties) when another object-like member is present.
 8. Deduplicate by id, keeping the first occurrence. Never structurally: structural equality reads bodies.

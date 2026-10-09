@@ -85,6 +85,32 @@ fn lookup_member(arena: &mut TypeArena, type_id: TypeId, property_name: &str) ->
             }
             Some(arena.alloc_union(found))
         }
+        // The opposite of a union: a value of `A & B` is an `A` and a `B`, so the members
+        // that have the property all contribute, and its type is the intersection of what
+        // they give (LLD 1.13). `{ a: number } & { a: string }` has an `a` of type
+        // `never`, and one member alone is enough for the property to exist. One whose
+        // members disagree about a discriminant is `never`, which has no properties.
+        Type::Intersection(members) => {
+            if arena.intersection_reduces_to_never(effective) {
+                return None;
+            }
+            let members = members.clone();
+            let mut found = Vec::with_capacity(members.len());
+            for member in members {
+                if let Some(property_type) = lookup_member(arena, member, property_name) {
+                    found.push(property_type);
+                }
+            }
+            match found.len() {
+                0 => None,
+                1 => Some(found[0]),
+                _ => Some(
+                    arena
+                        .alloc_intersection(found)
+                        .unwrap_or_else(|_| arena.error()),
+                ),
+            }
+        }
         _ => None,
     }
 }

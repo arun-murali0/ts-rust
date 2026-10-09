@@ -39,6 +39,12 @@ fn is_subtype_uncached(arena: &TypeArena, sub: TypeId, sup: TypeId, seen: &mut P
     match (arena.get(sub), arena.get(sup)) {
         (_, Type::Unknown) => true,
 
+        // An intersection whose members disagree about a discriminant has no values, so
+        // it is `never` and a subtype of everything. It is still an intersection node
+        // (see TypeArena::intersection_reduces_to_never for why), which is why this is
+        // asked here and not decided when it was built.
+        (Type::Intersection(_), _) if arena.intersection_reduces_to_never(sub) => true,
+
         // A type parameter stands for some type that satisfies its `extends`
         // bound, so whatever the bound is assignable to, the parameter is too:
         // `T extends string` can be returned as a string, passed where a string is
@@ -74,9 +80,43 @@ fn is_subtype_uncached(arena: &TypeArena, sub: TypeId, sup: TypeId, seen: &mut P
             .iter()
             .all(|&member| is_subtype_inner(arena, member, sup, seen)),
 
+        // To be an `A & B` a value has to be an `A` and a `B`: every member must accept
+        // it. Ahead of the arms below so that an intersection against an intersection
+        // is asked member by member.
+        (_, Type::Intersection(sup_members)) => sup_members
+            .iter()
+            .all(|&member| is_subtype_inner(arena, sub, member, seen)),
+
+        // An `A & B` is a subtype of sup when either member already is: it can do
+        // everything both can. Against a union both directions are tried, since the
+        // union may accept the whole intersection (`A & B` into `A | C`) or one member
+        // of it may fit inside the union (`A & B` into `(A | C)` because `A` does).
+        (Type::Intersection(sub_members), Type::Union(sup_members)) => {
+            sup_members
+                .iter()
+                .any(|&member| is_subtype_inner(arena, sub, member, seen))
+                || sub_members
+                    .iter()
+                    .any(|&member| is_subtype_inner(arena, member, sup, seen))
+        }
+
         (_, Type::Union(sup_members)) => sup_members
             .iter()
             .any(|&member| is_subtype_inner(arena, sub, member, seen)),
+
+        // Neither member of `{ a: number } & { b: string }` is assignable to `{ a:
+        // number; b: string }`, but together they are. So an object target is also
+        // asked of the members' properties taken as a whole.
+        (Type::Intersection(sub_members), Type::Object(target)) => {
+            sub_members
+                .iter()
+                .any(|&member| is_subtype_inner(arena, member, sup, seen))
+                || intersection_satisfies_object(arena, sub_members, target, seen)
+        }
+
+        (Type::Intersection(sub_members), _) => sub_members
+            .iter()
+            .any(|&member| is_subtype_inner(arena, member, sup, seen)),
 
         (Type::Function(a), Type::Function(b)) => function_is_subtype(arena, a, b, seen),
 
@@ -213,6 +253,36 @@ fn object_is_subtype(
     true
 }
 
+// Whether the members of an intersection, between them, give the target object everything
+// it asks for. For each property of the target some member must provide one whose type
+// fits, and it must be required if the target requires it: it is required in the
+// intersection when any member requires it. A property no member has is fine only when
+// the target made it optional.
+fn intersection_satisfies_object(
+    arena: &TypeArena,
+    members: &[TypeId],
+    target: &ObjectType,
+    seen: &mut PairStack,
+) -> bool {
+    target.properties.iter().all(|wanted| {
+        let provided: Vec<&crate::types::PropertyEntry> = members
+            .iter()
+            .filter_map(|&member| match arena.get(member) {
+                Type::Object(object) => object.properties.iter().find(|p| p.name == wanted.name),
+                _ => None,
+            })
+            .collect();
+        if provided.is_empty() {
+            return wanted.optional;
+        }
+        let required_here = provided.iter().any(|property| !property.optional);
+        (wanted.optional || required_here)
+            && provided
+                .iter()
+                .any(|property| property_is_subtype(arena, property.type_id, wanted, seen))
+    })
+}
+
 // A property's type against the target property. When the target was declared
 // with method syntax and both sides are functions, tsc's method rule applies
 // (bivariant parameters); anything else is ordinary subtyping. The rule follows
@@ -316,8 +386,8 @@ pub(crate) fn is_disjoint(arena: &TypeArena, a: TypeId, b: TypeId) -> bool {
     }
 }
 
-#[derive(PartialEq)]
-enum PrimitiveDomain {
+#[derive(PartialEq, Clone, Copy)]
+pub(crate) enum PrimitiveDomain {
     String,
     Number,
     Boolean,
@@ -327,7 +397,7 @@ enum PrimitiveDomain {
 
 // Which kind of primitive value a type holds, when it holds only one kind. `void` shares
 // a domain with `undefined` because undefined is assignable to void, so the two overlap.
-fn primitive_domain(ty: &Type) -> Option<PrimitiveDomain> {
+pub(crate) fn primitive_domain(ty: &Type) -> Option<PrimitiveDomain> {
     match ty {
         Type::String | Type::StringLiteral(_) => Some(PrimitiveDomain::String),
         Type::Number | Type::NumberLiteral(_) => Some(PrimitiveDomain::Number),
@@ -847,5 +917,196 @@ mod tests {
         assert!(!is_subtype(&arena, bounded, number));
         assert!(!is_subtype(&arena, string, bounded));
         assert!(!is_subtype(&arena, unbounded, string));
+    }
+}
+
+// Assignability to and from an intersection (LLD 1.13, "Relations"): a target needs every
+// member, a source needs some member or, for an object target, members that together
+// have what it asks for.
+#[cfg(test)]
+mod intersection_relation_tests {
+    use super::*;
+    use crate::types::{FunctionType, ObjectType, Param, PropertyEntry, TypeParameterId};
+
+    fn object(arena: &mut TypeArena, properties: &[(&str, TypeId, bool)]) -> TypeId {
+        let entries = properties
+            .iter()
+            .map(|&(name, type_id, optional)| PropertyEntry {
+                name: name.into(),
+                type_id,
+                optional,
+                is_method: false,
+            })
+            .collect();
+        arena.alloc(Type::Object(ObjectType::new(entries)))
+    }
+
+    fn function(arena: &mut TypeArena, parameter: TypeId, returns: TypeId) -> TypeId {
+        arena.alloc(Type::Function(FunctionType {
+            params: vec![Param {
+                type_id: parameter,
+                optional: false,
+                rest: false,
+                name: None,
+            }],
+            return_type: returns,
+            is_untyped: false,
+        }))
+    }
+
+    fn both(arena: &mut TypeArena, parts: &[TypeId]) -> TypeId {
+        arena
+            .alloc_intersection(parts.to_vec())
+            .expect("this intersection is small enough to build")
+    }
+
+    // `{ a: number }`, `{ b: string }` and their intersection.
+    fn pair(arena: &mut TypeArena) -> (TypeId, TypeId, TypeId) {
+        let (number, string) = (arena.number(), arena.string());
+        let a = object(arena, &[("a", number, false)]);
+        let b = object(arena, &[("b", string, false)]);
+        let ab = both(arena, &[a, b]);
+        (a, b, ab)
+    }
+
+    #[test]
+    fn a_source_has_to_satisfy_every_member_of_an_intersection_target() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let (a, _, ab) = pair(&mut arena);
+        let has_both = object(&mut arena, &[("a", number, false), ("b", string, false)]);
+
+        assert!(is_subtype(&arena, has_both, ab));
+        assert!(!is_subtype(&arena, a, ab), "it lacks `b`");
+    }
+
+    #[test]
+    fn an_intersection_is_a_subtype_of_each_of_its_members_and_of_nothing_it_lacks() {
+        let mut arena = TypeArena::new();
+        let boolean = arena.boolean();
+        let (a, b, ab) = pair(&mut arena);
+        let c = object(&mut arena, &[("c", boolean, false)]);
+
+        assert!(is_subtype(&arena, ab, a));
+        assert!(is_subtype(&arena, ab, b));
+        assert!(!is_subtype(&arena, ab, c));
+    }
+
+    // Neither `{ a }` nor `{ b }` is assignable to `{ a; b }`, but their intersection is.
+    #[test]
+    fn the_members_together_satisfy_an_object_none_of_them_satisfies_alone() {
+        let mut arena = TypeArena::new();
+        let (number, string, boolean) = (arena.number(), arena.string(), arena.boolean());
+        let (a, b, ab) = pair(&mut arena);
+        let wants_both = object(&mut arena, &[("a", number, false), ("b", string, false)]);
+        let wrong_type = object(&mut arena, &[("a", number, false), ("b", number, false)]);
+        let wants_more = object(&mut arena, &[("a", number, false), ("c", boolean, false)]);
+        let optional_extra = object(&mut arena, &[("a", number, false), ("c", boolean, true)]);
+
+        assert!(!is_subtype(&arena, a, wants_both));
+        assert!(!is_subtype(&arena, b, wants_both));
+        assert!(is_subtype(&arena, ab, wants_both));
+        assert!(!is_subtype(&arena, ab, wrong_type));
+        assert!(!is_subtype(&arena, ab, wants_more));
+        assert!(is_subtype(&arena, ab, optional_extra));
+    }
+
+    // A property is required in the intersection when any member requires it.
+    #[test]
+    fn a_property_is_required_if_any_member_requires_it() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let optional = object(&mut arena, &[("a", number, true)]);
+        let required = object(&mut arena, &[("a", number, false)]);
+        let wants_a = object(&mut arena, &[("a", number, false)]);
+
+        let only_optional = both(&mut arena, &[optional, optional]);
+        assert!(!is_subtype(&arena, only_optional, wants_a));
+        let mixed = both(&mut arena, &[optional, required]);
+        assert!(is_subtype(&arena, mixed, wants_a));
+    }
+
+    #[test]
+    fn an_intersection_into_a_union_goes_by_the_whole_or_by_a_member() {
+        let mut arena = TypeArena::new();
+        let (number, boolean) = (arena.number(), arena.boolean());
+        let (a, b, ab) = pair(&mut arena);
+        let c = object(&mut arena, &[("c", boolean, false)]);
+        let d = object(&mut arena, &[("d", number, false)]);
+
+        let a_or_c = arena.alloc_union(vec![a, c]);
+        let c_or_d = arena.alloc_union(vec![c, d]);
+        assert!(is_subtype(&arena, ab, a_or_c), "because it is an `a`");
+        let b_or_c = arena.alloc_union(vec![b, c]);
+        assert!(is_subtype(&arena, b, b_or_c));
+        assert!(!is_subtype(&arena, ab, c_or_d));
+    }
+
+    #[test]
+    fn an_intersection_that_can_have_no_value_is_a_subtype_of_everything() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let a = arena.alloc(Type::StringLiteral("a".into()));
+        let b = arena.alloc(Type::StringLiteral("b".into()));
+        let kind_a = object(&mut arena, &[("kind", a, false)]);
+        let kind_b = object(&mut arena, &[("kind", b, false)]);
+        let never_like = both(&mut arena, &[kind_a, kind_b]);
+
+        assert!(is_subtype(&arena, never_like, number));
+        assert!(is_subtype(&arena, never_like, kind_a));
+        assert!(!is_subtype(&arena, number, never_like));
+    }
+
+    #[test]
+    fn a_function_intersection_is_a_subtype_of_each_function_but_not_the_reverse() {
+        let mut arena = TypeArena::new();
+        let (number, string) = (arena.number(), arena.string());
+        let takes_number = function(&mut arena, number, string);
+        let takes_string = function(&mut arena, string, number);
+        let overloaded = both(&mut arena, &[takes_number, takes_string]);
+
+        assert!(is_subtype(&arena, overloaded, takes_number));
+        assert!(is_subtype(&arena, overloaded, takes_string));
+        assert!(!is_subtype(&arena, takes_number, overloaded));
+    }
+
+    #[test]
+    fn a_branded_primitive_goes_to_its_primitive_and_not_back() {
+        let mut arena = TypeArena::new();
+        let string = arena.string();
+        let id = arena.alloc(Type::StringLiteral("id".into()));
+        let brand = object(&mut arena, &[("__brand", id, false)]);
+        let user_id = both(&mut arena, &[string, brand]);
+
+        assert!(is_subtype(&arena, user_id, string));
+        assert!(!is_subtype(&arena, string, user_id));
+    }
+
+    #[test]
+    fn the_two_orders_of_an_intersection_are_assignable_both_ways() {
+        let mut arena = TypeArena::new();
+        let (a, b, ab) = pair(&mut arena);
+        let ba = both(&mut arena, &[b, a]);
+
+        assert_ne!(ab, ba);
+        assert!(is_subtype(&arena, ab, ba));
+        assert!(is_subtype(&arena, ba, ab));
+    }
+
+    #[test]
+    fn an_intersection_with_a_type_parameter_is_assignable_to_that_parameter() {
+        let mut arena = TypeArena::new();
+        let number = arena.number();
+        let t = arena.alloc(Type::GenericParameter(
+            TypeParameterId::new(1, 0),
+            "T".into(),
+            None,
+        ));
+        let a = object(&mut arena, &[("a", number, false)]);
+        let t_and_a = both(&mut arena, &[t, a]);
+
+        assert!(is_subtype(&arena, t_and_a, t));
+        assert!(is_subtype(&arena, t_and_a, a));
+        assert!(!is_subtype(&arena, t, t_and_a));
     }
 }

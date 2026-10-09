@@ -3,7 +3,7 @@ use oxc_semantic::Scoping;
 use oxc_span::{GetSpan, Span};
 
 use crate::arena::TypeId;
-use crate::types::Type;
+use crate::types::{FunctionType, Type};
 
 use super::super::context::CheckContext;
 use super::super::narrow::resolve_symbol_id;
@@ -141,6 +141,104 @@ pub(super) fn infer_new_expression_type(
     )
 }
 
+// A call through an intersection of functions uses the first member that accepts it, in the
+// order the members were written (LLD 1.13): `F1 & F2` called with an argument both accept
+// runs `F1`, and `F2 & F1` runs `F2`. There are no overloads elsewhere in this checker, so
+// this is the one place a callee has more than one signature.
+//
+// The argument types are inferred once here and whatever that reported is dropped; the
+// ordinary check of the member picked then infers and reports them again, so each problem
+// in an argument is still reported once. When no member accepts the call, the first one is
+// used and its errors are the ones reported. A spread argument is not probed: its length
+// is not known, so the first function member is used.
+fn pick_callable_member(
+    callee_type: TypeId,
+    arguments: &[oxc_ast::ast::Argument<'_>],
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> TypeId {
+    let Type::Intersection(members) = ctx.arena.get(callee_type).clone() else {
+        return callee_type;
+    };
+    if ctx.arena.intersection_reduces_to_never(callee_type) {
+        return callee_type;
+    }
+    let callable: Vec<TypeId> = members
+        .into_iter()
+        .filter(|&member| matches!(ctx.arena.get(member), Type::Function(_)))
+        .collect();
+    match callable.as_slice() {
+        [] => callee_type,
+        [only] => *only,
+        _ => {
+            let has_spread = arguments
+                .iter()
+                .any(|argument| matches!(argument, oxc_ast::ast::Argument::SpreadElement(_)));
+            if has_spread {
+                return callable[0];
+            }
+            let reported_before = ctx.diagnostics.len();
+            let argument_types: Vec<TypeId> = arguments
+                .iter()
+                .filter_map(|argument| argument.as_expression())
+                .map(|expression| infer_expression_type(expression, scoping, ctx))
+                .collect();
+            ctx.diagnostics.truncate(reported_before);
+
+            callable
+                .iter()
+                .copied()
+                .find(|&member| match ctx.arena.get(member) {
+                    Type::Function(function) => {
+                        accepts_arguments(&ctx.arena, function, &argument_types)
+                    }
+                    _ => false,
+                })
+                .unwrap_or(callable[0])
+        }
+    }
+}
+
+// Whether a call with these argument types fits the function: enough arguments, not too
+// many, and each one assignable to its parameter. A parameter that mentions a type
+// parameter is not judged here, since what it accepts depends on inference; arity decides.
+fn accepts_arguments(
+    arena: &crate::arena::TypeArena,
+    function: &FunctionType,
+    argument_types: &[TypeId],
+) -> bool {
+    if function.is_untyped {
+        return true;
+    }
+    let required = function
+        .params
+        .iter()
+        .filter(|param| !param.optional && !param.rest)
+        .count();
+    let rest = function.params.last().filter(|param| param.rest);
+    if argument_types.len() < required {
+        return false;
+    }
+    if rest.is_none() && argument_types.len() > function.params.len() {
+        return false;
+    }
+
+    argument_types.iter().enumerate().all(|(index, &argument)| {
+        let parameter = match function.params.get(index) {
+            Some(param) if !param.rest => param.type_id,
+            _ => match rest {
+                Some(rest) => match arena.get(rest.type_id) {
+                    Type::Array(element) => *element,
+                    _ => rest.type_id,
+                },
+                None => return true,
+            },
+        };
+        crate::semantic::contains_type_param(arena, parameter)
+            || crate::subtyping::is_subtype(arena, argument, parameter)
+    })
+}
+
 fn check_callable(
     callee_type: TypeId,
     site: CallSite<'_, '_>,
@@ -155,6 +253,8 @@ fn check_callable(
         callee_is_declaration,
         explicit_type_args,
     } = site;
+
+    let callee_type = pick_callable_member(callee_type, arguments, scoping, ctx);
 
     let Type::Function(function_type) = ctx.arena.get(callee_type).clone() else {
         // Any and Error both mean "do not report a second, likely-noisy error on

@@ -129,6 +129,10 @@ pub(super) fn find_unresolved_type_name(
             .types
             .iter()
             .find_map(|member| find_unresolved_type_name(member, scoping, namespace)),
+        TSType::TSIntersectionType(intersection) => intersection
+            .types
+            .iter()
+            .find_map(|member| find_unresolved_type_name(member, scoping, namespace)),
         TSType::TSTypeLiteral(literal) => literal.members.iter().find_map(|member| {
             let TSSignature::TSPropertySignature(property) = member else {
                 return None;

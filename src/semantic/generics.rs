@@ -229,6 +229,18 @@ fn infer_type_param_bindings_uncached(
                 seen,
             );
         }
+        // A parameter typed `T & { id: number }`. tsc infers into each member from the
+        // argument as a whole, so `T` here is the argument's own type, and a member
+        // with no type parameter in it has nothing to say.
+        Type::Intersection(param_members) => {
+            for member in param_members {
+                if contains_type_param(arena, member) {
+                    infer_type_param_bindings_inner(
+                        arena, member, arg_type, bindings, locked, cache, seen,
+                    );
+                }
+            }
+        }
         // A parameter typed `T | undefined`, `T | null` or the like. TypeScript
         // first sets aside whatever part of the argument a concrete member of the
         // union already accounts for (an `undefined` argument against `T |
@@ -501,6 +513,20 @@ impl Substitution<'_> {
                 }
                 arena.alloc_union(substituted)
             }
+            // Rebuilt through alloc_intersection, not allocated as it stands: replacing a
+            // parameter can create something that reduces (`T & number` with `T := string`
+            // is `never`), and a node that skipped the reduction would not be canonical.
+            // Distributing over a union that is too large cannot be reported from here,
+            // so it becomes the error type, which is already reported where it was written.
+            Type::Intersection(members) => {
+                let mut substituted = Vec::with_capacity(members.len());
+                for &m in &members {
+                    substituted.push(self.rewrite(arena, m, cut));
+                }
+                arena
+                    .alloc_intersection(substituted)
+                    .unwrap_or_else(|_| arena.error())
+            }
             _ => type_id,
         }
     }
@@ -573,7 +599,7 @@ fn ordered_generic_param_ids_inner(
                 ordered_generic_param_ids_inner(arena, property.type_id, out, visited);
             }
         }
-        Type::Union(members) => {
+        Type::Union(members) | Type::Intersection(members) => {
             for &member in members {
                 ordered_generic_param_ids_inner(arena, member, out, visited);
             }
@@ -635,7 +661,7 @@ fn scan_for_type_param(
             .properties
             .iter()
             .any(|p| scan_for_type_param(arena, p.type_id, open, &mut cut_below)),
-        Type::Union(members) => members
+        Type::Union(members) | Type::Intersection(members) => members
             .iter()
             .any(|&m| scan_for_type_param(arena, m, open, &mut cut_below)),
         _ => false,
@@ -734,7 +760,7 @@ fn collect_generic_param_constraints_inner(
                 );
             }
         }
-        Type::Union(members) => {
+        Type::Union(members) | Type::Intersection(members) => {
             for &member in members {
                 collect_generic_param_constraints_inner(arena, member, constraints, visited);
             }
