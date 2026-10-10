@@ -7,6 +7,7 @@ use crate::types::Type;
 
 use super::super::context::CheckContext;
 use super::super::narrow::narrow_to_non_nullish;
+use super::binary::{entity_name, nullish_members};
 use super::infer_expression_type;
 
 // Member access is modelled on Type::Object, on a union of types that all have the
@@ -115,6 +116,85 @@ fn lookup_member(arena: &mut TypeArena, type_id: TypeId, property_name: &str) ->
     }
 }
 
+// Problem: reading a property of `string | null` reported "Property 'length' does not
+// exist on type 'string | null'", but tsc reports the cause, not the symptom:
+// "'x' is possibly 'null'." (TS18047, 18048 for undefined, 18049 for both), and names the
+// object the way it is written (`x`, `user.address`). Without a name (a call result, an
+// index) tsc says "Object is possibly 'null'." (TS2531, 2532, 2533).
+// Picked: report that once on the object, then look the property up on what is left
+// once null and undefined are taken away, so a property that really is missing is still
+// reported and one that is present is not. A type that is only null or undefined has
+// nothing left, and tsc stops there, so the access is silently an error type.
+//
+// An optional chain is the one place that is not a mistake. `a?.b.c` is one chain: the
+// undefined that `a?.b` gains from short-circuiting is not something `.c` has to
+// guard against, and `a?.b` itself is the guard for `a`. Inside a chain the nullish
+// members are taken away without a report, and the second value returned says so, so
+// the caller can put `undefined` back on the result, as the chain would at runtime.
+// Cost: inside a chain a member that is genuinely `T | null` is not reported either,
+// since its type cannot be told apart from one the chain made nullish. That can only
+// miss an error, never invent one.
+pub(super) fn strip_nullish_object(
+    object: &Expression,
+    object_type: TypeId,
+    optional: bool,
+    ctx: &mut CheckContext<'_, '_>,
+) -> (TypeId, bool) {
+    let (has_null, has_undefined) = nullish_members(ctx, object_type);
+    if !has_null && !has_undefined {
+        return (object_type, false);
+    }
+    let rest = narrow_to_non_nullish(&mut ctx.arena, object_type);
+    if optional {
+        // `a?.b`: this link is the guard, and `with_optional` handles its own undefined.
+        return (object_type, false);
+    }
+    if chain_has_optional(object) {
+        return (rest, true);
+    }
+    ctx.error(
+        crate::diagnostic_messages::messages::possibly_nullish(
+            entity_name(object).as_deref(),
+            has_null,
+            has_undefined,
+        ),
+        object.span(),
+    );
+    if rest == ctx.arena.never() {
+        return (ctx.arena.error(), false);
+    }
+    (rest, false)
+}
+
+// The result of a link inside an optional chain gains `undefined`: if an earlier `?.`
+// short-circuited, the whole chain is undefined.
+pub(super) fn with_chain_undefined(
+    result: TypeId,
+    short_circuits: bool,
+    ctx: &mut CheckContext<'_, '_>,
+) -> TypeId {
+    if !short_circuits {
+        return result;
+    }
+    let undefined = ctx.arena.undefined();
+    ctx.arena.alloc_union(vec![result, undefined])
+}
+
+// True when `expr` is, or hangs off, an optional link (`a?.b`, `a?.[0]`, `a?.()`).
+// Parentheses end the chain, as they do in tsc: `(a?.b).c` is checked like any access.
+fn chain_has_optional(expr: &Expression) -> bool {
+    match expr {
+        Expression::StaticMemberExpression(member) => {
+            member.optional || chain_has_optional(&member.object)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            member.optional || chain_has_optional(&member.object)
+        }
+        Expression::CallExpression(call) => call.optional || chain_has_optional(&call.callee),
+        _ => false,
+    }
+}
+
 pub(super) fn infer_member_access_type_with_optional(
     object_type: TypeId,
     property_name: &str,
@@ -205,26 +285,35 @@ pub(super) fn infer_chain_element_type(
     use oxc_ast::ast::ChainElement;
 
     match element {
+        // The last link of a chain. `a?.b.c` ends here, on `.c`, whose object `a?.b` is
+        // `Inner | undefined`: the undefined is the chain's short-circuit, so it is taken
+        // away for the lookup and put back on the result (see strip_nullish_object).
         ChainElement::StaticMemberExpression(member) => {
             let object_type = infer_expression_type(&member.object, scoping, ctx);
-            infer_member_access_type_with_optional(
+            let (object_type, short_circuits) =
+                strip_nullish_object(&member.object, object_type, member.optional, ctx);
+            let property_type = infer_member_access_type_with_optional(
                 object_type,
                 &member.property.name,
                 member.optional,
                 member.span(),
                 ctx,
-            )
+            );
+            with_chain_undefined(property_type, short_circuits, ctx)
         }
         ChainElement::ComputedMemberExpression(member) => {
             let object_type = infer_expression_type(&member.object, scoping, ctx);
-            infer_computed_member_access_type(
+            let (object_type, short_circuits) =
+                strip_nullish_object(&member.object, object_type, member.optional, ctx);
+            let element_type = infer_computed_member_access_type(
                 object_type,
                 &member.expression,
                 member.optional,
                 member.span(),
                 scoping,
                 ctx,
-            )
+            );
+            with_chain_undefined(element_type, short_circuits, ctx)
         }
         _ => {
             ctx.warning(

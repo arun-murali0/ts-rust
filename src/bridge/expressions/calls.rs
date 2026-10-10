@@ -79,6 +79,12 @@ pub(super) fn infer_call_expression_type(
         }
         Expression::StaticMemberExpression(member) => {
             let object_type = infer_expression_type(&member.object, scoping, ctx);
+            let (object_type, _) = super::members::strip_nullish_object(
+                &member.object,
+                object_type,
+                member.optional,
+                ctx,
+            );
             let property_type =
                 infer_member_access_type(object_type, &member.property.name, member.span(), ctx);
             (property_type, member.property.name.to_string())

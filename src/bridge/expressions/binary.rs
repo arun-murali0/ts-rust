@@ -78,7 +78,7 @@ pub(super) fn strip_possibly_nullish(
     (result[0], result[1])
 }
 
-fn nullish_members(ctx: &CheckContext<'_, '_>, ty: TypeId) -> (bool, bool) {
+pub(super) fn nullish_members(ctx: &CheckContext<'_, '_>, ty: TypeId) -> (bool, bool) {
     let members = match ctx.arena.get(ty) {
         Type::Union(members) => members.clone(),
         _ => vec![ty],
@@ -92,7 +92,7 @@ fn nullish_members(ctx: &CheckContext<'_, '_>, ty: TypeId) -> (bool, bool) {
 
 // The source text tsc names an operand by: a plain name, or a chain of property
 // accesses on one (`o.v`, `this.items`). Anything else (a call, an index) has none.
-fn entity_name(expr: &Expression) -> Option<String> {
+pub(super) fn entity_name(expr: &Expression) -> Option<String> {
     match expr {
         Expression::Identifier(id) => Some(id.name.to_string()),
         Expression::ThisExpression(_) => Some("this".to_string()),
