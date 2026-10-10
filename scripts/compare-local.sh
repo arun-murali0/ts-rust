@@ -46,8 +46,12 @@ EXTRA_ARGS=("$@")
 
 DIAG_TOOL_DIR="scripts/ts-diag-tool"
 
-if [ ! -f "${DIAG_TOOL_DIR}/node_modules/typescript/package.json" ]; then
-  echo "Installing scripts/ts-diag-tool dependencies (typescript@5.9.3, pinned -- see its package.json)..." >&2
+# Reinstall when typescript is missing or is not the version package.json pins, so a checkout
+# that still has an older typescript in node_modules is brought up to date by itself.
+want_ts="$(node -p "require('./${DIAG_TOOL_DIR}/package.json').dependencies.typescript" 2>/dev/null)"
+have_ts="$(node -p "require('./${DIAG_TOOL_DIR}/node_modules/typescript/package.json').version" 2>/dev/null)"
+if [ "${want_ts}" != "${have_ts}" ]; then
+  echo "Installing scripts/ts-diag-tool dependencies (typescript@${want_ts}, pinned -- see its package.json)..." >&2
   (cd "${DIAG_TOOL_DIR}" && npm install --no-audit --no-fund) || {
     echo "error: npm install failed in ${DIAG_TOOL_DIR}" >&2
     exit 2
