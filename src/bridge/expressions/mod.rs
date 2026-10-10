@@ -102,27 +102,37 @@ pub fn infer_expression_type(
                 Some(narrowed) => narrowed,
                 None => {
                     let object_type = infer_expression_type(&member.object, scoping, ctx);
-                    infer_member_access_type_with_optional(
+                    let (object_type, short_circuits) = members::strip_nullish_object(
+                        &member.object,
+                        object_type,
+                        member.optional,
+                        ctx,
+                    );
+                    let property_type = infer_member_access_type_with_optional(
                         object_type,
                         &member.property.name,
                         member.optional,
                         member.span(),
                         ctx,
-                    )
+                    );
+                    members::with_chain_undefined(property_type, short_circuits, ctx)
                 }
             }
         }
 
         Expression::ComputedMemberExpression(member) => {
             let object_type = infer_expression_type(&member.object, scoping, ctx);
-            infer_computed_member_access_type(
+            let (object_type, short_circuits) =
+                members::strip_nullish_object(&member.object, object_type, member.optional, ctx);
+            let element_type = infer_computed_member_access_type(
                 object_type,
                 &member.expression,
                 member.optional,
                 member.span(),
                 scoping,
                 ctx,
-            )
+            );
+            members::with_chain_undefined(element_type, short_circuits, ctx)
         }
 
         Expression::ChainExpression(chain) => {
