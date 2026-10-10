@@ -27,16 +27,32 @@
 // document, so don't pipe --json-stream output into something expecting a
 // single JSON.parse().
 //
-// --differ prints just the lines where ts-rust and tsc disagree -- no table -- each
-// as GAP (tsc only), FALSE POSITIVE (ts-rust only) or MISMATCH (both report an error
-// there, but the code or message text differs), with both sides' text. It is the
-// quick way to see exactly what is left to align; the summary still follows.
+// --differ shows the same side-by-side table, but only the lines where ts-rust and tsc
+// are not an exact match: "tsc extra (gap)" (tsc only), "ts-rust extra (fp)" (ts-rust
+// only), "code differs" or "message differs" (both report an error there, but the tsc
+// code or the message text is not the same). It is the quick way to see exactly what is
+// left to align; the summary still follows. In --json, those lines are the `differences`
+// list: kind GAP / FALSE POSITIVE / MISMATCH (what check-baseline.js reads), plus
+// `mismatch` ("message" | "code") on a MISMATCH.
+//
+// The ts-rust column shows ts-rust's own TSR#### code (e.g. `TSR1004 Type 'number' ...`).
+// The comparison itself is on the tsc code it maps to, so the two sides can be matched; that
+// mapping stays in --json: `tsRust` has the mapped TS#### strings, `tsRustTsr` the TSR codes.
+//
+// A file's verdict is MATCH only when every line has the same tsc code and message on both
+// sides. Same error lines but different wording is MESSAGE DIFFERS; a different tsc code is
+// CODE DIFFERS; GAP, FALSE POSITIVE and MIXED are as before.
+//
+// The summary ends with the wall time and peak memory of ts-rust and of tsc. tsc's time is
+// stored in its result cache with each file, so a cached run still reports what tsc cost;
+// pass --no-cache to measure it afresh.
 //
 // Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache]
 
 const fs = require("fs");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { spawnSync } = require("child_process");
+const ts = require("typescript");
 const {
   checkFiles,
   collectTsFiles,
@@ -93,6 +109,17 @@ function status(msg) {
   console.error(`${c.dim}${msg}${c.reset}`);
 }
 
+function fmtMs(ms) {
+  if (ms < 10) return `${ms.toFixed(1)} ms`;
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
+  const m = Math.floor(ms / 60000);
+  return `${m}m ${((ms - m * 60000) / 1000).toFixed(1)}s`;
+}
+function fmtKb(kb) {
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb} KB`;
+}
+
 // === Stage 1: run ts-rust once over the whole target ========================
 
 status(`[1/2] Running ts-rust over ${target} ...`);
@@ -113,28 +140,106 @@ if (stat.isFile()) {
 const tsconfigPath = path.join(tsRustProjectRoot, ".compare-tsconfig.json");
 fs.writeFileSync(tsconfigPath, "");
 
-let tsRustRaw = "";
-try {
-  tsRustRaw = execFileSync(
-    tsRustBin,
-    ["--project", tsconfigPath, "--tsc-codes"],
-    {
-      encoding: "utf8",
-    },
-  );
-} catch (err) {
-  // ts-rust exits 1 when it found real type errors -- expected, and its
-  // diagnostics are still on stdout, so only bail if stdout never came back.
-  tsRustRaw = err.stdout != null ? err.stdout : "";
-  if (!tsRustRaw && err.status === undefined) {
+// Runs ts-rust once and reports how long it took and, when the OS lets us ask, its peak
+// memory. Node cannot read a child's peak RSS by itself, so `measure` wraps the command in
+// /usr/bin/time (-v on Linux, -l on macOS) or, failing that, a few lines of python3. If
+// neither exists the run is still made and memory is simply reported as unavailable.
+const PY_WRAPPER = [
+  "import resource,subprocess,sys,time",
+  "t=time.perf_counter()",
+  "r=subprocess.run(sys.argv[1:])",
+  "w=(time.perf_counter()-t)*1000",
+  "k=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss",
+  "k=k//1024 if sys.platform=='darwin' else k",
+  "sys.stderr.write('\\n__MAXRSS_KB__ %d\\n__WALL_MS__ %f\\n'%(k,w))",
+  "sys.exit(r.returncode)",
+].join("\n");
+let python3Ok = null;
+function hasPython3() {
+  if (python3Ok === null)
+    python3Ok = spawnSync("python3", ["--version"]).status === 0;
+  return python3Ok;
+}
+
+function spawnTsRust(extraArgs, wrapper) {
+  const cmd = [tsRustBin, "--project", tsconfigPath, ...extraArgs];
+  let file = cmd[0];
+  let fileArgs = cmd.slice(1);
+  if (wrapper === "time") {
+    file = "/usr/bin/time";
+    fileArgs = [process.platform === "darwin" ? "-l" : "-v", ...cmd];
+  } else if (wrapper === "python") {
+    file = "python3";
+    fileArgs = ["-c", PY_WRAPPER, ...cmd];
+  }
+  const startedAt = process.hrtime.bigint();
+  const res = spawnSync(file, fileArgs, {
+    encoding: "utf8",
+    maxBuffer: 1 << 30,
+  });
+  res.outerMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+  return res;
+}
+
+function runTsRust(extraArgs, { measure }) {
+  let res;
+  let maxRssKb = null;
+  let wallMs = null;
+  let how = null;
+  const wrappers = [];
+  if (measure && fs.existsSync("/usr/bin/time")) wrappers.push("time");
+  if (measure && hasPython3()) wrappers.push("python");
+  for (const wrapper of wrappers) {
+    res = spawnTsRust(extraArgs, wrapper);
+    const err = res.stderr || "";
+    let m;
+    if (wrapper === "time") {
+      if ((m = /Maximum resident set size \(kbytes\): (\d+)/.exec(err)))
+        maxRssKb = Number(m[1]);
+      else if ((m = /(\d+)\s+maximum resident set size/.exec(err)))
+        maxRssKb = Math.round(Number(m[1]) / 1024);
+      wallMs = res.outerMs;
+    } else {
+      if ((m = /__MAXRSS_KB__ (\d+)/.exec(err))) maxRssKb = Number(m[1]);
+      if ((m = /__WALL_MS__ ([\d.]+)/.exec(err))) wallMs = Number(m[1]);
+    }
+    if (maxRssKb !== null) {
+      how = wrapper === "time" ? "/usr/bin/time" : "python3";
+      break;
+    }
+  }
+  if (maxRssKb === null) {
+    res = spawnTsRust(extraArgs, null);
+    wallMs = res.outerMs;
+  }
+  if (res.error) {
     console.error(
-      `error: failed to run ts-rust binary at ${tsRustBin}: ${err.message}`,
+      `error: failed to run ts-rust binary at ${tsRustBin}: ${res.error.message}`,
     );
     process.exit(2);
   }
+  // ts-rust exits 1 when it found real type errors -- expected, and its
+  // diagnostics are still on stdout. Anything else with no output is a real failure.
+  if (!res.stdout && res.status !== 0 && res.status !== 1) {
+    console.error(
+      `error: ts-rust exited with status ${res.status}: ${(res.stderr || "").trim().split("\n").slice(0, 3).join(" ")}`,
+    );
+    process.exit(2);
+  }
+  return { stdout: res.stdout || "", wallMs, maxRssKb, how };
 }
+
+// Same run twice, because ts-rust prints one code per diagnostic: its own TSR#### by default,
+// or the tsc code it maps to with --tsc-codes. The comparison needs the tsc code; the report
+// shows both, so a TSR code is never lost behind its mapping. Both runs list the same
+// diagnostics in the same order (checked below).
+const rawRun = runTsRust([], { measure: false });
+const mappedRun = runTsRust(["--tsc-codes"], { measure: true });
 fs.rmSync(tsconfigPath, { force: true });
 fs.rmSync(scratchDir, { recursive: true, force: true });
+
+// Keys must match the tsc side, which uses paths relative to the cwd.
+const normalizePath = (f) => path.relative(process.cwd(), path.resolve(f));
 
 // ts-rust's own CLI line shape: `file:line:col: severity: CODE message`.
 // Only error-severity lines are kept -- ts-rust's warnings are all
@@ -142,30 +247,51 @@ fs.rmSync(scratchDir, { recursive: true, force: true });
 // (see bin/compare-tsc.rs's module doc comment), so comparing them is noise.
 const TS_RUST_LINE = /^(.+):(\d+):(\d+): (error|warning): (\S+) (.+)$/;
 
-const tsRustDiags = []; // { file, line, code, message }
-let lastDiag = null;
-for (const rawLine of tsRustRaw.split("\n")) {
-  const m = TS_RUST_LINE.exec(rawLine);
-  if (!m) {
-    // A message that is a chain of reasons continues on indented lines, the way
-    // tsc prints it; they belong to the diagnostic above.
-    if (lastDiag && /^ {2,}\S/.test(rawLine))
-      lastDiag.message += "\n" + rawLine;
-    else lastDiag = null;
-    continue;
+function parseTsRust(raw) {
+  const diags = []; // { file, line, code, message }
+  let lastDiag = null;
+  for (const rawLine of raw.split("\n")) {
+    const m = TS_RUST_LINE.exec(rawLine);
+    if (!m) {
+      // A message that is a chain of reasons continues on indented lines, the way
+      // tsc prints it; they belong to the diagnostic above.
+      if (lastDiag && /^ {2,}\S/.test(rawLine))
+        lastDiag.message += "\n" + rawLine;
+      else lastDiag = null;
+      continue;
+    }
+    const [, file, line, , severity, code, message] = m;
+    if (severity !== "error") {
+      lastDiag = null;
+      continue;
+    }
+    lastDiag = {
+      file: stat.isFile() ? target : normalizePath(file),
+      line: Number(line),
+      code,
+      message,
+    };
+    diags.push(lastDiag);
   }
-  const [, file, line, , severity, code, message] = m;
-  if (severity !== "error") {
-    lastDiag = null;
-    continue;
-  }
-  lastDiag = {
-    file: stat.isFile() ? target : file,
-    line: Number(line),
-    code,
-    message,
-  };
-  tsRustDiags.push(lastDiag);
+  return diags;
+}
+
+const tsRustDiags = parseTsRust(mappedRun.stdout);
+const tsRustTsrDiags = parseTsRust(rawRun.stdout);
+let tsrCodesAvailable =
+  tsRustTsrDiags.length === tsRustDiags.length &&
+  tsRustDiags.every(
+    (d, i) =>
+      d.file === tsRustTsrDiags[i].file && d.line === tsRustTsrDiags[i].line,
+  );
+if (tsrCodesAvailable) {
+  tsRustDiags.forEach((d, i) => {
+    d.tsr = tsRustTsrDiags[i].code;
+  });
+} else {
+  status(
+    "      warning: ts-rust's own codes could not be paired with the tsc codes it maps to; showing tsc codes only.",
+  );
 }
 
 function byLine(diags) {
@@ -184,7 +310,16 @@ for (const d of tsRustDiags) {
 }
 for (const [file, diags] of tsRustByFile) tsRustByFile.set(file, byLine(diags));
 
-status(`      ts-rust reported ${tsRustDiags.length} error(s).`);
+const tsRustWallMs =
+  mappedRun.wallMs === null
+    ? rawRun.wallMs
+    : Math.min(rawRun.wallMs, mappedRun.wallMs);
+status(
+  `      ts-rust reported ${tsRustDiags.length} error(s) in ${fmtMs(tsRustWallMs)}` +
+    (mappedRun.maxRssKb !== null
+      ? `, peak memory ${fmtKb(mappedRun.maxRssKb)}.`
+      : " (peak memory unavailable: no /usr/bin/time or python3)."),
+);
 
 // === Stage 2: run tsc file-by-file, printing/merging as each one lands ======
 
@@ -193,9 +328,15 @@ status(
   `[2/2] Running tsc over ${totalFilesGuess} file(s) (this is the slow part) ...`,
 );
 
+// The group a file is listed under: its first three path parts, i.e. the folder. Looking at
+// the folder, not the whole path, matters for a file that sits directly in a short folder
+// (tests/fixtures/x.ts): the old version made the file itself its own group, and its name
+// then came out empty in the table.
 function tier(p) {
-  const parts = p.split(path.sep);
-  return parts.length >= 3 ? parts.slice(0, 3).join(path.sep) : "(root)";
+  const dir = path.dirname(p);
+  if (dir === ".") return "(root)";
+  const parts = dir.split(path.sep);
+  return parts.slice(0, 3).join(path.sep);
 }
 
 // Display name inside a tier's table: the path relative to that tier's own
@@ -207,7 +348,7 @@ function tier(p) {
 function displayName(file, t) {
   if (t === "(root)") return file;
   const rel = path.relative(t, file);
-  return rel.startsWith("..") ? file : rel;
+  return rel === "" || rel.startsWith("..") ? file : rel;
 }
 
 const report = []; // per-file structured verdicts, for --json
@@ -221,6 +362,32 @@ const lineKey = (d) => `${d.code} ${d.message}`;
 const lineIsExact = (rust, tsc) =>
   rust.length === tsc.length &&
   rust.every((d, i) => lineKey(d) === lineKey(tsc[i]));
+
+// exact | message (same codes, wording differs) | code (codes differ) | gap | fp
+function lineResultOf(rust, tsc) {
+  if (rust.length === 0) return "gap";
+  if (tsc.length === 0) return "fp";
+  if (lineIsExact(rust, tsc)) return "exact";
+  const sameCodes =
+    rust.length === tsc.length && rust.every((d, i) => d.code === tsc[i].code);
+  return sameCodes ? "message" : "code";
+}
+const verdictCounts = {
+  MATCH: 0,
+  "MESSAGE DIFFERS": 0,
+  "CODE DIFFERS": 0,
+  GAP: 0,
+  "FALSE POSITIVE": 0,
+  MIXED: 0,
+};
+const VERDICT_COLOR = {
+  MATCH: c.green,
+  "MESSAGE DIFFERS": c.yellow,
+  "CODE DIFFERS": c.red,
+  GAP: c.yellow,
+  "FALSE POSITIVE": c.red,
+  MIXED: c.red,
+};
 
 let totalAgree = 0,
   totalDiffer = 0,
@@ -239,19 +406,25 @@ const termWidth = process.stdout.columns || 120;
 const usable = Math.max(termWidth - 6, 60);
 const FILE_W = Math.min(40, Math.floor(usable * 0.28));
 const LINE_W = 6;
-const VERDICT_W = 16;
+const VERDICT_W = 18;
 const remaining = usable - FILE_W - LINE_W - VERDICT_W;
 const TSRUST_W = Math.max(20, Math.floor(remaining / 2));
 const TSC_W = Math.max(20, remaining - TSRUST_W);
 
-// cli-table3's wordWrap only breaks on real whitespace (\s+), and fixture
-// filenames are one long underscore_separated word with none -- so without
-// help, a name longer than FILE_W gets truncated with an ellipsis instead of
-// wrapping. Swapping underscores for spaces gives wordWrap real break
-// points; the ".ts" is dropped since the tier header + row position already
-// make clear these are fixture files.
-function wrappable(name) {
-  return name.replace(/\.ts$/, "").replace(/_/g, " ");
+// The file name is shown whole -- real name, ".ts" and underscores included -- in a cell that
+// wraps at the column edge instead of at a space. (cli-table3 otherwise only breaks on
+// whitespace, so a long underscore_separated name was cut off with an ellipsis, and the old
+// workaround of rewriting the name hid its real spelling.)
+function fileCell(name) {
+  return { content: name, wrapOnWordBoundary: false };
+}
+
+// ts-rust's cells show the TSR code it really emits, and only that. The tsc code it maps to
+// is still what the comparison uses and is still in the JSON (`tsRust` holds the mapped
+// "TS####" strings, `tsRustTsr` the TSR codes), so a viewer such as an IDE can later turn a
+// TSR code into a link to its tsc code. tsc's own diagnostics have no TSR code.
+function codeLabel(d) {
+  return d.tsr || d.code;
 }
 
 function newTierTable() {
@@ -284,33 +457,11 @@ function ensureTierHeader() {
   }
 }
 
-function printDifference(entry) {
-  const color = entry.kind === "GAP" ? c.yellow : c.red;
-  log(
-    `${c.bold}${entry.file}:${entry.line}${c.reset}  ${color}${entry.kind}${c.reset}`,
-  );
-  const side = (label, items) => {
-    if (items.length === 0) {
-      log(`  ${label} ${c.dim}—${c.reset}`);
-      return;
-    }
-    for (const text of items) {
-      // A chained message continues on indented lines; keep them under the label.
-      const [first, ...rest] = text.split("\n");
-      log(`  ${label} ${first}`);
-      for (const more of rest)
-        log(`  ${" ".repeat(label.length)} ${more.trim()}`);
-    }
-  };
-  side("tsc:    ", entry.tsc);
-  side("ts-rust:", entry.tsRust);
-}
-
 function renderFile(file, tsRustLines, tscLines) {
   const t = tier(file);
 
   if (t !== currentTier) {
-    if (!asJson && !jsonStream && !showDiffer) {
+    if (!asJson && !jsonStream) {
       flushTier();
       pendingTierHeader = `${c.bold}== ${t} ==${c.reset}`;
       tierTable = newTierTable();
@@ -321,13 +472,14 @@ function renderFile(file, tsRustLines, tscLines) {
   if (tsRustLines.size === 0 && tscLines.size === 0) {
     totalAgree++;
     exactFiles++;
+    verdictCounts.MATCH++;
     if (!onlyDiffer) jsonLine({ file, verdict: "MATCH", lines: [] });
     if (!asJson && !jsonStream && !onlyDiffer && !showDiffer) {
       ensureTierHeader();
       tierFileCount++;
       const clean = `${c.dim}did not produce any error or warning${c.reset}`;
       tierTable.push([
-        wrappable(displayName(file, t)),
+        fileCell(displayName(file, t)),
         "—",
         clean,
         clean,
@@ -341,47 +493,48 @@ function renderFile(file, tsRustLines, tscLines) {
     ...new Set([...tsRustLines.keys(), ...tscLines.keys()]),
   ].sort((a, b) => a - b);
 
+  // Per line: exact | message (same codes, wording differs) | code (different codes)
+  // | gap (tsc only) | fp (ts-rust only).
+  const lineResult = new Map();
   let hasFp = false,
-    hasGap = false;
+    hasGap = false,
+    hasCode = false,
+    hasMessage = false;
   for (const ln of allLineNumbers) {
-    const hasTsRust = tsRustLines.has(ln);
-    const hasTsc = tscLines.has(ln);
-    if (hasTsRust && !hasTsc) hasFp = true;
-    if (hasTsc && !hasTsRust) hasGap = true;
-  }
-
-  let fileExact = true;
-  for (const ln of allLineNumbers) {
+    const r = lineResultOf(tsRustLines.get(ln) || [], tscLines.get(ln) || []);
+    lineResult.set(ln, r);
     comparedLines++;
-    if (lineIsExact(tsRustLines.get(ln) || [], tscLines.get(ln) || []))
-      exactLines++;
-    else fileExact = false;
+    if (r === "exact") exactLines++;
+    if (r === "fp") hasFp = true;
+    if (r === "gap") hasGap = true;
+    if (r === "code") hasCode = true;
+    if (r === "message") hasMessage = true;
   }
+  const fileExact = !hasFp && !hasGap && !hasCode && !hasMessage;
   if (fileExact) exactFiles++;
 
   if (showDiffer) {
     for (const ln of allLineNumbers) {
+      const r = lineResult.get(ln);
+      if (r === "exact") continue;
       const left = tsRustLines.get(ln) || [];
       const right = tscLines.get(ln) || [];
-      if (lineIsExact(left, right)) continue;
-      const kind =
-        left.length === 0
-          ? "GAP"
-          : right.length === 0
-            ? "FALSE POSITIVE"
-            : "MISMATCH";
-      const entry = {
+      // `kind` and the leading TS code of each string are what check-baseline.js keys on,
+      // so they stay as they were; the extra fields are for people reading the JSON.
+      differences.push({
         file,
         line: ln,
-        kind,
+        kind: r === "gap" ? "GAP" : r === "fp" ? "FALSE POSITIVE" : "MISMATCH",
+        ...(r === "message" || r === "code" ? { mismatch: r } : {}),
         tsc: right.map((d) => `${d.code} ${d.message}`),
         tsRust: left.map((d) => `${d.code} ${d.message}`),
-      };
-      differences.push(entry);
-      if (!asJson && !jsonStream) printDifference(entry);
+        tsRustTsr: left.map((d) => d.tsr || null),
+      });
     }
   }
 
+  // "agree" keeps its old meaning (no line where only one side reports an error), so
+  // anything reading the JSON summary sees the same numbers as before.
   const fileOk = !hasFp && !hasGap;
   if (fileOk) totalAgree++;
   else {
@@ -390,29 +543,36 @@ function renderFile(file, tsRustLines, tscLines) {
     if (hasGap) totalGap++;
   }
 
-  const verdict = fileOk
-    ? "MATCH"
-    : hasFp && hasGap
+  const verdict =
+    hasFp && hasGap
       ? "MIXED"
       : hasFp
         ? "FALSE POSITIVE"
-        : "GAP";
-  const verdictColor =
-    verdict === "MATCH" ? c.green : verdict === "GAP" ? c.yellow : c.red;
+        : hasGap
+          ? "GAP"
+          : hasCode
+            ? "CODE DIFFERS"
+            : hasMessage
+              ? "MESSAGE DIFFERS"
+              : "MATCH";
+  verdictCounts[verdict]++;
+  const verdictColor = VERDICT_COLOR[verdict];
 
-  // --only-differ applies to --json/--json-stream too: a MATCH file (even
-  // one that had matching diagnostics on both sides, not just a fully-clean
-  // file) is left out entirely, not just hidden from the table.
-  if (!(onlyDiffer && fileOk)) {
+  // --only-differ applies to --json/--json-stream too: a file that matches exactly is left
+  // out entirely, not just hidden from the table. A file whose lines all have errors on both
+  // sides but with different wording is NOT exact, so it stays.
+  if (!(onlyDiffer && fileExact)) {
     const fileReport = {
       file,
       verdict,
       lines: allLineNumbers.map((ln) => ({
         line: ln,
-        exact: lineIsExact(tsRustLines.get(ln) || [], tscLines.get(ln) || []),
+        exact: lineResult.get(ln) === "exact",
+        result: lineResult.get(ln),
         tsRust: (tsRustLines.get(ln) || []).map(
           (d) => `${d.code} ${d.message}`,
         ),
+        tsRustTsr: (tsRustLines.get(ln) || []).map((d) => d.tsr || null),
         tsc: (tscLines.get(ln) || []).map((d) => `${d.code} ${d.message}`),
       })),
     };
@@ -420,28 +580,37 @@ function renderFile(file, tsRustLines, tscLines) {
     jsonLine(fileReport);
   }
 
-  if (asJson || jsonStream || showDiffer) return;
-  if (onlyDiffer && fileOk) return; // --only-differ: hide files that fully MATCH from the table too
+  if (asJson || jsonStream) return;
+  if ((onlyDiffer || showDiffer) && fileExact) return;
 
   ensureTierHeader();
   tierFileCount++;
   const cellText = (d) =>
-    d ? `${d.code} ${d.message.replace(/\s+/g, " ")}` : `${c.dim}—${c.reset}`;
+    d
+      ? `${codeLabel(d)} ${d.message.replace(/\s+/g, " ")}`
+      : `${c.dim}—${c.reset}`;
 
-  // Per-row status: every row gets one, not just the file's last row --
-  // "match" for a line both sides agree on, "tsc extra (gap)" / "ts-rust
-  // extra (fp)" for a line only one side reported. The file's overall
-  // verdict (MATCH/GAP/FALSE POSITIVE/MIXED) still gets its own line
-  // appended after the last row, since that summarizes the whole file, not
-  // one line of it.
-  const reasonFor = (hasTsRust, hasTsc) => {
-    if (hasTsRust && hasTsc) return `${c.green}match${c.reset}`;
-    if (!hasTsc) return `${c.yellow}ts-rust extra (fp)${c.reset}`;
-    return `${c.yellow}tsc extra (gap)${c.reset}`;
-  };
+  // Per-row status: every row gets one -- "match" when both sides agree exactly, "message
+  // differs" / "code differs" when both report an error on the line but the text or the
+  // code is not the same, and "tsc extra (gap)" / "ts-rust extra (fp)" for a line only one
+  // side reported. The file's overall verdict still gets its own line after the last row,
+  // since that summarizes the whole file, not one line of it.
+  const reasonFor = (r) =>
+    ({
+      exact: `${c.green}match${c.reset}`,
+      message: `${c.yellow}message differs${c.reset}`,
+      code: `${c.red}code differs${c.reset}`,
+      gap: `${c.yellow}tsc extra (gap)${c.reset}`,
+      fp: `${c.red}ts-rust extra (fp)${c.reset}`,
+    })[r];
+
+  // --differ: same side-by-side table, but only the lines that are not an exact match.
+  const shownLines = showDiffer
+    ? allLineNumbers.filter((ln) => lineResult.get(ln) !== "exact")
+    : allLineNumbers;
 
   let firstRow = true;
-  for (const ln of allLineNumbers) {
+  for (const ln of shownLines) {
     const left = tsRustLines.get(ln) || [];
     const right = tscLines.get(ln) || [];
     const rows = Math.max(left.length, right.length, 1);
@@ -450,11 +619,11 @@ function renderFile(file, tsRustLines, tscLines) {
       const lcell = r < left.length ? cellText(left[r]) : cellText(null);
       const rcell = r < right.length ? cellText(right[r]) : cellText(null);
       tierTable.push([
-        firstRow ? wrappable(displayName(file, t)) : "",
+        firstRow ? fileCell(displayName(file, t)) : "",
         String(ln),
         lcell,
         rcell,
-        reasonFor(left.length > 0, right.length > 0),
+        reasonFor(lineResult.get(ln)),
       ]);
       firstRow = false;
     }
@@ -468,7 +637,7 @@ function renderFile(file, tsRustLines, tscLines) {
   ]);
 }
 
-const { files, stats } = checkFiles(target, {
+const { files, stats, perf } = checkFiles(target, {
   strictOnly,
   cachePath: noCache ? undefined : defaultCachePath(),
   onFile: (fsPath, fileResults, index, total) => {
@@ -491,28 +660,116 @@ flushTier();
 if (!noCache)
   status(`      tsc: ${stats.cached} from cache, ${stats.ran} checked.`);
 
+// === Time and memory =========================================================
+
+const tscWallMs = stats.ranMs + stats.cachedMs;
+const performance = {
+  tsRust: {
+    files: files.length,
+    wallMs: Math.round(tsRustWallMs * 10) / 10,
+    maxRssKb: mappedRun.maxRssKb,
+    memoryMeasuredWith: mappedRun.how,
+  },
+  tsc: {
+    typescript: ts.version,
+    files: files.length,
+    wallMs: Math.round(tscWallMs),
+    checkedThisRun: stats.ran,
+    fromCache: stats.cached,
+    fromCacheWithoutStoredTime: stats.cachedUntimed,
+    maxRssKb: perf.maxRssKb,
+    memoryMeasuredThisRun: perf.measuredThisRun,
+  },
+  timesFaster:
+    tsRustWallMs > 0 && tscWallMs > 0
+      ? Math.round(tscWallMs / tsRustWallMs)
+      : null,
+  timesLessMemory:
+    mappedRun.maxRssKb && perf.maxRssKb
+      ? Math.round((perf.maxRssKb / mappedRun.maxRssKb) * 10) / 10
+      : null,
+};
+
+function printPerformance() {
+  const p = performance;
+  const rustMem =
+    p.tsRust.maxRssKb !== null ? fmtKb(p.tsRust.maxRssKb) : "n/a";
+  const tscMem =
+    p.tsc.maxRssKb !== null
+      ? fmtKb(p.tsc.maxRssKb) + (p.tsc.memoryMeasuredThisRun ? "" : " *")
+      : "n/a";
+  // A time of 0 would be a lie when the cached entries carry no timing.
+  const tscTime =
+    p.tsc.checkedThisRun === 0 && p.tsc.fromCacheWithoutStoredTime > 0
+      ? "n/a"
+      : fmtMs(p.tsc.wallMs);
+  const rows = [
+    ["", "time", "peak memory"],
+    ["ts-rust", fmtMs(p.tsRust.wallMs), rustMem],
+    ["tsc", tscTime, tscMem],
+  ];
+  const w = [0, 1, 2].map((i) => Math.max(...rows.map((r) => r[i].length)));
+  log("");
+  log(`${c.bold}Performance${c.reset} (${files.length} file(s))`);
+  rows.forEach((r, i) => {
+    const line = `  ${r[0].padEnd(w[0])}  ${r[1].padStart(w[1])}  ${r[2].padStart(w[2])}`;
+    log(i === 0 ? `${c.dim}${line}${c.reset}` : line);
+  });
+  if (p.timesFaster && tscTime !== "n/a")
+    log(
+      `  ts-rust is ~${p.timesFaster.toLocaleString("en-US")}x faster` +
+        (p.timesLessMemory ? ` and uses ~${p.timesLessMemory}x less memory` : "") +
+        " than tsc",
+    );
+  log(
+    `${c.dim}  ts-rust: one process over every file, time includes process start-up.${c.reset}`,
+  );
+  log(
+    `${c.dim}  tsc ${p.tsc.typescript}: one isolated Program per file, ${p.tsc.checkedThisRun} checked now, ${p.tsc.fromCache} from cache.${c.reset}`,
+  );
+  if (p.tsc.fromCache > 0)
+    log(
+      `${c.dim}  Cached files count the time they cost when last checked` +
+        (p.tsc.fromCacheWithoutStoredTime
+          ? ` (${p.tsc.fromCacheWithoutStoredTime} have no stored time and count as 0)`
+          : "") +
+        `; run with --no-cache for a fresh measurement.${c.reset}`,
+    );
+  if (p.tsc.maxRssKb !== null && !p.tsc.memoryMeasuredThisRun)
+    log(
+      `${c.dim}  * tsc memory is from the last run that checked files, not this one.${c.reset}`,
+    );
+  if (p.tsRust.maxRssKb === null)
+    log(
+      `${c.dim}  ts-rust memory needs /usr/bin/time or python3 on PATH.${c.reset}`,
+    );
+}
+
+const summaryObject = () => ({
+  totalFiles: files.length,
+  agree: totalAgree,
+  differ: totalDiffer,
+  gap: totalGap,
+  falsePositive: totalFp,
+  exact: exactFiles,
+  exactLines,
+  comparedLines,
+  verdicts: verdictCounts,
+  strictOnly,
+  onlyDiffer,
+  showDiffer,
+  performance,
+  // `files` in the --json output is filtered to just the differing ones when
+  // onlyDiffer is set -- totalFiles/agree/etc. still reflect the whole run.
+});
+
 // === Final summary ===========================================================
 
 if (asJson) {
   console.log(
     JSON.stringify(
       {
-        summary: {
-          totalFiles: files.length,
-          agree: totalAgree,
-          differ: totalDiffer,
-          gap: totalGap,
-          falsePositive: totalFp,
-          exact: exactFiles,
-          exactLines,
-          comparedLines,
-          strictOnly,
-          onlyDiffer,
-          showDiffer,
-          // `files` below is filtered to just the differing ones when
-          // onlyDiffer is set -- totalFiles/agree/etc. above still reflect
-          // the whole run, not just what's listed.
-        },
+        summary: summaryObject(),
         files: report,
         // Only present under --differ: every line where the two sides disagree.
         ...(showDiffer ? { differences } : {}),
@@ -531,49 +788,44 @@ if (jsonStream) {
   // object, on its own line, the same NDJSON shape as every file line
   // before it. A consumer distinguishes it from a file line by the
   // presence of `summary` rather than `file`.
-  console.log(
-    JSON.stringify({
-      summary: {
-        totalFiles: files.length,
-        agree: totalAgree,
-        differ: totalDiffer,
-        gap: totalGap,
-        falsePositive: totalFp,
-        exact: exactFiles,
-        exactLines,
-        comparedLines,
-        strictOnly,
-        onlyDiffer,
-      },
-    }),
-  );
+  console.log(JSON.stringify({ summary: summaryObject() }));
   process.exit(0);
 }
 
+const v = verdictCounts;
 log("");
 const summaryColor =
-  totalDiffer === 0 ? c.green : totalFp === 0 ? c.yellow : c.red;
+  v.MATCH === files.length ? c.green : totalFp === 0 ? c.yellow : c.red;
 log(
-  `${summaryColor}${totalAgree}${c.reset} of ${files.length} file(s) agree with tsc ` +
-    `(errors-only, ${totalDiffer} differ)` +
+  `${summaryColor}${v.MATCH}${c.reset} of ${files.length} file(s) MATCH exactly (same tsc code and message on every line)` +
     (strictOnly ? " [--strict only]" : " [--strict + extras]"),
 );
 log(
-  `  ${exactFiles} of ${files.length} file(s) are exact (same tsc code and message on every line); ` +
-    `${exactLines} of ${comparedLines} line(s)`,
+  `  ${v["MESSAGE DIFFERS"]} MESSAGE DIFFERS  (same error lines and codes, wording differs)`,
+);
+log(
+  `  ${v["CODE DIFFERS"]} CODE DIFFERS     (error on the same lines, but a different tsc code)`,
+);
+log(
+  `  ${v.GAP} GAP             (tsc reports an error ts-rust does not -- a check not built yet)`,
+);
+log(
+  `  ${v["FALSE POSITIVE"]} FALSE POSITIVE  (ts-rust reports an error tsc does not)`,
+);
+if (v.MIXED > 0) log(`  ${v.MIXED} MIXED           (both of the above in one file)`);
+log(
+  `${totalAgree} of ${files.length} file(s) agree with tsc on which lines have errors (errors-only, ${totalDiffer} differ); ` +
+    `${exactLines} of ${comparedLines} line(s) are exact`,
 );
 if (showDiffer) {
   const n = (k) => differences.filter((d) => d.kind === k).length;
+  const m = (k) => differences.filter((d) => d.mismatch === k).length;
   log(
-    `  ${differences.length} line(s) differ: ${n("GAP")} gap, ${n("FALSE POSITIVE")} false positive, ${n("MISMATCH")} mismatch (code or message)`,
+    `  ${differences.length} line(s) differ: ${n("GAP")} gap, ${n("FALSE POSITIVE")} false positive, ${m("message")} message, ${m("code")} code`,
   );
 }
-log(
-  `  ${totalGap} with a gap (tsc reports an error ts-rust does not -- a check not built yet)`,
-);
-log(
-  `  ${totalFp} with a false positive (ts-rust reports an error tsc does not)`,
-);
+printPerformance();
+log("");
 log(
   `${c.dim}Note: divergence here is often intentional -- see the module doc comment${c.reset}`,
 );
