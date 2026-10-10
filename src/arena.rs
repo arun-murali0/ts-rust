@@ -75,8 +75,12 @@ const FIXED_SLOTS: u32 = 10;
 // `types`, which is the source of truth anyway.
 // Why: keying on the content would store each interned composite twice (once in
 // `types`, once as the map key) and clone it on every miss.
-// Cost: a digest collision costs one missed reuse and can never merge two different
-// types, because a hit is compared with the slot before it is trusted.
+// Cost: a digest collision can never merge two different types, because a hit is
+// compared with the slot before it is trusted. It must not cost the type its single id
+// either: narrowing compares literals by TypeId, so a literal that missed the table
+// would never equal the same literal written elsewhere. Two strings such as
+// "variant19" and "variant92" really do share an FxHasher digest, which is why
+// `collided` exists.
 fn content_hash<T: Hash + ?Sized>(content: &T) -> u64 {
     let mut hasher = FxHasher::default();
     content.hash(&mut hasher);
@@ -112,11 +116,26 @@ pub struct TypeArena {
     // it never walks the arena.
     //
     // A digest match is never trusted on its own: alloc() compares the slot it points
-    // at with the incoming type. Two different types sharing a 64-bit digest is not
-    // expected, but if it happens the second one is simply left out of the table and
-    // gets a slot of its own. That costs one missed reuse and can never merge two
-    // types that differ, which is the only failure that would matter.
+    // at with the incoming type.
+    //
+    // Problem: two different types can share a 64-bit digest. FxHasher is weak on short
+    // strings that differ in a couple of characters, and "variant19" / "variant92" are
+    // one such pair. The first answer to a collision was to give the second type a slot
+    // of its own on every alloc and leave it out of the table, which cost one missed
+    // reuse and could not merge two types that differ. But it also meant the same
+    // literal got a new TypeId on every use, and narrowing compares literals by TypeId
+    // (it relies on every literal being interned), so `value.kind === "variant92"` found
+    // no matching member and the union narrowed to never.
+    // Picked: the first type to claim a digest stays here, and any later type that
+    // shares it is kept in `collided`, found by comparing against each slot under that
+    // digest. Every distinct content has exactly one id again.
+    // Cost: a lookup that hits a collided digest scans a handful of ids. Nothing on the
+    // path of a type that has its digest to itself changed.
     interned: FxHashMap<u64, TypeId>,
+
+    // Types that share a digest with an earlier, different type, in allocation order.
+    // Empty unless a collision has happened.
+    collided: FxHashMap<u64, Vec<TypeId>>,
 
     // The same idea as `interned`, kept apart for unions. A union cannot go through
     // alloc(): its members must be flattened and deduplicated first, and that is
@@ -195,6 +214,7 @@ impl TypeArena {
             types: Vec::new(),
             builtin_slots: FxHashMap::default(),
             interned: FxHashMap::default(),
+            collided: FxHashMap::default(),
             interned_unions: FxHashMap::default(),
             param_scan: RefCell::new(Vec::new()),
             equality_cache: FxHashMap::default(),
@@ -244,9 +264,19 @@ impl TypeArena {
             if self.types[existing.0 as usize] == ty {
                 return existing;
             }
-            // Same digest, different content: keep it out of the table (see the
-            // note on `interned`) rather than displace the entry that is there.
-            return self.push(ty);
+            // Same digest, different content (see the note on `interned`): look among
+            // the others that share it, and add this one if it is new.
+            let already = self.collided.get(&digest).and_then(|ids| {
+                ids.iter()
+                    .copied()
+                    .find(|&id| self.types[id.0 as usize] == ty)
+            });
+            if let Some(found) = already {
+                return found;
+            }
+            let id = self.push(ty);
+            self.collided.entry(digest).or_default().push(id);
+            return id;
         }
         let id = self.push(ty);
         self.interned.insert(digest, id);
@@ -336,7 +366,15 @@ impl TypeArena {
         if let Type::Union(members) = ty {
             return self.interned_unions.get(&content_hash(members)) == Some(&id);
         }
-        Self::is_internable(ty) && self.interned.get(&content_hash(ty)) == Some(&id)
+        if !Self::is_internable(ty) {
+            return false;
+        }
+        let digest = content_hash(ty);
+        self.interned.get(&digest) == Some(&id)
+            || self
+                .collided
+                .get(&digest)
+                .is_some_and(|ids| ids.contains(&id))
     }
 
     // Flattens nested unions and drops never members, since never contributes
@@ -972,6 +1010,7 @@ impl TypeArena {
         self.enum_types.clear();
         self.builtin_slots.clear();
         self.interned.clear();
+        self.collided.clear();
         self.interned_unions.clear();
         self.param_scan.get_mut().clear();
         self.equality_cache.clear();
@@ -997,7 +1036,8 @@ impl TypeArena {
         TypeArenaStats {
             type_count: self.types.len(),
             capacity: self.types.capacity(),
-            interned_types: self.interned.len(),
+            interned_types: self.interned.len()
+                + self.collided.values().map(Vec::len).sum::<usize>(),
             interned_unions: self.interned_unions.len(),
             named_types: (0..self.types.len())
                 .filter(|&index| self.is_named(TypeId(index as u32)))
@@ -1226,12 +1266,13 @@ mod tests {
     }
 
     // The digest is only a hint. If two different types ever share one, alloc() must
-    // fall back to a slot of its own instead of returning the other type's id: that
-    // would be a silent type confusion, the one failure this table must not have. A
-    // real 64-bit collision cannot be produced on demand, so the table is seeded with
-    // a wrong entry, which is exactly the state a collision would leave behind.
+    // not return the other type's id: that would be a silent type confusion. It must
+    // not hand out a fresh id on every call either, because literals are compared by
+    // TypeId. A real 64-bit collision cannot be produced on demand with arbitrary
+    // content, so the table is seeded with a wrong entry, which is exactly the state a
+    // collision leaves behind.
     #[test]
-    fn a_digest_match_on_different_content_is_not_reused() {
+    fn a_digest_match_on_different_content_still_gets_one_shared_id() {
         let mut arena = TypeArena::new();
         let (number, string) = (arena.number(), arena.string());
         let wanted = Type::Array(number);
@@ -1239,13 +1280,51 @@ mod tests {
         arena.interned.insert(content_hash(&wanted), unrelated);
 
         let got = arena.alloc(wanted.clone());
+        let again = arena.alloc(wanted.clone());
 
         assert_ne!(got, unrelated);
         assert!(*arena.get(got) == wanted);
-        assert!(
-            !arena.is_interned(got),
-            "a collided type must stay unshared"
-        );
+        assert_eq!(got, again, "a collided type must still be interned once");
+        assert!(arena.is_interned(got));
+        assert!(arena.is_interned(unrelated));
+    }
+
+    // Two literals that really do collide under FxHasher, in the order a program meets
+    // them: "variant19" owns the digest, "variant92" is the later one. Each must get one
+    // id however often it is allocated, or `kind === "variant92"` finds no member.
+    #[test]
+    fn string_literals_that_share_a_digest_are_each_interned_once() {
+        let mut arena = TypeArena::new();
+        let first = arena.alloc(Type::StringLiteral("variant19".to_string()));
+        let second = arena.alloc(Type::StringLiteral("variant92".to_string()));
+        for _ in 0..3 {
+            assert_eq!(
+                arena.alloc(Type::StringLiteral("variant19".to_string())),
+                first
+            );
+            assert_eq!(
+                arena.alloc(Type::StringLiteral("variant92".to_string())),
+                second
+            );
+        }
+        assert_ne!(first, second);
+    }
+
+    // The general form: no matter how many of a family of similar literals are
+    // allocated, every one of them keeps a single id.
+    #[test]
+    fn a_hundred_similar_literals_are_each_interned_once() {
+        let mut arena = TypeArena::new();
+        let ids: Vec<TypeId> = (0..100)
+            .map(|i| arena.alloc(Type::StringLiteral(format!("variant{i}"))))
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(
+                arena.alloc(Type::StringLiteral(format!("variant{i}"))),
+                *id,
+                "variant{i} was given a second id"
+            );
+        }
     }
 
     #[test]

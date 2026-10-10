@@ -107,7 +107,13 @@ fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
             destructuring_heavy_source(500),
             0,
         ),
-        ("complex_mixed_scale_200", complex_source(200), 5),
+        // One diagnostic, the `T | undefined` return in `first`. It was 5: the wide union in
+        // this workload has variants "variant92", "variant93", "variant98" and
+        // "variant99", whose string literals share an intern digest with "variant19",
+        // "variant18", "variant13" and "variant12". The colliding literal got a new id on
+        // every use, narrowing by `kind` found no member, and four `payloadNN` reads
+        // reported "does not exist on type 'never'". tsc reports none of them.
+        ("complex_mixed_scale_200", complex_source(200), 1),
         // One diagnostic per copy plus one shared: the `permissions` property that does
         // not exist on the Account union, and the `T | undefined` return in `first`.
         // These counts used to be two per copy because `total + account.permissions`
@@ -141,5 +147,17 @@ fn benchmark_fixtures_report_the_expected_number_of_diagnostics() {
     assert!(
         mismatches.is_empty(),
         "diagnostic counts changed: {mismatches:#?}"
+    );
+}
+
+// The smallest program that shows the collision above: two variants whose `kind`
+// literals share a digest, narrowed one after the other.
+#[test]
+fn literals_that_share_an_intern_digest_still_narrow() {
+    let source = include_str!("fixtures/arena-interning/colliding_literal_digests_still_narrow.ts");
+    let diagnostics = check(source, "colliding_literal_digests_still_narrow.ts");
+    assert!(
+        diagnostics.is_empty(),
+        "expected no diagnostics, got: {diagnostics:?}"
     );
 }

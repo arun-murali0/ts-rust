@@ -82,12 +82,12 @@ pub enum Type {
     // declaration, arguments and body are the same id.
     App(DeclSlot, Vec<TypeId>, TypeId),
 
-    // `A & B`. Last in the enum on purpose: adding a variant before others changes the
-    // position of every variant after it, and `benchmark_fixtures_report_the_expected_number_
-    // of_diagnostics` changes from 5 to 1 when that happens. Something upstream depends on
-    // variant order (the four `Property 'payloadNN' does not exist on type 'never'` it
-    // reports are ones tsc does not), and until that is found the new variant must not
-    // move anything that exists.
+    // `A & B`. It sits last, as it was added. Variant position used to matter here: adding
+    // a variant changed the derived hash, which changed which type digests collided, and
+    // a colliding string literal was not interned, so literal narrowing gave never (the
+    // four `Property 'payloadNN' does not exist on type 'never'` in the mixed benchmark).
+    // TypeArena::alloc now keeps every colliding type under one id, so nothing depends on
+    // the order of the variants any more.
     // The members are in the order they were written and are never sorted:
     // `A & B` and `B & A` are two ids that are assignable both ways, because the call
     // signatures of the members are tried in member order and a union's sorting would
