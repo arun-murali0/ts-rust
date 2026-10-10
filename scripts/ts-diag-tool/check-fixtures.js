@@ -42,7 +42,9 @@ const sha = (text) => crypto.createHash("sha1").update(text).digest("hex");
 // version or the compiler options change, since either one changes what tsc says.
 // Cost: an import that did not resolve last time and exists now is not noticed, so
 // delete the cache file (or pass --no-cache to compare.js) after adding such a file.
-const CACHE_SCHEMA = 1;
+// 2: entries now carry the time tsc took (`ms`), so caches written before that are dropped
+// and re-measured instead of reporting a tsc time of zero.
+const CACHE_SCHEMA = 2;
 
 function loadCache(cachePath, meta) {
   try {
@@ -155,7 +157,10 @@ function checkFiles(target, options = {}) {
         optionsHash: sha(JSON.stringify(compilerOptions)),
       })
     : null;
-  const stats = { cached: 0, ran: 0 };
+  // ranMs / cachedMs: wall time tsc spent on the files it checked this run, and the time
+  // stored with the entries reused from the cache (what tsc cost when they were checked).
+  // cachedUntimed counts reused entries written before timings were stored.
+  const stats = { cached: 0, ran: 0, ranMs: 0, cachedMs: 0, cachedUntimed: 0 };
 
   files.forEach((file, index) => {
     const cacheKey = path.relative(process.cwd(), file);
@@ -163,6 +168,8 @@ function checkFiles(target, options = {}) {
     const cached = cache && cache.entries[cacheKey];
     if (cache && fileHash && entryIsFresh(cached, fileHash)) {
       stats.cached++;
+      if (typeof cached.ms === "number") stats.cachedMs += cached.ms;
+      else stats.cachedUntimed++;
       results.push(...cached.diagnostics);
       if (options.onFile)
         options.onFile(file, cached.diagnostics, index, files.length);
@@ -170,9 +177,12 @@ function checkFiles(target, options = {}) {
     }
     stats.ran++;
 
+    const startedAt = process.hrtime.bigint();
     const program = ts.createProgram([file], compilerOptions);
     const sourceFile = program.getSourceFile(file);
     const diagnostics = ts.getPreEmitDiagnostics(program, sourceFile);
+    const ms = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    stats.ranMs += ms;
 
     const fileResults = [];
     for (const d of diagnostics) {
@@ -203,6 +213,7 @@ function checkFiles(target, options = {}) {
       }
       cache.entries[cacheKey] = {
         hash: fileHash,
+        ms,
         deps,
         diagnostics: fileResults,
       };
@@ -212,8 +223,19 @@ function checkFiles(target, options = {}) {
     if (options.onFile) options.onFile(file, fileResults, index, files.length);
   });
 
+  // Peak memory of this process (node + tsc), in KB. It only says something about tsc when
+  // tsc actually ran, so a run that was served entirely from the cache reports the largest
+  // figure stored by earlier runs instead (null when there is none).
+  const peakNow = process.resourceUsage().maxRSS;
+  const stored = cache && cache.perf ? cache.perf.maxRssKb : null;
+  let maxRssKb = null;
+  if (stats.ran > 0) maxRssKb = Math.max(peakNow, stored || 0);
+  else if (stored) maxRssKb = stored;
+  if (cache && stats.ran > 0) cache.perf = { maxRssKb };
+  const perf = { maxRssKb, measuredThisRun: stats.ran > 0 };
+
   if (cache) saveCache(options.cachePath, cache);
-  return { files, results, stats };
+  return { files, results, stats, perf };
 }
 
 // One shared location so compare.js, this file's --warm-cache and the CI cache step all

@@ -27,6 +27,12 @@
 // every machine this script runs on, so its absence is a soft degrade, not
 // an error.
 //
+// ts-rust's cells show its own TSR#### code and message. To tell "same error" from "same line,
+// different wording", ts-rust is also run once with --tsc-codes and paired with the first run;
+// ts-rust vs tsc then gets a verdict per line and per file -- exact (ALL AGREE),
+// MESSAGE DIFFERS (same tsc code, different text) or CODE DIFFERS -- on top of the line-presence
+// agreement. The mapped TS codes are in the JSON as `tsRustTs`, for tooling that links TSR to TS.
+//
 // Usage:
 //   node compare3.js <target-dir-or-file> <ts-rust-binary> <tsgo-binary> \
 //     [--strict-only] [--json] [--html <path>] [--only-differ]
@@ -141,17 +147,62 @@ const tsconfigPath = path.join(tsRustProjectRoot, ".compare-tsconfig.json");
 fs.writeFileSync(tsconfigPath, "");
 
 const tsRustRun = runMeasured(tsRustBin, ["--project", tsconfigPath]);
+// Second, unmeasured run: same diagnostics in the same order, printed under the tsc code each
+// TSR code maps to. Only used to compare against tsc; never shown as ts-rust's own code.
+const tsRustMappedRun = spawnSync(
+  tsRustBin,
+  ["--project", tsconfigPath, "--tsc-codes"],
+  { encoding: "utf8", maxBuffer: 1 << 30 },
+);
 fs.rmSync(tsconfigPath, { force: true });
 fs.rmSync(scratchDir, { recursive: true, force: true });
 
+// Keys must match the tsc side, which uses paths relative to the cwd.
+const normalizePath = (f) => path.relative(process.cwd(), path.resolve(f));
+
 const TS_RUST_LINE = /^(.+):(\d+):(\d+): (error|warning): (\S+) (.+)$/;
-const tsRustDiags = []; // { file, line, code, message }
-for (const rawLine of tsRustRun.stdout.split("\n")) {
-  const m = TS_RUST_LINE.exec(rawLine);
-  if (!m) continue;
-  const [, file, line, , severity, code, message] = m;
-  if (severity !== "error") continue;
-  tsRustDiags.push({ file: stat.isFile() ? target : file, line: Number(line), code, message });
+function parseTsRust(text) {
+  const diags = []; // { file, line, code, message }
+  let last = null;
+  for (const rawLine of text.split("\n")) {
+    const m = TS_RUST_LINE.exec(rawLine);
+    if (!m) {
+      // A chained message continues on indented lines, the way tsc prints it.
+      if (last && /^ {2,}\S/.test(rawLine)) last.message += "\n" + rawLine;
+      else last = null;
+      continue;
+    }
+    const [, file, line, , severity, code, message] = m;
+    if (severity !== "error") {
+      last = null;
+      continue;
+    }
+    last = {
+      file: stat.isFile() ? target : normalizePath(file),
+      line: Number(line),
+      code,
+      message,
+    };
+    diags.push(last);
+  }
+  return diags;
+}
+
+const tsRustDiags = parseTsRust(tsRustRun.stdout);
+const tsRustMapped = parseTsRust(tsRustMappedRun.stdout || "");
+const tsCodesPaired =
+  tsRustMapped.length === tsRustDiags.length &&
+  tsRustDiags.every(
+    (d, i) => d.file === tsRustMapped[i].file && d.line === tsRustMapped[i].line,
+  );
+if (tsCodesPaired) {
+  tsRustDiags.forEach((d, i) => {
+    d.tsCode = tsRustMapped[i].code;
+  });
+} else {
+  status(
+    "      warning: could not pair ts-rust's codes with their tsc mapping; ts-rust vs tsc is compared by line only.",
+  );
 }
 
 status(
@@ -263,12 +314,35 @@ for (const [f, diags] of tsgoDiagsByFile) tsgoByFileLines.set(f, byLine(diags));
 let filesAllAgree = 0,
   filesAnyDiverge = 0;
 const pair = {
-  tsRustVsTsc: { agree: 0, tsRustOnly: 0, tscOnly: 0 },
+  tsRustVsTsc: { agree: 0, tsRustOnly: 0, tscOnly: 0, exact: 0, messageDiffers: 0, codeDiffers: 0 },
   tsRustVsTsgo: { agree: 0, tsRustOnly: 0, tsgoOnly: 0 },
   tscVsTsgo: { agree: 0, tscOnly: 0, tsgoOnly: 0 },
 };
 let linesAllThreeAgree = 0,
   linesPartial = 0;
+
+// ts-rust vs tsc on one line: exact | message (same tsc code, text differs) | code | gap | fp.
+// Without the TSR->TS pairing there is nothing to compare beyond presence, so both-present
+// counts as exact.
+const lineKey = (d) => `${d.tsCode || d.code} ${d.message}`;
+function lineResultOf(rust, tsc) {
+  if (rust.length === 0) return "gap";
+  if (tsc.length === 0) return "fp";
+  if (rust.some((d) => !d.tsCode)) return "exact";
+  if (rust.length === tsc.length && rust.every((d, i) => lineKey(d) === lineKey(tsc[i])))
+    return "exact";
+  const sameCodes =
+    rust.length === tsc.length && rust.every((d, i) => d.tsCode === tsc[i].code);
+  return sameCodes ? "message" : "code";
+}
+const RESULT_LABEL = {
+  exact: "match",
+  message: "message differs",
+  code: "code differs",
+  gap: "tsc extra (gap)",
+  fp: "ts-rust extra (fp)",
+};
+const verdictCounts = { "ALL AGREE": 0, "MESSAGE DIFFERS": 0, "CODE DIFFERS": 0, DIVERGES: 0 };
 
 const fileReports = [];
 
@@ -281,15 +355,29 @@ for (const fsPath of files) {
   const allLines = new Set([...a.keys(), ...b.keys(), ...g.keys()]);
   if (allLines.size === 0) {
     filesAllAgree++;
+    verdictCounts["ALL AGREE"]++;
     continue;
   }
 
-  let fileDiverges = false;
+  let fileDiverges = false,
+    anyCode = false,
+    anyMessage = false;
   const lineReports = [];
   for (const ln of [...allLines].sort((x, y) => x - y)) {
     const hasA = a.has(ln),
       hasB = b.has(ln),
       hasG = g.has(ln);
+
+    const result = lineResultOf(a.get(ln) || [], b.get(ln) || []);
+    if (result === "exact") pair.tsRustVsTsc.exact++;
+    if (result === "message") {
+      pair.tsRustVsTsc.messageDiffers++;
+      anyMessage = true;
+    }
+    if (result === "code") {
+      pair.tsRustVsTsc.codeDiffers++;
+      anyCode = true;
+    }
 
     if (hasA && hasB) pair.tsRustVsTsc.agree++;
     else if (hasA) pair.tsRustVsTsc.tsRustOnly++;
@@ -311,7 +399,9 @@ for (const fsPath of files) {
 
     lineReports.push({
       line: ln,
+      result,
       tsRust: (a.get(ln) || []).map((d) => `${d.code} ${d.message}`),
+      tsRustTs: (a.get(ln) || []).map((d) => d.tsCode || null),
       tsc: (b.get(ln) || []).map((d) => `${d.code} ${d.message}`),
       tsgo: (g.get(ln) || []).map((d) => `${d.code} ${d.message}`),
     });
@@ -320,8 +410,17 @@ for (const fsPath of files) {
   if (fileDiverges) filesAnyDiverge++;
   else filesAllAgree++;
 
-  if (!onlyDiffer || fileDiverges) {
-    fileReports.push({ file, allAgree: !fileDiverges, lines: lineReports });
+  const verdict = fileDiverges
+    ? "DIVERGES"
+    : anyCode
+      ? "CODE DIFFERS"
+      : anyMessage
+        ? "MESSAGE DIFFERS"
+        : "ALL AGREE";
+  verdictCounts[verdict]++;
+
+  if (!onlyDiffer || verdict !== "ALL AGREE") {
+    fileReports.push({ file, allAgree: !fileDiverges, verdict, lines: lineReports });
   }
 }
 
@@ -334,6 +433,7 @@ const summary = {
   linesAllThreeAgree,
   linesPartial,
   pairwise: pair,
+  verdicts: verdictCounts,
   performance: {
     tsRust: { totalMs: tsRustRun.elapsedMs, peakRssKb: tsRustRun.peakRssKb, model: "single process, whole target" },
     tsc: {
@@ -409,6 +509,19 @@ if (asJson) {
       `(${filesAnyDiverge} diverge on at least one line)`,
   );
   console.log(`Line-level: ${linesAllThreeAgree} line(s) all three agree on, ${linesPartial} line(s) with a split.`);
+  console.log(
+    `ts-rust vs tsc, same line reported by both: ${pair.tsRustVsTsc.exact} exact, ` +
+      `${pair.tsRustVsTsc.messageDiffers} message differs, ${pair.tsRustVsTsc.codeDiffers} code differs`,
+  );
+  console.log(
+    `File verdicts: ${verdictCounts["ALL AGREE"]} ALL AGREE, ${verdictCounts["MESSAGE DIFFERS"]} MESSAGE DIFFERS, ` +
+      `${verdictCounts["CODE DIFFERS"]} CODE DIFFERS, ${verdictCounts.DIVERGES} DIVERGES (a line only some compilers report)`,
+  );
+  if (tsRustRun.elapsedMs > 0 && tscElapsedMs > 0)
+    console.log(
+      `ts-rust is ~${Math.round(tscElapsedMs / tsRustRun.elapsedMs).toLocaleString("en-US")}x faster than tsc` +
+        (tsRustRun.peakRssKb ? ` and uses ~${((memAfterKb / tsRustRun.peakRssKb)).toFixed(1)}x less memory (tsc figure includes this tool's own process)` : ""),
+    );
 }
 
 // === HTML report ==============================================================
@@ -421,19 +534,20 @@ if (htmlPath) {
       const lineRows = f.lines
         .map(
           (l) => `
-        <tr class="${l.tsRust.length && l.tsc.length && l.tsgo.length ? "agree" : "split"}">
+        <tr class="${l.tsRust.length && l.tsc.length && l.tsgo.length ? (l.result === "message" || l.result === "code" ? "differs" : "agree") : "split"}">
           <td class="line">${l.line}</td>
           <td>${l.tsRust.map(esc).join("<br>") || "<span class=dim>—</span>"}</td>
           <td>${l.tsc.map(esc).join("<br>") || "<span class=dim>—</span>"}</td>
           <td>${l.tsgo.map(esc).join("<br>") || "<span class=dim>—</span>"}</td>
+          <td>${esc(RESULT_LABEL[l.result])}</td>
         </tr>`,
         )
         .join("");
       return `
-      <details ${f.allAgree ? "" : "open"} class="${f.allAgree ? "file-agree" : "file-split"}">
-        <summary>${esc(f.file)} <span class="badge">${f.allAgree ? "ALL AGREE" : "DIVERGES"}</span></summary>
+      <details ${f.verdict === "ALL AGREE" ? "" : "open"} class="${f.verdict === "ALL AGREE" ? "file-agree" : f.verdict === "DIVERGES" ? "file-split" : "file-differs"}">
+        <summary>${esc(f.file)} <span class="badge">${f.verdict}</span></summary>
         <table class="lines">
-          <thead><tr><th>line</th><th>ts-rust</th><th>tsc</th><th>tsgo</th></tr></thead>
+          <thead><tr><th>line</th><th>ts-rust</th><th>tsc</th><th>tsgo</th><th>ts-rust vs tsc</th></tr></thead>
           <tbody>${lineRows}</tbody>
         </table>
       </details>`;
@@ -462,6 +576,7 @@ if (htmlPath) {
   th { background:#161b22; color:#58a6ff; }
   tr.agree td { color:#8b949e; }
   tr.split td { color:#f0d264; }
+  tr.differs td { color:#79c0ff; }
   .dim { color:#484f58; }
   details { background:#0d1117; border:1px solid #30363d; border-radius:8px; margin-bottom:.6rem; padding:.5rem .8rem; }
   details.file-split { border-color:#f0883e; }
@@ -469,6 +584,8 @@ if (htmlPath) {
   .badge { font-size:.7rem; padding:.1rem .5rem; border-radius:4px; margin-left:.5rem; }
   .file-agree .badge { background:#238636; color:#fff; }
   .file-split .badge { background:#f0883e; color:#000; }
+  details.file-differs { border-color:#58a6ff; }
+  .file-differs .badge { background:#58a6ff; color:#000; }
   table.lines { margin-top:.6rem; }
   footer { color:#484f58; font-size:.75rem; margin-top:2rem; }
 </style>
@@ -503,7 +620,7 @@ if (htmlPath) {
   <table>
     <thead><tr><th>pair</th><th>agree</th><th>left-only</th><th>right-only</th></tr></thead>
     <tbody>
-      <tr><td>ts-rust vs tsc</td><td>${pair.tsRustVsTsc.agree}</td><td>${pair.tsRustVsTsc.tsRustOnly}</td><td>${pair.tsRustVsTsc.tscOnly}</td></tr>
+      <tr><td>ts-rust vs tsc</td><td>${pair.tsRustVsTsc.agree} (${pair.tsRustVsTsc.exact} exact, ${pair.tsRustVsTsc.messageDiffers} message differs, ${pair.tsRustVsTsc.codeDiffers} code differs)</td><td>${pair.tsRustVsTsc.tsRustOnly}</td><td>${pair.tsRustVsTsc.tscOnly}</td></tr>
       <tr><td>ts-rust vs tsgo</td><td>${pair.tsRustVsTsgo.agree}</td><td>${pair.tsRustVsTsgo.tsRustOnly}</td><td>${pair.tsRustVsTsgo.tsgoOnly}</td></tr>
       <tr><td>tsc vs tsgo</td><td>${pair.tscVsTsgo.agree}</td><td>${pair.tscVsTsgo.tscOnly}</td><td>${pair.tscVsTsgo.tsgoOnly}</td></tr>
     </tbody>
