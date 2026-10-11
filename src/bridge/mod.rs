@@ -1,5 +1,6 @@
 mod context;
 mod declare;
+mod exports;
 mod expressions;
 mod narrow;
 mod parse;
@@ -14,11 +15,13 @@ use oxc_semantic::Semantic;
 use crate::arena::{TypeArena, TypeArenaStats};
 use crate::diagnostics::Diagnostic;
 use crate::error::CheckerError;
+use crate::keys::ModuleKey;
 use crate::namespace::NamespaceStats;
 use crate::semantic::queries::QueryStats;
 use crate::types::FileId;
 use crate::unit::CancelToken;
 use context::CheckContext;
+pub(crate) use exports::ExportTable;
 
 pub use parse::parse;
 
@@ -53,13 +56,13 @@ pub fn check_program_with_state(
     file_id: FileId,
     arena: &mut TypeArena,
 ) -> Result<(Vec<Diagnostic>, CheckMetrics), CheckerError> {
-    match check_file(source, file_name, file_id, arena, None)? {
-        Some(checked) => Ok(checked),
+    match check_file(source, file_name, file_id, arena, None, None)? {
+        Some((diagnostics, metrics, _exports)) => Ok((diagnostics, metrics)),
         None => unreachable!("a check without a cancel token is never cancelled"),
     }
 }
 
-pub(crate) type Checked = (Vec<Diagnostic>, CheckMetrics);
+pub(crate) type Checked = (Vec<Diagnostic>, CheckMetrics, ExportTable);
 
 // The same check under an optional cancel token. A cancelled check returns None: it has
 // no diagnostics to report, because the ones found before the stop are a prefix of the
@@ -71,6 +74,7 @@ pub(crate) fn check_file(
     file_id: FileId,
     arena: &mut TypeArena,
     cancel: Option<&CancelToken>,
+    module: Option<ModuleKey>,
 ) -> Result<Option<Checked>, CheckerError> {
     arena.clear();
     if cancel.is_some_and(CancelToken::is_cancelled) {
@@ -94,10 +98,17 @@ pub(crate) fn check_file(
         *arena = ctx.arena;
         return Ok(None);
     }
-    let checked = publish(&mut ctx);
+    // Read the exports out before publish and before the arena goes back: they are
+    // copied out of it, and it is cleared as soon as the unit ends. A check with no
+    // module key has no identity to give a declaration, so it exports nothing.
+    let exports = match module {
+        Some(module) => exports::collect_exports(&program, &mut ctx, module),
+        None => ExportTable::default(),
+    };
+    let (diagnostics, metrics) = publish(&mut ctx);
 
     *arena = ctx.arena;
-    Ok(Some(checked))
+    Ok(Some((diagnostics, metrics, exports)))
 }
 
 fn declare_phase<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckContext<'ast, '_>) {
@@ -120,7 +131,7 @@ fn bodies_phase<'ast>(
 
 // Turns what the passes left in the namespace into diagnostics and returns the file's
 // diagnostics in order, with the metrics of the check that made them.
-fn publish(ctx: &mut CheckContext<'_, '_>) -> Checked {
+fn publish(ctx: &mut CheckContext<'_, '_>) -> (Vec<Diagnostic>, CheckMetrics) {
     for span in ctx.namespace.take_too_complex() {
         ctx.error(
             crate::diagnostic_messages::messages::expression_too_complex(),
