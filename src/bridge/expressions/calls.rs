@@ -147,41 +147,66 @@ pub(super) fn infer_new_expression_type(
     )
 }
 
+enum PickedCallable {
+    // The member to check the call against in the ordinary way.
+    Member(TypeId),
+    // The call has been reported already; this is the type it is left with.
+    Reported(TypeId),
+}
+
+// How one function signature meets a call's arguments.
+enum Fit {
+    Fits,
+    WrongArity,
+    // The first argument that is not assignable to its parameter.
+    WrongArgument { index: usize, parameter: TypeId },
+}
+
 // A call through an intersection of functions uses the first member that accepts it, in the
 // order the members were written (LLD 1.13): `F1 & F2` called with an argument both accept
 // runs `F1`, and `F2 & F1` runs `F2`. There are no overloads elsewhere in this checker, so
 // this is the one place a callee has more than one signature.
 //
+// When no member accepts the call, tsc does not simply blame the first one:
+// - if every member fails on how many arguments there are, it is one TS2554 for the whole
+//   set, with the range the members allow together (`Expected 1-2 arguments`);
+// - if just one member gets past the arity check, that member's own error is the answer
+//   (the ordinary TS2345), so it is handed back to be checked like any single signature;
+// - if two or more do, it is TS2769 "No overload matches this call." with one branch per
+//   such overload saying why it was rejected, numbered among those overloads. It sits on
+//   the argument when every overload fails on the same one and on the callee otherwise.
+// The callee's position is the call's span here; the comparison with tsc goes by line.
+//
 // The argument types are inferred once here and whatever that reported is dropped; the
 // ordinary check of the member picked then infers and reports them again, so each problem
-// in an argument is still reported once. When no member accepts the call, the first one is
-// used and its errors are the ones reported. A spread argument is not probed: its length
+// in an argument is still reported once. A spread argument is not probed: its length
 // is not known, so the first function member is used.
 fn pick_callable_member(
     callee_type: TypeId,
     arguments: &[oxc_ast::ast::Argument<'_>],
+    call_span: Span,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
-) -> TypeId {
+) -> PickedCallable {
     let Type::Intersection(members) = ctx.arena.get(callee_type).clone() else {
-        return callee_type;
+        return PickedCallable::Member(callee_type);
     };
     if ctx.arena.intersection_reduces_to_never(callee_type) {
-        return callee_type;
+        return PickedCallable::Member(callee_type);
     }
     let callable: Vec<TypeId> = members
         .into_iter()
         .filter(|&member| matches!(ctx.arena.get(member), Type::Function(_)))
         .collect();
     match callable.as_slice() {
-        [] => callee_type,
-        [only] => *only,
+        [] => PickedCallable::Member(callee_type),
+        [only] => PickedCallable::Member(*only),
         _ => {
             let has_spread = arguments
                 .iter()
                 .any(|argument| matches!(argument, oxc_ast::ast::Argument::SpreadElement(_)));
             if has_spread {
-                return callable[0];
+                return PickedCallable::Member(callable[0]);
             }
             let reported_before = ctx.diagnostics.len();
             let argument_types: Vec<TypeId> = arguments
@@ -191,30 +216,142 @@ fn pick_callable_member(
                 .collect();
             ctx.diagnostics.truncate(reported_before);
 
-            callable
+            let fits: Vec<(TypeId, Fit)> = callable
                 .iter()
-                .copied()
-                .find(|&member| match ctx.arena.get(member) {
-                    Type::Function(function) => {
-                        accepts_arguments(&ctx.arena, function, &argument_types)
-                    }
-                    _ => false,
+                .map(|&member| {
+                    let fit = match ctx.arena.get(member) {
+                        Type::Function(function) => fit_of(&ctx.arena, function, &argument_types),
+                        _ => Fit::WrongArity,
+                    };
+                    (member, fit)
                 })
-                .unwrap_or(callable[0])
+                .collect();
+            if let Some((member, _)) = fits.iter().find(|(_, fit)| matches!(fit, Fit::Fits)) {
+                return PickedCallable::Member(*member);
+            }
+
+            let rejected: Vec<(TypeId, usize, TypeId)> = fits
+                .iter()
+                .filter_map(|(member, fit)| match fit {
+                    Fit::WrongArgument { index, parameter } => Some((*member, *index, *parameter)),
+                    _ => None,
+                })
+                .collect();
+            match rejected.as_slice() {
+                [] => report_arity_over_all(&callable, arguments, call_span, ctx),
+                [(only, ..)] => PickedCallable::Member(*only),
+                _ => report_no_overload_matches(
+                    &rejected,
+                    &argument_types,
+                    arguments,
+                    call_span,
+                    ctx,
+                ),
+            }
         }
     }
 }
 
-// Whether a call with these argument types fits the function: enough arguments, not too
+// Every member fails on the number of arguments: one TS2554 over the range the members allow
+// together, from the fewest any of them needs to the most any of them takes (open-ended when
+// one has a rest parameter).
+fn report_arity_over_all(
+    callable: &[TypeId],
+    arguments: &[oxc_ast::ast::Argument<'_>],
+    call_span: Span,
+    ctx: &mut CheckContext<'_, '_>,
+) -> PickedCallable {
+    let mut fewest = usize::MAX;
+    let mut most: Option<usize> = Some(0);
+    for &member in callable {
+        if let Type::Function(function) = ctx.arena.get(member) {
+            let required = function
+                .params
+                .iter()
+                .filter(|param| !param.optional && !param.rest)
+                .count();
+            fewest = fewest.min(required);
+            let has_rest = function.params.last().is_some_and(|param| param.rest);
+            most = match (most, has_rest) {
+                (_, true) | (None, _) => None,
+                (Some(current), false) => Some(current.max(function.params.len())),
+            };
+        }
+    }
+    let arity_span = match most {
+        Some(most) if arguments.len() > most => arguments[most].span(),
+        _ => call_span,
+    };
+    ctx.error(arity_message(fewest, most, arguments.len()), arity_span);
+    let first_return = match ctx.arena.get(callable[0]) {
+        Type::Function(function) => function.return_type,
+        _ => ctx.arena.error(),
+    };
+    PickedCallable::Reported(first_return)
+}
+
+// Two or more members passed the arity check and each failed on an argument: tsc's TS2769.
+// Each branch is the line naming the overload and the reason under it, which is the
+// ordinary "Argument of type ... is not assignable to parameter of type ..." text.
+fn report_no_overload_matches(
+    rejected: &[(TypeId, usize, TypeId)],
+    argument_types: &[TypeId],
+    arguments: &[oxc_ast::ast::Argument<'_>],
+    call_span: Span,
+    ctx: &mut CheckContext<'_, '_>,
+) -> PickedCallable {
+    let mut text = String::from("No overload matches this call.");
+    for (number, (member, index, parameter)) in rejected.iter().enumerate() {
+        let signature = match ctx.arena.get(*member) {
+            Type::Function(function) => {
+                crate::type_display::display_signature(&ctx.arena, function)
+            }
+            _ => String::new(),
+        };
+        text.push_str(&format!(
+            "\n  Overload {} of {}, '{}', gave the following error.",
+            number + 1,
+            rejected.len(),
+            signature
+        ));
+        let reason = crate::diagnostic_messages::messages::argument_not_assignable(
+            &ctx.arena,
+            argument_types[*index],
+            *parameter,
+        );
+        for line in reason.text.lines() {
+            text.push_str("\n    ");
+            text.push_str(line);
+        }
+    }
+
+    let same_argument = rejected.iter().all(|(_, index, _)| *index == rejected[0].1);
+    let span = if same_argument {
+        arguments[rejected[0].1].span()
+    } else {
+        call_span
+    };
+    ctx.error(
+        crate::diagnostic_messages::messages::no_overload_matches(text),
+        span,
+    );
+    let first_return = match ctx.arena.get(rejected[0].0) {
+        Type::Function(function) => function.return_type,
+        _ => ctx.arena.error(),
+    };
+    PickedCallable::Reported(first_return)
+}
+
+// How a call with these argument types meets the function: enough arguments, not too
 // many, and each one assignable to its parameter. A parameter that mentions a type
 // parameter is not judged here, since what it accepts depends on inference; arity decides.
-fn accepts_arguments(
+fn fit_of(
     arena: &crate::arena::TypeArena,
     function: &FunctionType,
     argument_types: &[TypeId],
-) -> bool {
+) -> Fit {
     if function.is_untyped {
-        return true;
+        return Fit::Fits;
     }
     let required = function
         .params
@@ -223,13 +360,13 @@ fn accepts_arguments(
         .count();
     let rest = function.params.last().filter(|param| param.rest);
     if argument_types.len() < required {
-        return false;
+        return Fit::WrongArity;
     }
     if rest.is_none() && argument_types.len() > function.params.len() {
-        return false;
+        return Fit::WrongArity;
     }
 
-    argument_types.iter().enumerate().all(|(index, &argument)| {
+    for (index, &argument) in argument_types.iter().enumerate() {
         let parameter = match function.params.get(index) {
             Some(param) if !param.rest => param.type_id,
             _ => match rest {
@@ -237,12 +374,16 @@ fn accepts_arguments(
                     Type::Array(element) => *element,
                     _ => rest.type_id,
                 },
-                None => return true,
+                None => continue,
             },
         };
-        crate::semantic::contains_type_param(arena, parameter)
-            || crate::subtyping::is_subtype(arena, argument, parameter)
-    })
+        let judged = crate::semantic::contains_type_param(arena, parameter)
+            || crate::subtyping::is_subtype(arena, argument, parameter);
+        if !judged {
+            return Fit::WrongArgument { index, parameter };
+        }
+    }
+    Fit::Fits
 }
 
 fn check_callable(
@@ -260,7 +401,19 @@ fn check_callable(
         explicit_type_args,
     } = site;
 
-    let callee_type = pick_callable_member(callee_type, arguments, scoping, ctx);
+    let callee_type = match pick_callable_member(callee_type, arguments, span, scoping, ctx) {
+        PickedCallable::Member(member) => member,
+        // The call was reported as a whole (tsc's TS2769, or one arity message over every
+        // overload). The arguments are still looked at for their own mistakes, once.
+        PickedCallable::Reported(return_type) => {
+            for arg in arguments {
+                if let Some(arg_expr) = arg.as_expression() {
+                    infer_expression_type(arg_expr, scoping, ctx);
+                }
+            }
+            return return_type;
+        }
+    };
 
     let Type::Function(function_type) = ctx.arena.get(callee_type).clone() else {
         // Any and Error both mean "do not report a second, likely-noisy error on

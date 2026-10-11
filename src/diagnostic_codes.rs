@@ -41,6 +41,7 @@ pub enum DiagnosticCode {
     ArgumentArityMismatch,
     ArgumentArityAtLeast,
     SpreadArgumentNotTupleOrRest,
+    NoOverloadMatches,
 
     // 1200s -- name / member resolution
     UnresolvedIdentifier,
@@ -64,6 +65,9 @@ pub enum DiagnosticCode {
     // 1600s -- reachability
     UnreachableCode,
 
+    // 1700s -- type construction
+    ExpressionTooComplex,
+
     // 9000s -- not yet implemented (all currently emitted as warnings)
     UnimplementedCallExpressionKind,
     UnimplementedNewExpressionTarget,
@@ -79,6 +83,9 @@ pub enum DiagnosticCode {
     UnresolvableTypeAnnotation,
     UnresolvableDestructuringTypeAnnotation,
     UnresolvableTypeParameterConstraint,
+
+    // 9100s -- the checker itself failed (no tsc counterpart)
+    InternalCheckerError,
 }
 
 impl DiagnosticCode {
@@ -111,6 +118,7 @@ impl DiagnosticCode {
             NotConstructor => "TSR1103",
             ArgumentArityAtLeast => "TSR1104",
             SpreadArgumentNotTupleOrRest => "TSR1105",
+            NoOverloadMatches => "TSR1106",
 
             UnresolvedIdentifier => "TSR1201",
             PropertyDoesNotExist => "TSR1202",
@@ -141,8 +149,10 @@ impl DiagnosticCode {
             UnresolvableTypeAnnotation => "TSR9012",
             UnresolvableDestructuringTypeAnnotation => "TSR9013",
             UnresolvableTypeParameterConstraint => "TSR9014",
+            InternalCheckerError => "TSR9101",
 
             UnreachableCode => "TSR1601",
+            ExpressionTooComplex => "TSR1701",
         }
     }
 }
@@ -183,6 +193,7 @@ impl DiagnosticCode {
             ArgumentArityMismatch => 2554,
             ArgumentArityAtLeast => 2555,
             SpreadArgumentNotTupleOrRest => 2556,
+            NoOverloadMatches => 2769,
 
             UnresolvedIdentifier => 2304,
             PropertyDoesNotExist => 2339,
@@ -200,6 +211,7 @@ impl DiagnosticCode {
             ImplicitAnyThis => 2683,
 
             UnreachableCode => 7027,
+            ExpressionTooComplex => 2590,
 
             UnimplementedCallExpressionKind
             | UnimplementedNewExpressionTarget
@@ -214,7 +226,8 @@ impl DiagnosticCode {
             | UnimplementedStatementKind
             | UnresolvableTypeAnnotation
             | UnresolvableDestructuringTypeAnnotation
-            | UnresolvableTypeParameterConstraint => return None,
+            | UnresolvableTypeParameterConstraint
+            | InternalCheckerError => return None,
         })
     }
 

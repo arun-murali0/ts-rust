@@ -89,6 +89,9 @@ pub(super) fn check_expression_statement(
 // declare pass and need no body-checking here, so they are explicitly matched to
 // a no-op rather than falling through to the unsupported-statement warning.
 pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut CheckContext<'_, '_>) {
+    if ctx.should_stop() {
+        return;
+    }
     match stmt {
         Statement::TSTypeAliasDeclaration(_)
         | Statement::TSInterfaceDeclaration(_)

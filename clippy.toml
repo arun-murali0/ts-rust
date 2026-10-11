@@ -1,0 +1,16 @@
+# LLD 8.2: nothing that influences output may depend on hash map iteration order. These
+# name the methods that walk a HashMap or HashSet (FxHashMap is the same type with another
+# hasher, so it is covered too). A `for` loop over a map goes through IntoIterator and is
+# not reachable by path here, so it still needs review.
+disallowed-methods = [
+    { path = "std::collections::HashMap::iter", reason = "iteration order is not deterministic (LLD 8.2)" },
+    { path = "std::collections::HashMap::iter_mut", reason = "iteration order is not deterministic (LLD 8.2)" },
+    { path = "std::collections::HashMap::keys", reason = "iteration order is not deterministic (LLD 8.2)" },
+    { path = "std::collections::HashMap::values", reason = "iteration order is not deterministic (LLD 8.2)" },
+    { path = "std::collections::HashMap::values_mut", reason = "iteration order is not deterministic (LLD 8.2)" },
+    { path = "std::collections::HashMap::drain", reason = "iteration order is not deterministic (LLD 8.2)" },
+    { path = "std::collections::HashMap::into_keys", reason = "iteration order is not deterministic (LLD 8.2)" },
+    { path = "std::collections::HashMap::into_values", reason = "iteration order is not deterministic (LLD 8.2)" },
+    { path = "std::collections::HashSet::iter", reason = "iteration order is not deterministic (LLD 8.2)" },
+    { path = "std::collections::HashSet::drain", reason = "iteration order is not deterministic (LLD 8.2)" },
+]

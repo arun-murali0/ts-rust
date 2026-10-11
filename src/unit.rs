@@ -1,0 +1,197 @@
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use thiserror::Error;
+
+use crate::arena::TypeArena;
+use crate::bridge::{self, Checked};
+use crate::diagnostic_messages::messages;
+use crate::diagnostics::{Diagnostic, Severity};
+use crate::error::CheckerError;
+use crate::types::FileId;
+
+// A flag a caller raises to stop a unit that is no longer wanted, such as a file edited
+// again while its last check is still running. Clones share the one flag, so the caller
+// keeps one and the unit gets another. Raising it is advisory: the checker looks at the
+// start of a unit and every few statements, not between every operation.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+// What one unit of work reads and never changes. A unit is one file for now; it becomes
+// one strongly connected component of the module graph when the graph driver lands
+// (LLD 4.3), and the graph and the dependency outputs join this struct then.
+pub struct UnitContext<'a> {
+    pub file_id: FileId,
+    pub file_name: &'a str,
+    pub source: &'a str,
+    pub cancel: Option<CancelToken>,
+}
+
+impl<'a> UnitContext<'a> {
+    pub fn new(file_id: FileId, file_name: &'a str, source: &'a str) -> Self {
+        Self {
+            file_id,
+            file_name,
+            source,
+            cancel: None,
+        }
+    }
+
+    pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+}
+
+// Everything a unit hands back, and nothing that points into its arena: no TypeId, no
+// borrow. The compile-time check below keeps it that way for Send and 'static, and
+// LLD 2.1 rule 3 keeps TypeId out by review.
+//
+// incomplete is set when the diagnostics cannot be taken as the file's full list, which
+// today means the checker crashed on it. Units that depend on this one will read it to
+// treat its exports as unknown instead of trusting them.
+#[derive(Debug)]
+pub struct UnitOutput {
+    pub diagnostics: Vec<Diagnostic>,
+    pub incomplete: bool,
+}
+
+const _: fn() = || {
+    fn owned_and_sendable<T: Send + 'static>() {}
+    owned_and_sendable::<UnitOutput>();
+};
+
+#[derive(Debug, Error)]
+pub enum UnitError {
+    // A cancelled unit has no output and is never cached (LLD 5.5).
+    #[error("the unit was cancelled")]
+    Cancelled,
+    #[error(transparent)]
+    Checker(#[from] CheckerError),
+}
+
+// One per thread that checks units. It owns the arena and hands it to each unit in
+// turn, cleared, so the allocation survives from one unit to the next and nothing a unit
+// declared is visible to the one after it.
+pub struct Worker {
+    arena: TypeArena,
+}
+
+impl Worker {
+    pub fn new() -> Self {
+        Self {
+            arena: TypeArena::new(),
+        }
+    }
+
+    // Runs f against the worker's arena and resets the arena afterwards. R is owned and
+    // Send so a result cannot keep a borrow of the arena alive past the reset.
+    pub(crate) fn run_unit<R>(
+        &mut self,
+        _ctx: &UnitContext<'_>,
+        f: impl FnOnce(&mut TypeArena) -> R,
+    ) -> R
+    where
+        R: Send + 'static,
+    {
+        let out = f(&mut self.arena);
+        self.arena.clear();
+        out
+    }
+
+    pub fn check_unit(&mut self, ctx: &UnitContext<'_>) -> Result<UnitOutput, UnitError> {
+        self.contained(ctx, |arena| {
+            bridge::check_file(
+                ctx.source,
+                ctx.file_name,
+                ctx.file_id,
+                arena,
+                ctx.cancel.as_ref(),
+            )
+        })
+    }
+
+    // A panic inside the check is caught here and turned into an output with one
+    // internal-error diagnostic, marked incomplete, so one bad file does not take the
+    // worker down with it. The arena is replaced rather than cleared: a panic can leave
+    // it half-built, and a fresh one is the only state known to be sound.
+    fn contained(
+        &mut self,
+        ctx: &UnitContext<'_>,
+        check: impl FnOnce(&mut TypeArena) -> Result<Option<Checked>, CheckerError>,
+    ) -> Result<UnitOutput, UnitError> {
+        let ran = catch_unwind(AssertUnwindSafe(|| self.run_unit(ctx, check)));
+
+        match ran {
+            Ok(Ok(Some((diagnostics, _metrics)))) => Ok(UnitOutput {
+                diagnostics,
+                incomplete: false,
+            }),
+            Ok(Ok(None)) => Err(UnitError::Cancelled),
+            Ok(Err(error)) => Err(error.into()),
+            Err(_panic) => {
+                self.arena = TypeArena::new();
+                Ok(crashed(ctx))
+            }
+        }
+    }
+}
+
+impl Default for Worker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
+    let message = messages::internal_checker_error();
+    UnitOutput {
+        diagnostics: vec![Diagnostic {
+            severity: Severity::Error,
+            code: message.code,
+            message: message.text,
+            file_name: ctx.file_name.to_string(),
+            start: 0,
+            end: 0,
+        }],
+        incomplete: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_becomes_an_incomplete_output_and_the_worker_keeps_working() {
+        let mut worker = Worker::new();
+        let ctx = UnitContext::new(FileId::ROOT, "boom.ts", "const n: number = 1;");
+
+        let crashed = worker
+            .contained(&ctx, |_| panic!("checker bug"))
+            .expect("a panic is an output, not an error");
+        assert!(crashed.incomplete);
+        assert_eq!(crashed.diagnostics.len(), 1);
+        assert_eq!(crashed.diagnostics[0].code.to_string(), "TSR9101");
+        assert_eq!(crashed.diagnostics[0].file_name, "boom.ts");
+
+        let after = worker.check_unit(&ctx).unwrap();
+        assert!(!after.incomplete);
+        assert!(after.diagnostics.is_empty(), "{after:?}");
+    }
+}

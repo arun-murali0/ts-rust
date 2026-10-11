@@ -9,6 +9,7 @@ mod explain;
 mod fxhash;
 #[cfg(feature = "incremental")]
 mod incremental;
+mod lib_global_types;
 mod line_index;
 #[cfg(feature = "module-resolution")]
 mod module_resolution;
@@ -24,6 +25,7 @@ mod topology;
 mod type_annotation;
 mod type_display;
 mod types;
+mod unit;
 
 #[cfg(feature = "wasm")]
 mod wasm;
@@ -36,6 +38,7 @@ pub use diagnostics::{Diagnostic, Severity};
 pub use error::CheckerError;
 
 pub use line_index::LineIndex;
+pub use unit::{CancelToken, UnitContext, UnitError, UnitOutput, Worker};
 
 #[cfg(feature = "incremental")]
 pub use incremental::{

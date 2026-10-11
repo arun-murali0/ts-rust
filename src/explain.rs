@@ -142,7 +142,11 @@ pub fn render(levels: &[Level]) -> String {
 
 fn reason(arena: &TypeArena, source: TypeId, target: TypeId, depth: usize) -> Vec<Level> {
     let below = children(arena, source, target, depth);
-    if below.first().is_some_and(Level::is_missing) {
+    // A lone missing property is promoted to the head (tsc's TS2741) only for a plain
+    // object target. For `A & B` tsc keeps "not assignable to 'A & B'" as the head and puts
+    // the missing property beneath it, so the promotion is skipped there.
+    let target_is_intersection = matches!(arena.get(target), Type::Intersection(_));
+    if !target_is_intersection && below.first().is_some_and(Level::is_missing) {
         return below;
     }
     let mut levels = vec![Level::not_assignable(arena, source, target)];
@@ -157,6 +161,23 @@ fn children(arena: &TypeArena, source: TypeId, target: TypeId, depth: usize) -> 
     match (arena.get(source), arena.get(target)) {
         // An enum is a primitive to tsc and a mismatch below it is not elaborated.
         (Type::Union(_), _) if arena.is_enum(source) => Vec::new(),
+        // Problem: a mismatch against `A & B` stopped at "not assignable to 'A & B'", where
+        // tsc goes on to say which part of the intersection failed.
+        // Picked: assignable to an intersection means assignable to every member, so the
+        // reason is the first member the source does not satisfy, explained as if that
+        // member alone were the target (a plain "not assignable" line, or the missing
+        // property it lacks). A union source is left to the arms below, which already
+        // explain it member by member.
+        (source_type, Type::Intersection(members)) if !matches!(source_type, Type::Union(_)) => {
+            match members
+                .iter()
+                .copied()
+                .find(|&member| !crate::subtyping::is_subtype(arena, source, member))
+            {
+                Some(failing) => reason(arena, source, failing, depth + 1),
+                None => Vec::new(),
+            }
+        }
         // Nothing but the parameter itself (or never/any, which never get here) is
         // assignable to a type parameter, since it could be instantiated as anything.
         // tsc says so, and says which of two things is true of the constraint.
