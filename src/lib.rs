@@ -9,15 +9,22 @@ mod explain;
 mod fxhash;
 #[cfg(feature = "incremental")]
 mod incremental;
+mod keys;
 mod lib_global_types;
 mod line_index;
 #[cfg(feature = "module-resolution")]
 mod module_resolution;
 mod namespace;
+#[allow(dead_code)]
+mod portable;
 mod project;
 #[cfg(feature = "scratchpad")]
 mod scratchpad;
 mod semantic;
+#[allow(dead_code)]
+mod stable_hash;
+#[allow(dead_code)]
+mod stable_walk;
 mod subtyping;
 mod symbol_map;
 #[cfg(feature = "module-resolution")]
@@ -37,7 +44,10 @@ pub use diagnostic_view::{DiagnosticView, Position, Range};
 pub use diagnostics::{Diagnostic, Severity};
 pub use error::CheckerError;
 
+pub use keys::{DeclKey, DeclKind, ENC_VERSION, ModuleKey, NodeHash, SigHash, TypeParamKey};
 pub use line_index::LineIndex;
+pub use portable::{DeclProvider, PNode, PParam, PProp, PTypeParam, PortableDecl, PortableType};
+pub use stable_hash::Prim;
 pub use unit::{CancelToken, UnitContext, UnitError, UnitOutput, Worker};
 
 #[cfg(feature = "incremental")]

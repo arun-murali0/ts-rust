@@ -42,7 +42,7 @@ dhat = { version = "0.3", optional = true }
 smallvec = "1.16"
 oxc_resolver = { version = "=11.24.3", optional = true }
 rayon = { version = "1.10", optional = true }
-xxhash-rust = { version = "0.8", features = ["xxh3"], optional = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 petgraph = { version = "=0.8.3", optional = true }
 salsa = { version = "=0.28.5", optional = true }
 bumpalo = { version = "=3.20.3", optional = true }
@@ -102,7 +102,7 @@ dhat-heap = ["dep:dhat"]
 # Project-level module resolution and the module graph. Off by default because it
 # reads the filesystem through oxc_resolver, which single-file, in-memory and wasm
 # callers neither have nor want.
-module-resolution = ["dep:oxc_resolver", "dep:rayon", "dep:xxhash-rust", "dep:petgraph"]
+module-resolution = ["dep:oxc_resolver", "dep:rayon", "dep:petgraph"]
 
 # Salsa inputs and memoized queries over project files. A shell around the checker for
 # now; see docs/architecture-foundation.md.
