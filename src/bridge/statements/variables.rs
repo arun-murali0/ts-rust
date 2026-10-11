@@ -94,10 +94,11 @@ fn check_identifier_declarator(
                 find_unresolved_type_name(&annotation.type_annotation, scoping, &ctx.namespace)
             });
             match unknown_name {
-                Some((name, span)) => ctx.error(
-                    crate::diagnostic_messages::messages::unresolved_identifier(&name),
-                    span,
-                ),
+                // An unknown name is reported by the whole-file pass in
+                // unresolved_names.rs, at the name itself and once; saying it here as
+                // well would report it twice. It only decides that this is not a
+                // "could not be resolved" warning.
+                Some(_) => {}
                 None => ctx.warning(
                     crate::diagnostic_messages::messages::unresolvable_type_annotation(&id.name),
                     declarator.span(),
@@ -200,10 +201,11 @@ fn check_destructured_declarator(
                 find_unresolved_type_name(&annotation.type_annotation, scoping, &ctx.namespace)
             });
             match unknown_name {
-                Some((name, span)) => ctx.error(
-                    crate::diagnostic_messages::messages::unresolved_identifier(&name),
-                    span,
-                ),
+                // An unknown name is reported by the whole-file pass in
+                // unresolved_names.rs, at the name itself and once; saying it here as
+                // well would report it twice. It only decides that this is not a
+                // "could not be resolved" warning.
+                Some(_) => {}
                 None => ctx.warning(
                     crate::diagnostic_messages::messages::unresolvable_destructuring_type_annotation(),
                     declarator.span(),

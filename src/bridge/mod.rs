@@ -5,8 +5,11 @@ mod narrow;
 mod parse;
 mod statements;
 mod unreachable_code;
+mod unresolved_names;
 
 use oxc_allocator::Allocator;
+use oxc_ast::ast::Program;
+use oxc_semantic::Semantic;
 
 use crate::arena::{TypeArena, TypeArenaStats};
 use crate::diagnostics::Diagnostic;
@@ -14,6 +17,7 @@ use crate::error::CheckerError;
 use crate::namespace::NamespaceStats;
 use crate::semantic::queries::QueryStats;
 use crate::types::FileId;
+use crate::unit::CancelToken;
 use context::CheckContext;
 
 pub use parse::parse;
@@ -32,10 +36,12 @@ pub struct CheckMetrics {
     pub namespace: NamespaceStats,
 }
 
-// The whole checking pipeline in two passes: declare_top_level resolves every
-// top-level signature first, so a function can call another declared later in the
-// same file, then check_top_level walks statement and expression bodies against
-// those already-resolved signatures.
+// The whole checking pipeline for one file, in the phases LLD 4.3 gives a unit: declare
+// resolves every top-level signature first, so a function can call another declared
+// later in the same file, then bodies walks statement and expression bodies against
+// those already-resolved signatures, then publish turns what the passes collected into
+// the ordered diagnostic list. The shapes phase has no pass of its own yet, because
+// declare resolves signatures eagerly; it splits out when expansion becomes lazy.
 //
 // The arena is borrowed, not created here, so a CheckSession can keep one allocation
 // across successive versions of a file. It is cleared first, so nothing from the
@@ -47,7 +53,29 @@ pub fn check_program_with_state(
     file_id: FileId,
     arena: &mut TypeArena,
 ) -> Result<(Vec<Diagnostic>, CheckMetrics), CheckerError> {
+    match check_file(source, file_name, file_id, arena, None)? {
+        Some(checked) => Ok(checked),
+        None => unreachable!("a check without a cancel token is never cancelled"),
+    }
+}
+
+pub(crate) type Checked = (Vec<Diagnostic>, CheckMetrics);
+
+// The same check under an optional cancel token. A cancelled check returns None: it has
+// no diagnostics to report, because the ones found before the stop are a prefix of the
+// file's and would pass for the whole list. The arena goes back to the caller either
+// way.
+pub(crate) fn check_file(
+    source: &str,
+    file_name: &str,
+    file_id: FileId,
+    arena: &mut TypeArena,
+    cancel: Option<&CancelToken>,
+) -> Result<Option<Checked>, CheckerError> {
     arena.clear();
+    if cancel.is_some_and(CancelToken::is_cancelled) {
+        return Ok(None);
+    }
 
     let allocator = Allocator::default();
     let program = parse(&allocator, source, file_name)?;
@@ -55,14 +83,50 @@ pub fn check_program_with_state(
     // here, and it is where the control flow graph lives once flow analysis reads
     // it. Keeping only the Scoping would drop the graph along with the rest.
     let semantic = parse::analyze(&program);
-    let scoping = semantic.scoping();
 
     let reusable_arena = std::mem::take(arena);
     let mut ctx = CheckContext::with_arena_and_file_id(file_name, file_id, reusable_arena);
+    ctx.cancel = cancel.cloned();
 
-    declare::declare_top_level(&program, &mut ctx);
-    statements::check_top_level(&program, scoping, &mut ctx);
-    unreachable_code::check_unreachable_code(&program, &semantic, &mut ctx);
+    declare_phase(&program, &mut ctx);
+    bodies_phase(&program, &semantic, &mut ctx);
+    if ctx.cancelled {
+        *arena = ctx.arena;
+        return Ok(None);
+    }
+    let checked = publish(&mut ctx);
+
+    *arena = ctx.arena;
+    Ok(Some(checked))
+}
+
+fn declare_phase<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckContext<'ast, '_>) {
+    declare::declare_top_level(program, ctx);
+}
+
+fn bodies_phase<'ast>(
+    program: &'ast Program<'ast>,
+    semantic: &Semantic<'ast>,
+    ctx: &mut CheckContext<'ast, '_>,
+) {
+    let scoping = semantic.scoping();
+    statements::check_top_level(program, scoping, ctx);
+    if ctx.cancelled {
+        return;
+    }
+    unresolved_names::report_unresolved_type_names(program, scoping, ctx);
+    unreachable_code::check_unreachable_code(program, semantic, ctx);
+}
+
+// Turns what the passes left in the namespace into diagnostics and returns the file's
+// diagnostics in order, with the metrics of the check that made them.
+fn publish(ctx: &mut CheckContext<'_, '_>) -> Checked {
+    for span in ctx.namespace.take_too_complex() {
+        ctx.error(
+            crate::diagnostic_messages::messages::expression_too_complex(),
+            span,
+        );
+    }
 
     for (name, span) in ctx.namespace.take_implicit_any_params() {
         ctx.error(
@@ -133,12 +197,13 @@ pub fn check_program_with_state(
 
     // tsc reports in source order. Checking is not in source order (declarations are
     // resolved ahead of bodies, and a call reports its own error before its arguments'),
-    // so the list is put in order here. The sort is stable: two diagnostics at one
-    // position keep the order they were found in.
+    // so the list is put in order here: by start, then code, then message (LLD 8.1), so
+    // two diagnostics at one position come out in the same order however they were found.
     let mut diagnostics = std::mem::take(&mut ctx.diagnostics);
-    diagnostics.sort_by_key(|diagnostic| diagnostic.start);
-    *arena = ctx.arena;
-    Ok((diagnostics, metrics))
+    diagnostics.sort_by(|a, b| {
+        (a.start, a.code.as_str(), &a.message).cmp(&(b.start, b.code.as_str(), &b.message))
+    });
+    (diagnostics, metrics)
 }
 
 // The one-shot entry point, for callers that check a file once and do not need to

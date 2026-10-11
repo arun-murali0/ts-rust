@@ -8,6 +8,7 @@ use crate::semantic::SemanticQueries;
 use crate::semantic::queries::RelationCache;
 use crate::symbol_map::SymbolTypeMap;
 use crate::types::FileId;
+use crate::unit::CancelToken;
 
 use super::narrow::{JumpFrame, NarrowState, WriteMap};
 
@@ -95,7 +96,19 @@ pub struct CheckContext<'ast, 'src> {
     // Where each variable is written, collected once per file by check_top_level. Empty
     // until then, which makes every loop and closure behave as if nothing were assigned.
     pub writes: WriteMap,
+
+    // Set when a unit is checked under a token. The flag is read once every
+    // CANCEL_CHECK_INTERVAL statements rather than on each one, because statements are
+    // the hottest thing the walker visits and an atomic load per statement would show.
+    // Once it has seen the token cancelled, `cancelled` stays true and every later
+    // statement returns at once, which unwinds the walk without a panic or an error type
+    // threaded through every checker function.
+    pub cancel: Option<CancelToken>,
+    pub cancelled: bool,
+    statements_seen: u32,
 }
+
+const CANCEL_CHECK_INTERVAL: u32 = 32;
 
 // What a function body replaces on entry and gives back on exit, so the two pieces
 // of return bookkeeping can never be restored out of step with each other.
@@ -143,7 +156,25 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             jump_frames: Vec::new(),
             pending_loop_label: None,
             writes: WriteMap::default(),
+            cancel: None,
+            cancelled: false,
+            statements_seen: 0,
         }
+    }
+
+    // True once the unit has been cancelled; the statement walker asks before each
+    // statement and stops when it is.
+    pub fn should_stop(&mut self) -> bool {
+        if self.cancelled {
+            return true;
+        }
+        self.statements_seen = self.statements_seen.wrapping_add(1);
+        if self.statements_seen.is_multiple_of(CANCEL_CHECK_INTERVAL)
+            && self.cancel.as_ref().is_some_and(CancelToken::is_cancelled)
+        {
+            self.cancelled = true;
+        }
+        self.cancelled
     }
 
     pub fn error(&mut self, message: DiagnosticMessage, span: Span) {
@@ -185,5 +216,37 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             start: span.start,
             end: span.end,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context() -> CheckContext<'static, 'static> {
+        CheckContext::with_arena_and_file_id("t.ts", FileId::ROOT, TypeArena::new())
+    }
+
+    #[test]
+    fn a_raised_token_is_seen_within_one_interval_and_stays_seen() {
+        let token = CancelToken::new();
+        let mut ctx = context();
+        ctx.cancel = Some(token.clone());
+
+        for _ in 0..CANCEL_CHECK_INTERVAL - 1 {
+            assert!(!ctx.should_stop());
+        }
+        token.cancel();
+        assert!(ctx.should_stop());
+        assert!(ctx.cancelled);
+        assert!(ctx.should_stop());
+    }
+
+    #[test]
+    fn a_context_with_no_token_never_stops() {
+        let mut ctx = context();
+        for _ in 0..CANCEL_CHECK_INTERVAL * 4 {
+            assert!(!ctx.should_stop());
+        }
     }
 }

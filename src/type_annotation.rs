@@ -47,18 +47,21 @@ pub fn resolve_ts_type(
 
         // `A & B`. alloc_intersection does the work (LLD 1.13): flattening, the
         // primitive rules, distribution over unions. One that would distribute into too
-        // many members is TS2590 in tsc; there is no way to report it from here, so it
-        // reads as the error type, which suppresses what would follow from it.
+        // many members is TS2590 in tsc. It reads as the error type, which suppresses what
+        // would follow from it, and its span is noted on the namespace for the checker to
+        // report, since resolving an annotation has no diagnostics of its own to write to.
         TSType::TSIntersectionType(intersection) => {
             let mut members = Vec::with_capacity(intersection.types.len());
             for member in &intersection.types {
                 members.push(resolve_ts_type(member, namespace, arena)?);
             }
-            Some(
-                arena
-                    .alloc_intersection(members)
-                    .unwrap_or_else(|_| arena.error()),
-            )
+            match arena.alloc_intersection(members) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    namespace.note_too_complex(intersection.span);
+                    Some(arena.error())
+                }
+            }
         }
 
         TSType::TSTypeLiteral(literal) => {

@@ -287,6 +287,31 @@ pub mod messages {
         )
     }
 
+    // tsc's TS2769. `chain` is the whole text, headline and the lines under it, built by the
+    // call checker: unlike a mismatch, it has one branch per overload, which the linear
+    // `Level` chain cannot describe.
+    pub fn no_overload_matches(chain: String) -> DiagnosticMessage {
+        DiagnosticMessage::new(DiagnosticCode::NoOverloadMatches, chain)
+    }
+
+    // tsc's TS2590: distributing an intersection over unions would make more members than
+    // it is willing to build.
+    pub fn expression_too_complex() -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::ExpressionTooComplex,
+            "Expression produces a union type that is too complex to represent.",
+        )
+    }
+
+    // Not a tsc diagnostic: the checker stopped on an internal error while checking the
+    // file, so the diagnostics for it are missing or incomplete.
+    pub fn internal_checker_error() -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::InternalCheckerError,
+            "The checker stopped on an internal error; the results for this file are incomplete.",
+        )
+    }
+
     pub fn unresolved_identifier(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::UnresolvedIdentifier,

@@ -1032,6 +1032,10 @@ impl TypeArena {
     /// count alone understates what it holds. The maps report entry counts, not
     /// allocator capacity, which keeps this a semantic measure and not a detail of the
     /// hash table.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a sum does not depend on iteration order"
+    )]
     pub fn stats(&self) -> TypeArenaStats {
         TypeArenaStats {
             type_count: self.types.len(),

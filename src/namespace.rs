@@ -151,6 +151,11 @@ pub struct TypeNamespace<'a> {
     // Only collisions that are certainly illegal are recorded. See note_collision.
     declaration_collisions: Vec<(String, Span, bool)>,
 
+    // Intersections that would distribute into too many members (TS2590), by the span of
+    // the type that was written. Resolving an annotation has no diagnostics to write to, so
+    // they wait here until the checker drains them, as the collisions above do.
+    too_complex: Vec<Span>,
+
     // Where each name was first declared, so a later collision can point back at it,
     // and which names have already had that first declaration reported (a third
     // declaration must not report the first one again).
@@ -209,6 +214,7 @@ impl<'a> TypeNamespace<'a> {
             active_type_params: Vec::new(),
             merged_interface_parts: FxHashMap::default(),
             declaration_collisions: Vec::new(),
+            too_complex: Vec::new(),
             declaration_spans: FxHashMap::default(),
             reported_first_declaration: Vec::new(),
             type_param_cache: FxHashMap::default(),
@@ -282,6 +288,10 @@ impl<'a> TypeNamespace<'a> {
     }
 
     /// Counts for performance reports; see NamespaceStats.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "a sum does not depend on iteration order"
+    )]
     pub fn stats(&self) -> NamespaceStats {
         NamespaceStats {
             entries: self.entries.len(),
@@ -469,6 +479,19 @@ impl<'a> TypeNamespace<'a> {
 
     // The flag says an enum is one side of the collision, which tsc words differently
     // (TS2567) from two other declarations of one name (TS2300).
+    // A type that is written once can be resolved more than once (an alias is resolved
+    // again each time something asks for a fresh view of it), so the same span is noted
+    // at most once and tsc's single TS2590 is reported once.
+    pub fn note_too_complex(&mut self, span: Span) {
+        if !self.too_complex.contains(&span) {
+            self.too_complex.push(span);
+        }
+    }
+
+    pub fn take_too_complex(&mut self) -> Vec<Span> {
+        std::mem::take(&mut self.too_complex)
+    }
+
     pub fn take_declaration_collisions(&mut self) -> Vec<(String, Span, bool)> {
         std::mem::take(&mut self.declaration_collisions)
     }

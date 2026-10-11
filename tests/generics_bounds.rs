@@ -78,9 +78,11 @@ fn bound_without_primitives_still_widens() {
 
 #[test]
 fn unresolved_explicit_type_argument_keeps_the_others_in_place() {
-    assert_clean(
+    // Exactly the unknown-name error tsc gives for `Nope`, and no other.
+    assert_one_error(
         "unresolved_explicit_type_argument_keeps_the_others_in_place.ts",
         fixture!("unresolved_explicit_type_argument_keeps_the_others_in_place.ts"),
+        DiagnosticCode::UnresolvedIdentifier,
     );
 }
 

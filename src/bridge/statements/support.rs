@@ -5,7 +5,7 @@ use oxc_span::{GetSpan, Span};
 use crate::namespace::TypeNamespace;
 
 use super::super::context::CheckContext;
-use super::super::narrow::resolve_symbol_id;
+use super::super::unresolved_names::is_unresolved_type_name;
 
 pub(super) fn push_unsupported(stmt: &Statement, ctx: &mut CheckContext<'_, '_>) {
     let kind = stmt_kind_name(stmt);
@@ -156,9 +156,7 @@ pub(super) fn find_unresolved_type_name(
             let TSTypeName::IdentifierReference(id) = &reference.type_name else {
                 return None;
             };
-            let is_missing = resolve_symbol_id(id, scoping).is_none()
-                && !namespace.contains(&id.name)
-                && !is_global_lib_type(&id.name);
+            let is_missing = is_unresolved_type_name(id, scoping, namespace);
             is_missing.then(|| (id.name.to_string(), id.span))
         }
         TSType::TSArrayType(array) => {
@@ -192,56 +190,4 @@ pub(super) fn find_unresolved_type_name(
             }),
         _ => None,
     }
-}
-
-// Names that are always in scope in TypeScript without any declaration in the
-// file, because lib.d.ts provides them. ts-rust does not model these, so a
-// reference to one is an unsupported type, not a missing name.
-fn is_global_lib_type(name: &str) -> bool {
-    matches!(
-        name,
-        "Array"
-            | "ReadonlyArray"
-            | "Promise"
-            | "PromiseLike"
-            | "Record"
-            | "Partial"
-            | "Required"
-            | "Readonly"
-            | "Pick"
-            | "Omit"
-            | "Exclude"
-            | "Extract"
-            | "NonNullable"
-            | "ReturnType"
-            | "Parameters"
-            | "ConstructorParameters"
-            | "InstanceType"
-            | "Awaited"
-            | "Uppercase"
-            | "Lowercase"
-            | "Capitalize"
-            | "Uncapitalize"
-            | "ThisType"
-            | "Map"
-            | "Set"
-            | "WeakMap"
-            | "WeakSet"
-            | "Date"
-            | "RegExp"
-            | "Error"
-            | "Function"
-            | "Object"
-            | "String"
-            | "Number"
-            | "Boolean"
-            | "Symbol"
-            | "BigInt"
-            | "Iterable"
-            | "Iterator"
-            | "IterableIterator"
-            | "AsyncIterable"
-            | "AsyncIterator"
-            | "ArrayLike"
-    )
 }

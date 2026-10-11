@@ -71,6 +71,10 @@ fn could_have_singleton(arena: &TypeArena, id: TypeId) -> bool {
         | Type::BooleanLiteral(_)
         | Type::Null
         | Type::Undefined => true,
+        // Nothing is assignable to never, and tsc says so with the source as written:
+        // `Type '"a"' is not assignable to type 'never'.`, not the widened `string`. That
+        // holds for a plain `never` and for one an intersection reduced to (`void & string`).
+        Type::Never => true,
         _ => false,
     }
 }
@@ -117,6 +121,14 @@ fn union_display_order(arena: &TypeArena, members: &[TypeId]) -> Vec<TypeId> {
 // `(a: number, b?: string) => void` for a function type and `(a: number): void` for a
 // method: the same parameter list, with the token before the return type as the
 // only difference.
+// A function's signature in the form tsc prints for an overload, `(x: string): string`,
+// as opposed to the function-type form `(x: string) => string` that display_type uses.
+pub fn display_signature(arena: &TypeArena, function: &crate::types::FunctionType) -> String {
+    let mut out = String::new();
+    write_signature(arena, function, true, &mut out, MAX_DEPTH);
+    out
+}
+
 fn write_signature(
     arena: &TypeArena,
     function: &crate::types::FunctionType,
