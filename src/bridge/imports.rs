@@ -91,6 +91,14 @@ fn bind_key<'ast>(
     let Some(decl) = provider.decl(key) else {
         return;
     };
+    // Remembered before the kind is looked at, so that a name this file only passes on
+    // (`import { X } from "./a"; export { X }`) still finds the declaration.
+    if !(type_only && matches!(decl.kind, DeclKind::Function | DeclKind::Var)) {
+        ctx.imported_names
+            .entry(local.name.to_string())
+            .or_default()
+            .push(key);
+    }
     match decl.kind {
         DeclKind::Interface | DeclKind::Class | DeclKind::Alias => {
             let Some(type_id) = ctx.importer.import_decl(&mut ctx.arena, provider, key) else {

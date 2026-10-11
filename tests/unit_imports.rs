@@ -384,3 +384,133 @@ fn a_unit_checked_against_a_project_matches_one_checked_alone_when_it_imports_no
     let with = unit("c.ts", source, Some(&project));
     assert_eq!(alone.diagnostics.len(), with.diagnostics.len());
 }
+
+// -- default imports, and passing a name on --------------------------------------------
+
+#[test]
+fn a_default_import_binds_the_default_export() {
+    clean(
+        "export default interface User { name: string }",
+        "import User from './a'; const u: User = { name: 'a' };",
+    );
+    fails(
+        "export default interface User { name: string }",
+        "import User from './a'; const u: User = { name: 1 };",
+    );
+}
+
+#[test]
+fn a_default_import_may_use_any_local_name() {
+    clean(
+        "export default interface User { name: string }",
+        "import Person from './a'; const p: Person = { name: 'a' };",
+    );
+}
+
+#[test]
+fn a_default_imported_function_has_its_signature() {
+    let a = "export default function area(w: number, h: number): number { return w * h; }";
+    clean(a, "import area from './a'; const n: number = area(2, 3);");
+    fails(a, "import area from './a'; const s: string = area(2, 3);");
+}
+
+#[test]
+fn a_default_and_a_named_import_in_one_declaration() {
+    let a = "export default interface User { name: string }
+             export interface Role { id: number }";
+    clean(
+        a,
+        "import User, { Role } from './a';
+         const u: User = { name: 'a' };
+         const r: Role = { id: 1 };",
+    );
+}
+
+#[test]
+fn a_name_exported_through_braces_is_importable() {
+    clean(
+        "interface Point { x: number } export { Point as Vec2 };",
+        "import { Vec2 } from './a'; const v: Vec2 = { x: 1 };",
+    );
+    fails(
+        "interface Point { x: number } export { Point as Vec2 };",
+        "import { Vec2 } from './a'; const v: Vec2 = { x: 'a' };",
+    );
+}
+
+// a.ts declares, b.ts passes it on, c.ts imports from b.ts.
+fn chain(a: &str, b: &str, c: &str) -> (UnitOutput, UnitOutput) {
+    let a_out = unit("a.ts", a, None);
+    let mut project = Project::default();
+    project.add("./a", &a_out);
+    let b_out = unit("b.ts", b, Some(&project));
+    assert!(b_out.diagnostics.is_empty(), "{:?}", b_out.diagnostics);
+    assert!(!b_out.incomplete, "{b_out:?}");
+    project.add("./b", &b_out);
+    let c_out = unit("c.ts", c, Some(&project));
+    (b_out, c_out)
+}
+
+#[test]
+fn an_imported_name_exported_again_reaches_the_third_file() {
+    let (b, c) = chain(
+        USER,
+        "import { User } from './a'; export { User };",
+        "import { User } from './b'; const u: User = { name: 1 };",
+    );
+    assert!(b.exports.is_empty(), "b declares nothing of its own: {b:?}");
+    assert!(!errors(&c).is_empty(), "{:?}", c.diagnostics);
+}
+
+#[test]
+fn an_imported_name_exported_again_accepts_a_correct_use() {
+    let (_, c) = chain(
+        USER,
+        "import { User } from './a'; export { User };",
+        "import { User } from './b'; const u: User = { name: 'a' };",
+    );
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+}
+
+#[test]
+fn a_re_export_from_another_module_reaches_the_third_file() {
+    let (_, c) = chain(
+        USER,
+        "export { User } from './a';",
+        "import { User } from './b'; const u: User = { name: 1 };",
+    );
+    assert!(!errors(&c).is_empty(), "{:?}", c.diagnostics);
+}
+
+#[test]
+fn a_re_export_may_rename() {
+    let (_, c) = chain(
+        USER,
+        "export { User as Person } from './a';",
+        "import { Person } from './b'; const p: Person = { name: 'a' }; const bad: Person = { name: 2 };",
+    );
+    assert_eq!(errors(&c).len(), 1, "{:?}", c.diagnostics);
+}
+
+#[test]
+fn a_re_export_from_an_unknown_module_is_unsupported() {
+    let a = unit("a.ts", USER, None);
+    let mut project = Project::default();
+    project.add("./a", &a);
+    let b = unit("b.ts", "export { User } from './nowhere';", Some(&project));
+    assert!(b.incomplete);
+    assert!(b.export_names.is_empty());
+}
+
+#[test]
+fn a_generic_passed_on_keeps_its_parameters() {
+    let (_, c) = chain(
+        "export interface Box<T = string> { value: T }",
+        "import { Box } from './a'; export { Box };",
+        "import { Box } from './b';
+         const s: Box = { value: 'x' };
+         const n: Box<number> = { value: 1 };
+         const bad: Box<number> = { value: 'x' };",
+    );
+    assert_eq!(errors(&c).len(), 1, "{:?}", c.diagnostics);
+}

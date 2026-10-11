@@ -3,6 +3,8 @@ use oxc_span::Span;
 use crate::arena::{TypeArena, TypeId};
 use crate::diagnostic_messages::DiagnosticMessage;
 use crate::diagnostics::{Diagnostic, Severity};
+use crate::fxhash::FxHashMap;
+use crate::keys::DeclKey;
 use crate::namespace::TypeNamespace;
 use crate::portable::{ImportSource, Importer};
 use crate::semantic::SemanticQueries;
@@ -116,6 +118,10 @@ pub struct CheckContext<'ast, 'src> {
     // share one id, and it is the key resolver for anything imported that the file
     // exports again.
     pub importer: Importer,
+    // Each imported local name and the declarations it was bound to, so `export { X }`
+    // of an import can be answered with the key the declaration already has. Only ever
+    // looked up by name, never walked.
+    pub imported_names: FxHashMap<String, Vec<DeclKey>>,
 }
 
 const CANCEL_CHECK_INTERVAL: u32 = 32;
@@ -171,6 +177,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             statements_seen: 0,
             imports: None,
             importer: Importer::new(),
+            imported_names: FxHashMap::default(),
         }
     }
 
