@@ -2,6 +2,7 @@ mod context;
 mod declare;
 mod exports;
 mod expressions;
+mod imports;
 mod narrow;
 mod parse;
 mod statements;
@@ -17,6 +18,7 @@ use crate::diagnostics::Diagnostic;
 use crate::error::CheckerError;
 use crate::keys::ModuleKey;
 use crate::namespace::NamespaceStats;
+use crate::portable::ImportSource;
 use crate::semantic::queries::QueryStats;
 use crate::types::FileId;
 use crate::unit::CancelToken;
@@ -56,7 +58,7 @@ pub fn check_program_with_state(
     file_id: FileId,
     arena: &mut TypeArena,
 ) -> Result<(Vec<Diagnostic>, CheckMetrics), CheckerError> {
-    match check_file(source, file_name, file_id, arena, None, None)? {
+    match check_file(source, file_name, file_id, arena, None, None, None)? {
         Some((diagnostics, metrics, _exports)) => Ok((diagnostics, metrics)),
         None => unreachable!("a check without a cancel token is never cancelled"),
     }
@@ -75,6 +77,7 @@ pub(crate) fn check_file(
     arena: &mut TypeArena,
     cancel: Option<&CancelToken>,
     module: Option<ModuleKey>,
+    imports: Option<&dyn ImportSource>,
 ) -> Result<Option<Checked>, CheckerError> {
     arena.clear();
     if cancel.is_some_and(CancelToken::is_cancelled) {
@@ -91,6 +94,7 @@ pub(crate) fn check_file(
     let reusable_arena = std::mem::take(arena);
     let mut ctx = CheckContext::with_arena_and_file_id(file_name, file_id, reusable_arena);
     ctx.cancel = cancel.cloned();
+    ctx.imports = imports;
 
     declare_phase(&program, &mut ctx);
     bodies_phase(&program, &semantic, &mut ctx);
@@ -112,6 +116,9 @@ pub(crate) fn check_file(
 }
 
 fn declare_phase<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckContext<'ast, '_>) {
+    // Imports first: a local declaration, a signature or an annotation may name any of
+    // them, and the declare pass resolves in source order only within itself.
+    imports::bind_imports(program, ctx);
     declare::declare_top_level(program, ctx);
 }
 
@@ -170,7 +177,14 @@ fn publish(ctx: &mut CheckContext<'_, '_>) -> (Vec<Diagnostic>, CheckMetrics) {
                         decl.params.iter().map(|p| p.name.name.as_str()).collect();
                     format!("{name}<{}>", params.join(", "))
                 }
-                None => name.to_string(),
+                None => match ctx.namespace.imported_generic(name) {
+                    Some(imported) => {
+                        let params: Vec<&str> =
+                            imported.params.iter().map(|p| p.name.as_str()).collect();
+                        format!("{name}<{}>", params.join(", "))
+                    }
+                    None => name.to_string(),
+                },
             };
             ctx.error(
                 crate::diagnostic_messages::messages::type_argument_count_mismatch(

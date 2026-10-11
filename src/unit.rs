@@ -10,6 +10,7 @@ use crate::diagnostic_messages::messages;
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::error::CheckerError;
 use crate::keys::{DeclKey, ModuleKey};
+use crate::portable::ImportSource;
 use crate::portable::PortableDecl;
 use crate::types::FileId;
 
@@ -45,6 +46,9 @@ pub struct UnitContext<'a> {
     // The file's stable identity. A unit given one reports its annotated exports; a unit
     // without one has no way to key a declaration and exports nothing.
     pub module: Option<ModuleKey>,
+    // Where the file's imports resolve. A unit without one leaves its import
+    // declarations unbound, as a single-file check does.
+    pub imports: Option<&'a dyn ImportSource>,
 }
 
 impl<'a> UnitContext<'a> {
@@ -55,11 +59,17 @@ impl<'a> UnitContext<'a> {
             source,
             cancel: None,
             module: None,
+            imports: None,
         }
     }
 
     pub fn with_module(mut self, module: ModuleKey) -> Self {
         self.module = Some(module);
+        self
+    }
+
+    pub fn with_imports(mut self, imports: &'a dyn ImportSource) -> Self {
+        self.imports = Some(imports);
         self
     }
 
@@ -142,6 +152,7 @@ impl Worker {
                 arena,
                 ctx.cancel.as_ref(),
                 ctx.module,
+                ctx.imports,
             )
         })
     }

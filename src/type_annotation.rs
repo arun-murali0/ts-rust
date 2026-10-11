@@ -136,9 +136,14 @@ pub fn resolve_ts_type(
 
             // Not generic, or a declaration this checker does not model (a
             // class): nothing to substitute.
-            let Some(decl) = namespace.declared_type_param_decl(&id.name) else {
+            // A generic imported from another file has no AST: its parameters come
+            // from the import record instead (see TypeNamespace::insert_imported), and
+            // everything after the bindings is shared with a local declaration.
+            let imported = namespace.imported_generic(&id.name);
+            let decl = namespace.declared_type_param_decl(&id.name);
+            if imported.is_none() && decl.is_none() {
                 return Some(base);
-            };
+            }
 
             // A bare `Box` for `interface Box<T>` was reported above. As in tsc
             // the reference is then the error type, which is compatible with
@@ -159,40 +164,73 @@ pub fn resolve_ts_type(
             // like a generic call's explicit type arguments in calls.rs.
             // Arguments beyond the declared count are ignored; an omitted one
             // takes its declared default, or the error type if it has none.
-            let mut bindings: Vec<(TypeParameterId, TypeId)> =
-                Vec::with_capacity(decl.params.len());
-            for (index, param) in decl.params.iter().enumerate() {
-                let parameter_id = TypeParameterId::with_file(
-                    namespace.file_id(),
-                    param.span().start,
-                    index as u32,
-                );
-                let bound = match reference
-                    .type_arguments
-                    .as_ref()
-                    .and_then(|arguments| arguments.params.get(index))
-                {
-                    Some(argument) => {
-                        let resolved = resolve_ts_type(argument, namespace, arena)
-                            .unwrap_or_else(|| arena.error());
-                        check_type_argument_constraint(
-                            namespace,
-                            arena,
-                            (parameter_id, param.name.name.as_str()),
-                            resolved,
-                            &bindings,
-                            argument.span(),
-                        );
-                        resolved
-                    }
-                    None => namespace
-                        .resolve_type_param_default(arena, decl, index)
-                        .map(|default| {
-                            crate::semantic::substitute_type_params(arena, default, &bindings)
-                        })
-                        .unwrap_or_else(|| arena.error()),
-                };
-                bindings.push((parameter_id, bound));
+            let mut bindings: Vec<(TypeParameterId, TypeId)> = Vec::new();
+            if let Some(imported) = &imported {
+                for (index, param) in imported.params.iter().enumerate() {
+                    let bound = match reference
+                        .type_arguments
+                        .as_ref()
+                        .and_then(|arguments| arguments.params.get(index))
+                    {
+                        Some(argument) => {
+                            let resolved = resolve_ts_type(argument, namespace, arena)
+                                .unwrap_or_else(|| arena.error());
+                            check_type_argument_constraint(
+                                namespace,
+                                arena,
+                                (param.id, param.name.as_str()),
+                                resolved,
+                                &bindings,
+                                argument.span(),
+                            );
+                            resolved
+                        }
+                        // The default was resolved in the declaring file; it may name
+                        // an earlier parameter, which the arguments bound so far fill.
+                        None => param
+                            .default
+                            .map(|default| {
+                                crate::semantic::substitute_type_params(arena, default, &bindings)
+                            })
+                            .unwrap_or_else(|| arena.error()),
+                    };
+                    bindings.push((param.id, bound));
+                }
+            }
+            if let Some(decl) = decl {
+                for (index, param) in decl.params.iter().enumerate() {
+                    let parameter_id = TypeParameterId::with_file(
+                        namespace.file_id(),
+                        param.span().start,
+                        index as u32,
+                    );
+                    let bound = match reference
+                        .type_arguments
+                        .as_ref()
+                        .and_then(|arguments| arguments.params.get(index))
+                    {
+                        Some(argument) => {
+                            let resolved = resolve_ts_type(argument, namespace, arena)
+                                .unwrap_or_else(|| arena.error());
+                            check_type_argument_constraint(
+                                namespace,
+                                arena,
+                                (parameter_id, param.name.name.as_str()),
+                                resolved,
+                                &bindings,
+                                argument.span(),
+                            );
+                            resolved
+                        }
+                        None => namespace
+                            .resolve_type_param_default(arena, decl, index)
+                            .map(|default| {
+                                crate::semantic::substitute_type_params(arena, default, &bindings)
+                            })
+                            .unwrap_or_else(|| arena.error()),
+                    };
+                    bindings.push((parameter_id, bound));
+                }
             }
 
             // Everything above is per reference and stays per reference: the arity

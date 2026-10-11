@@ -3,7 +3,10 @@ use oxc_span::Span;
 use crate::arena::{TypeArena, TypeId};
 use crate::diagnostic_messages::DiagnosticMessage;
 use crate::diagnostics::{Diagnostic, Severity};
+use crate::fxhash::FxHashMap;
+use crate::keys::DeclKey;
 use crate::namespace::TypeNamespace;
+use crate::portable::{ImportSource, Importer};
 use crate::semantic::SemanticQueries;
 use crate::semantic::queries::RelationCache;
 use crate::symbol_map::SymbolTypeMap;
@@ -106,6 +109,19 @@ pub struct CheckContext<'ast, 'src> {
     pub cancel: Option<CancelToken>,
     pub cancelled: bool,
     statements_seen: u32,
+
+    // Where this file's imports come from, when it is checked as part of a project. None
+    // for a single-file check, which then leaves its import declarations alone.
+    pub imports: Option<&'src dyn ImportSource>,
+    // Rebuilds the imported declarations in this check's arena. One per check: it
+    // remembers which slot stands for which key, so two uses of an imported declaration
+    // share one id, and it is the key resolver for anything imported that the file
+    // exports again.
+    pub importer: Importer,
+    // Each imported local name and the declarations it was bound to, so `export { X }`
+    // of an import can be answered with the key the declaration already has. Only ever
+    // looked up by name, never walked.
+    pub imported_names: FxHashMap<String, Vec<DeclKey>>,
 }
 
 const CANCEL_CHECK_INTERVAL: u32 = 32;
@@ -159,6 +175,9 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             cancel: None,
             cancelled: false,
             statements_seen: 0,
+            imports: None,
+            importer: Importer::new(),
+            imported_names: FxHashMap::default(),
         }
     }
 

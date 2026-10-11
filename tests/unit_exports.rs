@@ -216,3 +216,153 @@ fn an_alias_to_an_exported_interface_exports() {
     assert!(!out.incomplete, "{out:?}");
     assert_eq!(names(&out), vec!["U", "V", "W"]);
 }
+
+#[test]
+fn a_type_parameter_default_is_exported() {
+    let out = run("export interface Box<T = string> { value: T }");
+    assert!(!out.incomplete, "{out:?}");
+    let params = &out.exports[0].type_params;
+    assert_eq!(params.len(), 1);
+    assert!(params[0].default.is_some(), "{params:?}");
+}
+
+#[test]
+fn a_default_may_name_an_earlier_parameter() {
+    let out = run("export type Pair<A, B = A> = { first: A; second: B };");
+    assert!(!out.incomplete, "{out:?}");
+    let params = &out.exports[0].type_params;
+    assert!(params[0].default.is_none());
+    assert!(params[1].default.is_some());
+}
+
+#[test]
+fn editing_a_default_changes_the_signature() {
+    let sig = |source: &str| run(source).exports[0].sig;
+    let string = sig("export interface Box<T = string> { value: T }");
+    let number = sig("export interface Box<T = number> { value: T }");
+    let none = sig("export interface Box<T> { value: T }");
+    assert_ne!(string, number);
+    assert_ne!(string, none);
+    assert_eq!(
+        string,
+        sig("export interface Box<T = string> { value: T }"),
+        "an unchanged declaration keeps its signature"
+    );
+}
+
+// -- default exports and `export { a }` ---------------------------------------------
+
+fn table(out: &UnitOutput) -> Vec<(&str, DeclKey)> {
+    let mut v: Vec<(&str, DeclKey)> = out
+        .export_names
+        .iter()
+        .map(|(n, k)| (n.as_str(), *k))
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_default_exported_function_is_listed_under_default() {
+    let out = run("export default function area(w: number, h: number): number { return w * h; }");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(out.exports.len(), 1);
+    assert_eq!(
+        &*out.exports[0].name, "area",
+        "the declaration keeps its name"
+    );
+    assert_eq!(
+        table(&out),
+        vec![("default", key("area", DeclKind::Function))]
+    );
+}
+
+#[test]
+fn a_default_exported_interface_is_listed_under_default() {
+    let out = run("export default interface Config { debug: boolean }");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(
+        table(&out),
+        vec![("default", key("Config", DeclKind::Interface))]
+    );
+}
+
+#[test]
+fn a_default_export_with_no_declaration_to_key_is_unsupported() {
+    assert!(run("export default class Thing {}").incomplete);
+    assert!(run("export default 1 + 2;").incomplete);
+    assert!(run("export default function (a: number): number { return a; }").incomplete);
+}
+
+#[test]
+fn export_braces_exports_a_declaration_written_without_export() {
+    let out = run("interface Point { x: number } export { Point };");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(
+        table(&out),
+        vec![("Point", key("Point", DeclKind::Interface))]
+    );
+}
+
+#[test]
+fn export_braces_may_come_before_the_declaration() {
+    let out = run("export { Point }; interface Point { x: number }");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(names(&out), vec!["Point"]);
+}
+
+#[test]
+fn export_braces_may_rename() {
+    let out = run("interface Point { x: number } export { Point as Vec2 };");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(&*out.exports[0].name, "Point");
+    assert_eq!(
+        table(&out),
+        vec![("Vec2", key("Point", DeclKind::Interface))]
+    );
+}
+
+#[test]
+fn one_declaration_may_be_exported_under_two_names() {
+    let out = run("interface P { x: number } export { P, P as Q };");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(out.exports.len(), 1, "one declaration, not two");
+    assert_eq!(out.export_names.len(), 2);
+}
+
+#[test]
+fn export_braces_of_a_name_that_is_a_type_and_a_value_exports_both() {
+    let out = run("interface Foo { x: number } const Foo: number = 1; export { Foo };");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(out.exports.len(), 2);
+    assert_eq!(out.export_names.len(), 2);
+}
+
+#[test]
+fn export_braces_of_a_function_and_a_constant() {
+    let out = run(
+        "function add(a: number, b: number): number { return a + b; }
+         const limit: number = 3;
+         export { add, limit };",
+    );
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(names(&out), vec!["add", "limit"]);
+}
+
+#[test]
+fn export_braces_of_an_unknown_name_is_unsupported() {
+    assert!(run("export { Nothing };").incomplete);
+}
+
+#[test]
+fn export_braces_of_an_unsupported_declaration_is_unsupported() {
+    let out = run("const n = 1; export { n };");
+    assert!(out.incomplete);
+    assert!(out.exports.is_empty());
+}
+
+#[test]
+fn a_declaration_not_exported_by_either_route_stays_out() {
+    let out = run("interface A { x: number } interface B { y: number } export { A };");
+    assert_eq!(names(&out), vec!["A"]);
+}

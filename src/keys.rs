@@ -10,7 +10,7 @@ use std::path::{Component, Path};
 
 use xxhash_rust::xxh3::Xxh3;
 
-pub const ENC_VERSION: u8 = 1;
+pub const ENC_VERSION: u8 = 2;
 
 macro_rules! key128 {
     ($(#[$meta:meta])* $name:ident) => {
