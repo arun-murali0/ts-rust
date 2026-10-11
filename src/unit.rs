@@ -9,6 +9,7 @@ use crate::bridge::{self, Checked};
 use crate::diagnostic_messages::messages;
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::error::CheckerError;
+use crate::portable::PortableDecl;
 use crate::types::FileId;
 
 // A flag a caller raises to stop a unit that is no longer wanted, such as a file edited
@@ -69,6 +70,9 @@ impl<'a> UnitContext<'a> {
 pub struct UnitOutput {
     pub diagnostics: Vec<Diagnostic>,
     pub incomplete: bool,
+    // The unit's exported declarations as owned, arena-free data (LLD 3.4). Empty until
+    // the export table lands with import binding: nothing collects a file's exports yet.
+    pub exports: Vec<PortableDecl>,
 }
 
 const _: fn() = || {
@@ -141,6 +145,7 @@ impl Worker {
             Ok(Ok(Some((diagnostics, _metrics)))) => Ok(UnitOutput {
                 diagnostics,
                 incomplete: false,
+                exports: Vec::new(),
             }),
             Ok(Ok(None)) => Err(UnitError::Cancelled),
             Ok(Err(error)) => Err(error.into()),
@@ -170,6 +175,7 @@ fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
             end: 0,
         }],
         incomplete: true,
+        exports: Vec::new(),
     }
 }
 

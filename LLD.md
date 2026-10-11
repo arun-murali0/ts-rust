@@ -434,6 +434,25 @@ node encoding = tag:u8 || payload
 - **Order independence:** unions sort by child hash, objects by property name bytes. Arena creation order, `Name` numbers and thread timing never appear in the stream.
 - **No cycles to handle:** structural encoding stops at `DeclRef`/`App`/`TypeParam` (3.3).
 
+#### 3.2.1 Amendments made while building 5a
+
+- `Function` carries `is_untyped:u8` straight after the tag, before `n_params`. An untyped function accepts any call, so it is part of the type's identity. `Error` takes primitive tag `0x0A`.
+- `ModuleKey::builtin()` (kind `0x04`, no fields) is the module of the built-in library declarations, so `Promise` and `Array` have a `DeclKey` without a file: `DeclKey::builtin(name)`.
+- A `DeclKey` stream is `ENC_VERSION || 0xDE || ModuleKey || name || kind:u8 || index:u32le`. `DeclKey::child(owner, ordinal)` (`0xDC`) names something that owns type parameters without being a declaration, such as the second generic function type inside one alias, so `TypeParam(owner, index)` stays unique with no wire change.
+- A `FunctionType` has no type-parameter list; the declaration that owns it has (`PortableDecl::type_params`), so the `tparams` field of a `Function` node is empty for now.
+- `ModuleGraph::module_key` gives Project and External keys. A file under `node_modules` has no key until the Package rule (the `package.json` walk) is written.
+
+#### 3.4.1 Amendments made while building 5b and 5c
+
+- **Names travel, parameter names are not identity.** `types.rs` says structural equality ignores a parameter's name, so the identity hash leaves it out. Messages print it, so `PParam` carries it, and the export de-duplicates nodes with a second hash that includes names (two functions that differ only in parameter names stay two nodes). A parameter rename therefore changes the `PortableType` but not the `SigHash`.
+- **`DeclRef`, `App` and `TypeParam` carry a name** (and a type parameter its bound), so an importer can print them without fetching the declaration.
+- **`App` also carries its instantiated body.** The checker's `App` holds one, and rebuilding it would need substitution over a declaration that has no AST in the importing unit.
+- **An `App` imports with its own name slot** (`alloc_name`), as `type_annotation.rs` does. `Promise` and `Record` use the shared built-in slot.
+- **Aliases are transparent in the portable body** and the importer puts the name back from the declaration's kind (`DeclKind::Alias`).
+- **Import is eager over what is reachable, not lazy** (3.5 sketched lazy expansion): `TypeArena::get` takes `&self`, so it cannot fetch. The importer drains a pending list, and a key already seen is never queued twice, so a cycle ends. Fine-grained dependency edges are therefore per declaration reached from an import, not per use.
+- **`SigHash` includes type parameter bounds** and the kind; the name is already in the `DeclKey`.
+- **Not portable yet:** enums, namespaces, and the value side of a class. `export_decl` returns None for a body that mentions a declaration or type parameter with no key, and an import of a declaration the provider lacks reads as `Error`, which does not cascade.
+
 ### 3.3 Signature hash
 
 `SigHash` of a declaration = hash of the encoding of its **own** public shape, where every reference to another declaration is a `DeclRef`/`App` (identity only). It does not include the referenced declaration's shape.

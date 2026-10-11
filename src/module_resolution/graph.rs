@@ -37,6 +37,9 @@ pub struct ModuleGraph {
     dependents: Vec<Vec<FileId>>,
     states: Vec<FileState>,
     syntax_errors: Vec<bool>,
+    // The project root, an input of the graph (LLD 3.1.1). None until a caller sets it
+    // with `with_root`; without one no file gets a Project key.
+    root: Option<PathBuf>,
 }
 
 impl ModuleGraph {
@@ -185,7 +188,37 @@ impl ModuleGraph {
             dependents,
             states,
             syntax_errors,
+            root: None,
         }
+    }
+
+    /// Sets the project root that module keys are made relative to. It is an input of
+    /// the graph and never part of a key.
+    pub fn with_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.root = Some(root.into());
+        self
+    }
+
+    pub fn root(&self) -> Option<&Path> {
+        self.root.as_deref()
+    }
+
+    /// The stable identity of `id` (LLD 3.1.1): Project under the root, External for a
+    /// file outside it. None for a file inside `node_modules`: its Package key needs the
+    /// `package.json` walk, which is not written yet, and a wrong key is worse than none.
+    pub fn module_key(&self, id: FileId) -> Option<crate::keys::ModuleKey> {
+        use crate::keys::ModuleKey;
+        let path = self.files.path(id)?;
+        if let Some(root) = &self.root {
+            if let Some(rel) = ModuleKey::project_path(root, path) {
+                return Some(ModuleKey::project(&rel));
+            }
+        }
+        if path.components().any(|c| c.as_os_str() == "node_modules") {
+            return None;
+        }
+        let text = path.to_str()?.replace('\\', "/");
+        Some(ModuleKey::external(&text))
     }
 
     pub fn files(&self) -> &ProjectFiles {

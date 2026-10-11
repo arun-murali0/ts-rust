@@ -716,9 +716,16 @@ impl TypeArena {
         }
     }
 
+    // The type stored under `id` exactly as written: a Ref, a Named and an App are
+    // returned as themselves, not looked through like get() does. Stable hashing needs
+    // this, because a declaration's identity is the wrapper.
+    pub(crate) fn raw(&self, id: TypeId) -> &Type {
+        &self.types[id.0 as usize]
+    }
+
     // None for an id that is not a declaration, and also for one the arena does not hold
     // (a stale id from before clear()), so that asking for a name stays harmless.
-    fn slot_of(&self, id: TypeId) -> Option<DeclSlot> {
+    pub(crate) fn slot_of(&self, id: TypeId) -> Option<DeclSlot> {
         match self.types.get(id.0 as usize) {
             Some(Type::Ref(slot)) => Some(*slot),
             _ => None,
@@ -1022,7 +1029,7 @@ impl TypeArena {
         self.generation
     }
 
-    #[cfg(test)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn len(&self) -> usize {
         self.types.len()
     }
