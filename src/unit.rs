@@ -9,6 +9,7 @@ use crate::bridge::{self, Checked};
 use crate::diagnostic_messages::messages;
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::error::CheckerError;
+use crate::keys::{DeclKey, ModuleKey};
 use crate::portable::PortableDecl;
 use crate::types::FileId;
 
@@ -41,6 +42,9 @@ pub struct UnitContext<'a> {
     pub file_name: &'a str,
     pub source: &'a str,
     pub cancel: Option<CancelToken>,
+    // The file's stable identity. A unit given one reports its annotated exports; a unit
+    // without one has no way to key a declaration and exports nothing.
+    pub module: Option<ModuleKey>,
 }
 
 impl<'a> UnitContext<'a> {
@@ -50,7 +54,13 @@ impl<'a> UnitContext<'a> {
             file_name,
             source,
             cancel: None,
+            module: None,
         }
+    }
+
+    pub fn with_module(mut self, module: ModuleKey) -> Self {
+        self.module = Some(module);
+        self
     }
 
     pub fn with_cancel(mut self, cancel: CancelToken) -> Self {
@@ -70,9 +80,14 @@ impl<'a> UnitContext<'a> {
 pub struct UnitOutput {
     pub diagnostics: Vec<Diagnostic>,
     pub incomplete: bool,
-    // The unit's exported declarations as owned, arena-free data (LLD 3.4). Empty until
-    // the export table lands with import binding: nothing collects a file's exports yet.
+    // The unit's exported declarations as owned, arena-free data (LLD 3.4). Filled when
+    // the unit has a module key: annotated interfaces, aliases, functions and constants.
+    // Anything exported that the portable form cannot carry yet is left out and sets
+    // `incomplete`, so a dependent sees less, never something wrong.
     pub exports: Vec<PortableDecl>,
+    // Export name to the key of the declaration under it. A name that is both a type and
+    // a value appears once for each; the declaration's `kind` tells them apart.
+    pub export_names: Vec<(String, DeclKey)>,
 }
 
 const _: fn() = || {
@@ -126,6 +141,7 @@ impl Worker {
                 ctx.file_id,
                 arena,
                 ctx.cancel.as_ref(),
+                ctx.module,
             )
         })
     }
@@ -142,10 +158,11 @@ impl Worker {
         let ran = catch_unwind(AssertUnwindSafe(|| self.run_unit(ctx, check)));
 
         match ran {
-            Ok(Ok(Some((diagnostics, _metrics)))) => Ok(UnitOutput {
+            Ok(Ok(Some((diagnostics, _metrics, table)))) => Ok(UnitOutput {
                 diagnostics,
-                incomplete: false,
-                exports: Vec::new(),
+                incomplete: table.incomplete,
+                exports: table.decls,
+                export_names: table.names,
             }),
             Ok(Ok(None)) => Err(UnitError::Cancelled),
             Ok(Err(error)) => Err(error.into()),
@@ -176,6 +193,7 @@ fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
         }],
         incomplete: true,
         exports: Vec::new(),
+        export_names: Vec::new(),
     }
 }
 

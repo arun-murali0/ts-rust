@@ -23,6 +23,10 @@ pub struct TooComplex;
 // The product of the union sizes at which alloc_intersection refuses to distribute. This
 // is tsc's number (checkCrossProductUnion); LLD 1.13 notes it may be lowered once the
 // budgets are measured.
+// The built-in generics `builtin_slot` is asked for (see type_annotation::
+// resolve_builtin_generic). A unit's resolver asks about each by name.
+pub(crate) const BUILTIN_GENERICS: [&str; 2] = ["Promise", "Record"];
+
 const MAX_INTERSECTION_DISTRIBUTION: usize = 100_000;
 
 #[derive(Clone, Copy)]
@@ -730,6 +734,28 @@ impl TypeArena {
             Some(Type::Ref(slot)) => Some(*slot),
             _ => None,
         }
+    }
+
+    // The slot and body of a declaration as the namespace hands it out: a resolved Ref
+    // (interface, class, type-literal alias) or a Named (alias). None for any other id,
+    // including a Ref that has no body yet. Exporting needs the slot, to tell the unit's
+    // resolver which declaration it is, and the body, which is what gets exported.
+    pub(crate) fn decl_parts(&self, id: TypeId) -> Option<(DeclSlot, TypeId)> {
+        match self.types.get(id.0 as usize)? {
+            Type::Ref(slot) => match self.decls[slot.0 as usize].state {
+                DeclState::Resolved(body) => Some((*slot, body)),
+                _ => None,
+            },
+            Type::Named(slot, inner) => Some((*slot, *inner)),
+            _ => None,
+        }
+    }
+
+    // The slot of a built-in generic if one has been made in this arena, without making
+    // it. Looked up by name and never by walking the table, so the answer cannot depend
+    // on hash order (LLD 8.2).
+    pub(crate) fn existing_builtin_slot(&self, name: &str) -> Option<DeclSlot> {
+        self.builtin_slots.get(name).copied()
     }
 
     // Names the declaration behind `reference`. Called once its body exists, for a
