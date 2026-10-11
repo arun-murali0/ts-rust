@@ -6,12 +6,14 @@ use oxc_span::{GetSpan, Span};
 
 use crate::arena::{TypeArena, TypeId};
 use crate::fxhash::{FxHashMap, FxHasher};
+use crate::portable::ImportedParam;
 use crate::semantic::substitute_type_params;
 use crate::type_annotation::{
     resolve_function_params, resolve_object_members, resolve_ts_type, resolve_type_annotation,
 };
 use crate::types::{FileId, ObjectType, PropertyEntry, Type, TypeParameterId};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 // The arguments an instantiation was made with, one (parameter, argument) pair per
 // declared type parameter, in declaration order.
@@ -114,6 +116,14 @@ pub struct TypeNamespace<'a> {
     // annotation inside the body would never match the parameter T came from.
     type_param_cache: FxHashMap<TypeParameterId, TypeId>,
 
+    // The generic declarations that came from another file, by the local name they are
+    // bound to. They have no AST, so arity, arguments, defaults and bounds that a
+    // local declaration reads from its `<T, ...>` list are read from here instead (see
+    // type_annotation's TSTypeReference arm). The base shape is the entry's resolved
+    // type; it is kept alongside so a local type parameter that happens to share the
+    // name is never mistaken for the import (see imported_generic).
+    imported_generics: FxHashMap<String, Rc<ImportedGeneric>>,
+
     // Untyped parameters found inside function *type annotations* such as
     // `(x) => number`. Type resolution has no access to the diagnostics list, so
     // they are collected here, deduplicated by source position (the same
@@ -189,6 +199,14 @@ pub struct TypeNamespace<'a> {
     instantiation_misses: u64,
 }
 
+/// A generic declaration imported from another file: its type parameters in this arena's
+/// terms, and the base shape they are substituted into.
+#[derive(Debug)]
+pub struct ImportedGeneric {
+    pub base: TypeId,
+    pub params: Vec<ImportedParam>,
+}
+
 pub enum Resolution {
     Resolved(TypeId),
 
@@ -218,6 +236,7 @@ impl<'a> TypeNamespace<'a> {
             declaration_spans: FxHashMap::default(),
             reported_first_declaration: Vec::new(),
             type_param_cache: FxHashMap::default(),
+            imported_generics: FxHashMap::default(),
             implicit_any_params: Vec::new(),
             unresolved_constraints: Vec::new(),
             type_argument_issues: Vec::new(),
@@ -377,6 +396,16 @@ impl<'a> TypeNamespace<'a> {
     // omitted, which is why these differ; tsc accepts `Pair<number>` for
     // `interface Pair<A, B = string>`.
     pub fn declared_type_param_arity(&self, name: &str) -> Option<(usize, usize)> {
+        if let Some(imported) = self.imported_generic(name) {
+            return Some((
+                imported
+                    .params
+                    .iter()
+                    .filter(|p| p.default.is_none())
+                    .count(),
+                imported.params.len(),
+            ));
+        }
         Some(match self.declared_type_param_list(name)? {
             None => (0, 0),
             Some(decl) => (
@@ -611,6 +640,37 @@ impl<'a> TypeNamespace<'a> {
         self.note_collision(name, NewKind::Enum, span);
         self.remember_declaration(name, span);
         self.insert_resolved(name, type_id);
+    }
+
+    // Binds `name` to a declaration imported from another file. A non-generic one is just
+    // a resolved name. A generic one also records its parameters, and their nodes go in
+    // the parameter cache so a bound is enforced on an explicit argument the same way
+    // it is for a local declaration (type_param_constraint reads it from there).
+    pub fn insert_imported(&mut self, name: &str, type_id: TypeId, params: Vec<ImportedParam>) {
+        self.insert_resolved(name, type_id);
+        if params.is_empty() {
+            self.imported_generics.remove(name);
+            return;
+        }
+        for param in &params {
+            self.type_param_cache.insert(param.id, param.node);
+        }
+        self.imported_generics.insert(
+            name.to_string(),
+            Rc::new(ImportedGeneric {
+                base: type_id,
+                params,
+            }),
+        );
+    }
+
+    // The imported generic bound to `name`, if that is still what the name means. A type
+    // parameter shadows a name by replacing its entry, so the entry's type is compared
+    // with the one recorded at import time.
+    pub fn imported_generic(&self, name: &str) -> Option<Rc<ImportedGeneric>> {
+        let imported = self.imported_generics.get(name)?;
+        let current = self.entries.get(name)?.resolved?;
+        (current == imported.base).then(|| Rc::clone(imported))
     }
 
     pub fn insert_resolved(&mut self, name: &str, type_id: TypeId) {

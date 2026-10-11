@@ -90,6 +90,11 @@ pub struct PTypeParam {
     pub name: Box<str>,
     /// Index into the declaration's `body.nodes`.
     pub bound: Option<u32>,
+    /// The `= Default` of the parameter, as an index into `body.nodes`. It travels with
+    /// the declaration because an importer has no AST to read it from: without it a bare
+    /// `Box` for `interface Box<T = string>` could not be told from a missing argument,
+    /// and the number of required arguments would be unknown.
+    pub default: Option<u32>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -108,6 +113,7 @@ pub(crate) struct TypeParamInput {
     pub id: TypeParameterId,
     pub name: String,
     pub bound: Option<TypeId>,
+    pub default: Option<TypeId>,
 }
 
 pub(crate) struct DeclInput<'a> {
@@ -248,13 +254,25 @@ impl<'a, R: KeyResolver> Exporter<'a, R> {
 }
 
 /// The signature hash (LLD 3.3): the declaration's own shape, with every other
-/// declaration appearing by key only. Type parameter bounds are part of it; a name is
-/// not, because it is already in the `DeclKey`.
-fn sig_hash(kind: DeclKind, bounds: &[Option<NodeHash>], body: NodeHash) -> SigHash {
+/// declaration appearing by key only. Type parameter bounds and defaults are part of it
+/// (a default changes what a bare reference means, so a dependent must see the edit); a
+/// name is not, because it is already in the `DeclKey`.
+fn sig_hash(
+    kind: DeclKind,
+    bounds: &[Option<NodeHash>],
+    defaults: &[Option<NodeHash>],
+    body: NodeHash,
+) -> SigHash {
     let mut w = StreamWriter::new();
     w.u8(0x5A).u8(kind as u8).u32(bounds.len() as u32);
     for b in bounds {
         match b {
+            Some(h) => w.u8(1).raw128(h.as_u128()),
+            None => w.u8(0),
+        };
+    }
+    for d in defaults {
+        match d {
             Some(h) => w.u8(1).raw128(h.as_u128()),
             None => w.u8(0),
         };
@@ -273,9 +291,14 @@ pub(crate) fn export_decl<R: KeyResolver>(
     let mut ident = StableHasher::new(arena, resolver);
     let body_hash = ident.hash(input.body)?;
     let mut bound_hashes = Vec::with_capacity(input.type_params.len());
+    let mut default_hashes = Vec::with_capacity(input.type_params.len());
     for tp in input.type_params {
         bound_hashes.push(match tp.bound {
             Some(b) => Some(ident.hash(b)?),
+            None => None,
+        });
+        default_hashes.push(match tp.default {
+            Some(d) => Some(ident.hash(d)?),
             None => None,
         });
     }
@@ -295,14 +318,19 @@ pub(crate) fn export_decl<R: KeyResolver>(
             Some(b) => Some(ex.emit(b)?),
             None => None,
         };
+        let default = match tp.default {
+            Some(d) => Some(ex.emit(d)?),
+            None => None,
+        };
         type_params.push(PTypeParam {
             name: tp.name.as_str().into(),
             bound,
+            default,
         });
     }
     Some(PortableDecl {
         key: input.key,
-        sig: sig_hash(input.kind, &bound_hashes, body_hash),
+        sig: sig_hash(input.kind, &bound_hashes, &default_hashes, body_hash),
         kind: input.kind,
         name: input.name.into(),
         type_params: type_params.into(),
@@ -315,10 +343,31 @@ pub(crate) fn export_decl<R: KeyResolver>(
 
 // -- import ---------------------------------------------------------------------------
 
+/// One type parameter of an imported generic declaration, in this arena's terms.
+#[derive(Clone, Debug)]
+pub(crate) struct ImportedParam {
+    pub id: TypeParameterId,
+    pub name: String,
+    /// The GenericParameter node; its bound is the parameter's `extends`.
+    pub node: TypeId,
+    pub default: Option<TypeId>,
+}
+
 pub trait DeclProvider {
     /// The declaration for `key`. A real provider records a dependency edge here
     /// (LLD 6.2) so a unit depends on exactly the declarations it read.
     fn decl(&self, key: DeclKey) -> Option<Arc<PortableDecl>>;
+}
+
+/// What a unit may import from: the declarations of the files it depends on, and which
+/// of them a module exports under a name. The driver implements it from the dependency
+/// units' outputs (LLD 6.2); a test implements it over a few `UnitOutput`s.
+pub trait ImportSource: DeclProvider {
+    /// The declarations the module that `specifier` names, as written in the importing
+    /// file, exports under `name`. More than one when the name is both a type and a
+    /// value. Empty when the specifier names no module of the project or the module has
+    /// no such export, which leaves the imported name unknown rather than wrong.
+    fn export_keys(&self, specifier: &str, name: &str) -> Vec<DeclKey>;
 }
 
 /// Rebuilds portable declarations in one arena. One per unit run: it remembers which slot
@@ -367,14 +416,53 @@ impl Importer {
             DeclKind::Interface | DeclKind::Class => self.ref_for(arena, provider, key)?,
             DeclKind::Alias => {
                 let body = self.body(arena, provider, &decl);
-                let slot = self.name_slot(arena, key, &decl.name);
-                arena.alloc_named(slot, body)
+                if decl.type_params.is_empty() {
+                    let slot = self.name_slot(arena, key, &decl.name);
+                    arena.alloc_named(slot, body)
+                } else {
+                    // A generic alias is left unnamed, as the checker leaves it
+                    // (namespace::resolve): its body still holds bare type
+                    // parameters, and each instantiation names itself.
+                    body
+                }
             }
             DeclKind::Function | DeclKind::Var => self.body(arena, provider, &decl),
             DeclKind::Enum | DeclKind::Namespace => return None,
         };
         self.drain(arena, provider);
         Some(ty)
+    }
+
+    /// The type parameters of the generic declaration under `key`, as local types: what a
+    /// namespace needs to instantiate it without an AST. The node is the very
+    /// GenericParameter the imported body holds (allocation is interned, so asking again
+    /// gives the same id), so substituting it into the base shape finds every use. None
+    /// when the provider does not have the declaration.
+    pub(crate) fn generic_params(
+        &mut self,
+        arena: &mut TypeArena,
+        provider: &dyn DeclProvider,
+        key: DeclKey,
+    ) -> Option<Vec<ImportedParam>> {
+        let decl = provider.decl(key)?;
+        if decl.type_params.is_empty() {
+            return Some(Vec::new());
+        }
+        let ids = self.body_ids(arena, provider, &decl);
+        let mut params = Vec::with_capacity(decl.type_params.len());
+        for (index, tp) in decl.type_params.iter().enumerate() {
+            let id = self.tparam_id(key, index as u32);
+            let bound = tp.bound.map(|b| ids[b as usize]);
+            let node = arena.alloc(Type::GenericParameter(id, tp.name.to_string(), bound));
+            params.push(ImportedParam {
+                id,
+                name: tp.name.to_string(),
+                node,
+                default: tp.default.map(|d| ids[d as usize]),
+            });
+        }
+        self.drain(arena, provider);
+        Some(params)
     }
 
     fn ref_for(
@@ -435,14 +523,25 @@ impl Importer {
         }
     }
 
-    // One forward pass: every node refers only to lower indices, so no recursion and no
-    // depth limit.
     fn body(
         &mut self,
         arena: &mut TypeArena,
         provider: &dyn DeclProvider,
         decl: &PortableDecl,
     ) -> TypeId {
+        let ids = self.body_ids(arena, provider, decl);
+        ids[decl.body.root as usize]
+    }
+
+    // One forward pass: every node refers only to lower indices, so no recursion and no
+    // depth limit. Returns the local id of every node, not just the root, because a type
+    // parameter's bound and default are nodes of the same vector.
+    fn body_ids(
+        &mut self,
+        arena: &mut TypeArena,
+        provider: &dyn DeclProvider,
+        decl: &PortableDecl,
+    ) -> Vec<TypeId> {
         let mut ids: Vec<TypeId> = Vec::with_capacity(decl.body.nodes.len());
         for node in decl.body.nodes.iter() {
             let id = match node {
@@ -542,7 +641,7 @@ impl Importer {
             };
             ids.push(id);
         }
-        ids[decl.body.root as usize]
+        ids
     }
 }
 
@@ -901,6 +1000,7 @@ mod tests {
                 id: tp,
                 name: "T".into(),
                 bound: Some(bound),
+                default: None,
             }];
             let d = export_decl(
                 &a,
@@ -952,6 +1052,7 @@ mod tests {
             id: tp,
             name: "T".into(),
             bound: None,
+            default: None,
         }];
         let box_decl = export_decl(
             &a,
@@ -1118,5 +1219,5 @@ mod tests {
         assert_eq!(f.sig.as_u128(), GOLDEN_F_SIG, "{:032x}", f.sig.as_u128());
     }
 
-    const GOLDEN_F_SIG: u128 = 0x859b1dd2889b1289c50cb52054bcccba;
+    const GOLDEN_F_SIG: u128 = 0xedaa93964c272282dc044b9f0653da56;
 }

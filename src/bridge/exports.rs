@@ -22,7 +22,7 @@ use crate::arena::{BUILTIN_GENERICS, DeclSlot, TypeId};
 use crate::fxhash::FxHashMap;
 use crate::keys::{DeclKey, DeclKind, ModuleKey, TypeParamKey};
 use crate::namespace::Resolution;
-use crate::portable::{DeclInput, PortableDecl, TypeParamInput, export_decl};
+use crate::portable::{DeclInput, Importer, PortableDecl, TypeParamInput, export_decl};
 use crate::stable_walk::KeyResolver;
 use crate::types::{Type, TypeParameterId};
 
@@ -69,6 +69,31 @@ impl KeyResolver for UnitKeys {
     }
     fn type_param_key(&self, id: TypeParameterId) -> Option<TypeParamKey> {
         self.tparams.get(&id).copied()
+    }
+}
+
+// The unit's own declarations, then the ones it imported: an export may name a type that
+// came from another file, and that type keeps the key it has in its own file.
+struct WithImports<'a> {
+    unit: &'a UnitKeys,
+    imported: &'a Importer,
+}
+
+impl KeyResolver for WithImports<'_> {
+    fn decl_key(&self, slot: DeclSlot) -> Option<DeclKey> {
+        self.unit
+            .decl_key(slot)
+            .or_else(|| self.imported.decl_key(slot))
+    }
+    fn decl_name(&self, slot: DeclSlot) -> Option<String> {
+        self.unit
+            .decl_name(slot)
+            .or_else(|| self.imported.decl_name(slot))
+    }
+    fn type_param_key(&self, id: TypeParameterId) -> Option<TypeParamKey> {
+        self.unit
+            .type_param_key(id)
+            .or_else(|| self.imported.type_param_key(id))
     }
 }
 
@@ -140,6 +165,7 @@ pub(crate) fn collect_exports<'ast>(
             }
             Statement::ExportDefaultDeclaration(_)
             | Statement::ExportNamedDeclaration(_)
+            | Statement::ExportFromDeclaration(_)
             | Statement::ExportAllDeclaration(_) => table.incomplete = true,
             _ => {}
         }
@@ -154,6 +180,10 @@ pub(crate) fn collect_exports<'ast>(
         }
     }
 
+    let resolver = WithImports {
+        unit: &keys,
+        imported: &ctx.importer,
+    };
     for p in pending {
         let input = DeclInput {
             key: p.key,
@@ -162,7 +192,7 @@ pub(crate) fn collect_exports<'ast>(
             body: p.body,
             type_params: &p.type_params,
         };
-        match export_decl(&ctx.arena, &keys, &input) {
+        match export_decl(&ctx.arena, &resolver, &input) {
             Some(decl) => {
                 table.names.push((p.name, p.key));
                 table.decls.push(decl);
@@ -215,10 +245,10 @@ fn interface_or_alias(
     })
 }
 
-fn function(
-    ctx: &mut CheckContext<'_, '_>,
+fn function<'ast>(
+    ctx: &mut CheckContext<'ast, '_>,
     module: ModuleKey,
-    f: &Function<'_>,
+    f: &'ast Function<'ast>,
     index: u32,
 ) -> Option<Pending> {
     let id = f.id.as_ref()?;
@@ -240,8 +270,8 @@ fn function(
     .and_then(|p| with_type_params(ctx, p, f.type_parameters.as_deref()))
 }
 
-fn variables(
-    ctx: &mut CheckContext<'_, '_>,
+fn variables<'ast>(
+    ctx: &mut CheckContext<'ast, '_>,
     module: ModuleKey,
     v: &VariableDeclaration<'_>,
     seen: &mut FxHashMap<(String, u8), u32>,
@@ -279,10 +309,10 @@ fn variables(
 // Registers an export with the resolver and queues it. An interface's type parameters
 // may sit on a merged part and not on the exported one, so for an interface or an alias
 // the namespace says which declaration actually carries them.
-fn register(
+fn register<'ast>(
     keys: &mut UnitKeys,
     pending: &mut Vec<Pending>,
-    ctx: &mut CheckContext<'_, '_>,
+    ctx: &mut CheckContext<'ast, '_>,
     mut p: Pending,
 ) {
     if matches!(p.kind, DeclKind::Interface | DeclKind::Alias) {
@@ -312,14 +342,16 @@ fn register(
     pending.push(p);
 }
 
-// The declaration's own `<T extends B, ...>` list as export inputs. The bound is read off
-// the GenericParameter node the declare pass already allocated for the parameter, so it
-// is the very type the body was resolved against. None when a parameter has no node,
-// which means the declaration was never resolved with it in scope.
-fn with_type_params(
-    ctx: &CheckContext<'_, '_>,
+// The declaration's own `<T extends B = D, ...>` list as export inputs. The bound is read
+// off the GenericParameter node the declare pass already allocated for the parameter, so
+// it is the very type the body was resolved against. The default is resolved again with
+// the declaration's parameters in scope (the namespace memoizes the parameter nodes, so
+// a default that names an earlier parameter gets that same node). None when a parameter
+// has no node, which means the declaration was never resolved with it in scope.
+fn with_type_params<'ast>(
+    ctx: &mut CheckContext<'ast, '_>,
     mut p: Pending,
-    declared: Option<&TSTypeParameterDeclaration<'_>>,
+    declared: Option<&'ast TSTypeParameterDeclaration<'ast>>,
 ) -> Option<Pending> {
     let Some(declared) = declared else {
         return Some(p);
@@ -331,10 +363,21 @@ fn with_type_params(
         let Type::GenericParameter(_, _, bound) = ctx.arena.raw(node) else {
             return None;
         };
+        let bound = *bound;
+        let default = if param.default.is_some() {
+            // A default that cannot be resolved cannot be exported.
+            Some(
+                ctx.namespace
+                    .resolve_type_param_default(&mut ctx.arena, declared, i)?,
+            )
+        } else {
+            None
+        };
         p.type_params.push(TypeParamInput {
             id,
             name: param.name.name.to_string(),
-            bound: *bound,
+            bound,
+            default,
         });
     }
     Some(p)

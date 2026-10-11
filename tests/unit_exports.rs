@@ -216,3 +216,36 @@ fn an_alias_to_an_exported_interface_exports() {
     assert!(!out.incomplete, "{out:?}");
     assert_eq!(names(&out), vec!["U", "V", "W"]);
 }
+
+#[test]
+fn a_type_parameter_default_is_exported() {
+    let out = run("export interface Box<T = string> { value: T }");
+    assert!(!out.incomplete, "{out:?}");
+    let params = &out.exports[0].type_params;
+    assert_eq!(params.len(), 1);
+    assert!(params[0].default.is_some(), "{params:?}");
+}
+
+#[test]
+fn a_default_may_name_an_earlier_parameter() {
+    let out = run("export type Pair<A, B = A> = { first: A; second: B };");
+    assert!(!out.incomplete, "{out:?}");
+    let params = &out.exports[0].type_params;
+    assert!(params[0].default.is_none());
+    assert!(params[1].default.is_some());
+}
+
+#[test]
+fn editing_a_default_changes_the_signature() {
+    let sig = |source: &str| run(source).exports[0].sig;
+    let string = sig("export interface Box<T = string> { value: T }");
+    let number = sig("export interface Box<T = number> { value: T }");
+    let none = sig("export interface Box<T> { value: T }");
+    assert_ne!(string, number);
+    assert_ne!(string, none);
+    assert_eq!(
+        string,
+        sig("export interface Box<T = string> { value: T }"),
+        "an unchanged declaration keeps its signature"
+    );
+}

@@ -169,6 +169,9 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
         Statement::ExportNamedDeclaration(_)
         | Statement::ExportFromDeclaration(_)
         | Statement::ExportAllDeclaration(_) => {}
+        // With an import source the declaration was bound before checking started
+        // (bridge::imports), so it is handled, not unsupported.
+        Statement::ImportDeclaration(_) if ctx.imports.is_some() => {}
         other => support::push_unsupported(other, ctx),
     }
 }

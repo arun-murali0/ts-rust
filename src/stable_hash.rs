@@ -387,19 +387,19 @@ mod tests {
             (
                 "module",
                 m.as_u128(),
-                0x0199761c23808c59c6f5f9f4b060983b_u128,
+                0x07cd6aa4402504698f349614b12eac36_u128,
             ),
-            ("decl", d.as_u128(), 0xbd616fc215c3568308890db0674e0ed9),
+            ("decl", d.as_u128(), 0xc76c2596bcbb9302c8d9ecc595cacf3b),
             (
                 "number",
                 num().as_u128(),
-                0x50e58cbd6ada00a1070d80d6a76865f3,
+                0xe47f10c79243838966e9c4aa7c53ef78,
             ),
-            ("object", obj.as_u128(), 0xed95933cc54e7202e6cb13f8c91bc3ed),
+            ("object", obj.as_u128(), 0xbbc1c3fe66e12c9a5b9117c510663148),
             (
                 "app",
                 hash_node(&NodeIn::App(d, &[st()])).as_u128(),
-                0xf589a01d8b30dca09d4743cd83a765fe,
+                0xd9ec850244ab12fb54b4b38ed7fc6aa6,
             ),
         ];
         for (n, v, want) in got {
