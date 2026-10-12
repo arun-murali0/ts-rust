@@ -219,7 +219,7 @@ fn narrowing_does_not_leak_past_switch() {
 // above. It has no test here: NarrowState is keyed by SymbolId, and oxc assigns
 // every binding in a program a distinct one, so two different functions' own
 // parameters can never collide on a lookup. Skipping the reset would still leave
-// ctx.narrow holding entries no later lookup can ever match -- a real hygiene
+// ctx.narrow holding entries no later lookup can ever match; a real hygiene
 // issue, since the map grows for the rest of the check for no reason, but not one
 // a diagnostic-based test can observe.
 
@@ -322,7 +322,7 @@ fn switch_case_narrows_string_discriminant() {
 }
 
 // Each case starts from the switch's own outer state, not from what an earlier
-// case narrowed to -- this checker does not model real fallthrough (see the
+// case narrowed to; this checker does not model real fallthrough (see the
 // comment in check_switch_statement), so the "square" case must not still think
 // shape could be "circle".
 #[test]

@@ -39,7 +39,7 @@ fn void_function_returning_a_value_is_caught() {
 }
 
 // Before never was wired to a keyword, `: never` made resolve_ts_type return
-// None, which made the whole function unresolvable -- so assigning its result
+// None, which made the whole function unresolvable, so assigning its result
 // to a number (valid: never is a subtype of everything) never even got checked.
 #[test]
 fn never_typed_function_no_longer_blocks_resolution() {

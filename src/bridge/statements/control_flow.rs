@@ -190,6 +190,9 @@ fn run_loop(
     ctx.narrow = join_all(leaving, &mut ctx.arena).unwrap_or(head);
 }
 
+// A `while (true)` cannot leave through its test, so the only way past it is a `break`
+// and the state after the loop is the join of the breaks alone. Any other test also lets
+// the loop leave on its false side, with that side's narrowing.
 pub(super) fn check_while_statement(
     while_stmt: &WhileStatement,
     scoping: &Scoping,
@@ -415,6 +418,9 @@ pub(super) fn record_break(label: Option<&str>, ctx: &mut CheckContext<'_, '_>) 
     }
 }
 
+// A `continue` targets the innermost loop, or the loop its label names, never a switch or
+// a labeled block. The search runs from the innermost frame outward, and the narrowing in
+// force at the jump is kept on that loop's frame for the head of its next pass.
 pub(super) fn record_continue(label: Option<&str>, ctx: &mut CheckContext<'_, '_>) {
     let target = ctx.jump_frames.iter().rposition(|frame| {
         frame.kind == FrameKind::Loop

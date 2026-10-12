@@ -262,6 +262,10 @@ fn tsc_rank(arena: &TypeArena, member: TypeId) -> u8 {
     }
 }
 
+// One level at a time, in the order tsc looks. Missing properties come first and end the
+// walk, since that one line says it all. After that, the first property in the target's
+// order that is optional where the target needs it, or whose type does not relate; its
+// reason continues one level down. A chain names the first reason, never every one.
 fn object_children(
     arena: &TypeArena,
     source: TypeId,
@@ -306,6 +310,9 @@ fn object_children(
     Vec::new()
 }
 
+// The three wordings tsc has for missing properties: one, up to five named, and more than
+// five (the first four and a count). Each has its own code, so when this line is the only
+// reason and becomes the top message it carries the right one.
 fn missing_level(arena: &TypeArena, source: TypeId, target: TypeId, missing: &[&str]) -> Level {
     let (from, to) = (display_type(arena, source), display_type(arena, target));
     match missing {
@@ -333,6 +340,10 @@ fn missing_level(arena: &TypeArena, source: TypeId, target: TypeId, missing: &[&
     }
 }
 
+// The first parameter position, over the longer of the two lists, where the target's
+// parameter type does not fit the source's (parameters compare the other way round, see
+// the header), and otherwise a return type that does not fit. A position with no type on
+// one side is skipped. A parameter with no name is called `argN`.
 fn function_children(
     arena: &TypeArena,
     from: &FunctionType,

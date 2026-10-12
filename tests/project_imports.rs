@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rust::{Diagnostic, FileOutcome, ModuleGraph, ModuleResolver, Severity, check_project};
 
-// Step 6c: check_project passes what each file exports to the files that import it.
+// check_project passes what each file exports to the files that import it.
 // Every test writes a small project into its own directory under the target tree, builds
 // the graph with a root (so files get stable keys) and checks it, which is the path the
 // command line takes.
@@ -361,7 +361,7 @@ fn a_file_with_a_syntax_error_does_not_stop_its_importers() {
     ));
 }
 
-// Step 7b: an exported declaration may name one that is not exported. The hidden one
+// An exported declaration may name one that is not exported. The hidden one
 // leaves the file under its own key, so the exporter is complete and its signature
 // crosses files with the hidden type intact.
 #[test]
@@ -423,7 +423,7 @@ fn a_hidden_declaration_cannot_be_imported_by_name() {
     assert_eq!(errors[0].code.tsc_code(), Some(2305));
 }
 
-// Step 7c across files: an inferred export is used as if it had been annotated.
+// Across files: an inferred export is used as if it had been annotated.
 #[test]
 fn an_inferred_export_crosses_files() {
     let project = run(
@@ -465,7 +465,7 @@ fn a_correct_use_of_an_inferred_export_is_clean() {
     assert!(project.errors("b.ts").is_empty());
 }
 
-// Step 7 (export *): `export * from` re-exports what the other module exports, under the
+// `export * from` re-exports what the other module exports, under the
 // keys it already has, except `default`.
 #[test]
 fn a_star_re_export_carries_the_other_modules_exports() {
@@ -587,7 +587,7 @@ fn a_star_re_export_of_a_missing_file_is_ts2307() {
     assert_eq!(codes, vec![Some(2307)]);
 }
 
-// Step 7e: the members of a cycle see what each other exports.
+// The members of a cycle see what each other exports.
 #[test]
 fn members_of_a_cycle_use_each_others_exports() {
     let project = run(
@@ -659,7 +659,7 @@ fn a_file_that_imports_a_cycle_sees_the_settled_exports() {
     assert_eq!(project.errors("c.ts").len(), 1);
 }
 
-// Step 7g: the report says which declarations of other files a file's check read, which
+// The report says which declarations of other files a file's check read, which
 // is what an incremental run needs to know a file does not depend on a change.
 fn reads_of(project: &Checked, file: &str) -> Vec<ts_rust::DeclKey> {
     for report in &project.report.files {

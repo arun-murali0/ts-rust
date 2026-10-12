@@ -90,7 +90,7 @@ fn rest_param_identifier_is_bound_as_an_array() {
     // adds `| undefined` to every element access, so `values[0]` assigned
     // into a `const value: number` is a real mismatch. The rest-param
     // binding itself (the thing this test actually covers) is still
-    // correct -- `values` is bound as `number[]`, not `any` or something
+    // correct: `values` is bound as `number[]`, not `any` or something
     // unbound, which is why there's exactly this one diagnostic and not, say,
     // a property-does-not-exist error.
     assert_eq!(

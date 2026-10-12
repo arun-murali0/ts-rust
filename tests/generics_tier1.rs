@@ -98,7 +98,7 @@ fn two_generic_functions_share_type_param_name_without_cross_contamination() {
     // generic_array_element_type_is_inferred: d91f583 made `firstOf`'s
     // `items[0]` include `| undefined`, so its body now mismatches its
     // declared `T`. That one diagnostic is expected and orthogonal to what
-    // this test actually verifies -- that resolving `firstOf`'s `T` and
+    // this test actually verifies: that resolving `firstOf`'s `T` and
     // `identity`'s `T` stay independent. Cross-contamination would show up
     // as a second, unexpected diagnostic on `const b: string =
     // identity("hello")` (e.g. `T` resolved to `number` there instead of

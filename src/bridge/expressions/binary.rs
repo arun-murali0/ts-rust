@@ -213,7 +213,7 @@ pub(super) fn infer_binary_expression_type(
 
 // Both mismatch sites above (`+` and the arithmetic group) need the same
 // diagnostic shape and differ only in which operator string to name, so it's
-// pulled out here rather than duplicated -- if the message format changes,
+// pulled out here rather than duplicated: if the message format changes,
 // there is one call to update instead of two that have to be kept in sync.
 fn push_binary_op_mismatch(
     ctx: &mut CheckContext<'_, '_>,

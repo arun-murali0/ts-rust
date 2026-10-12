@@ -1,7 +1,7 @@
 //! Compares ts-rust's own diagnostics against a real `tsc` run, in-process.
 //!
 //! Unlike scripts/harness.sh and scripts/compare-local.sh, this binary never
-//! shells out to ts-rust as a subprocess -- it calls `TypeChecker::check_source`
+//! shells out to ts-rust as a subprocess; it calls `TypeChecker::check_source`
 //! directly, the same entry point bin/ts-rust.rs uses, and only shells out to
 //! `tsc` itself (there is no Rust API for that side of the comparison).
 //!
@@ -21,7 +21,7 @@
 //! positives (and MIXED, which contains one) make the exit code nonzero; gaps are
 //! reported but expected while the checker is still being built. ts-rust's own code (TSR####, see diagnostic_codes.rs) is its own
 //! namespace, not tsc's TS#### numbering, and message wording is
-//! independently written -- so comparing message text or code text
+//! independently written, so comparing message text or code text
 //! verbatim against tsc's own would report near-constant false mismatches
 //! even on a real agreement. Both codes are still shown side by side in the
 //! table, as context for a human, just not used for the pass/fail check
@@ -48,7 +48,7 @@
 //! `noImplicitReturns`. Without these, tsc silently never reports several
 //! things ts-rust deliberately implements (e.g. unreachable-code detection),
 //! and a comparison run under plain `--strict` would misreport those as
-//! false positives when they are not -- ts-rust just implements a slightly
+//! false positives when they are not; ts-rust just implements a slightly
 //! stricter default than plain `--strict` ships with.
 //!
 //! KNOWN INCONSISTENCY: this binary currently invokes `tsc` with only
@@ -66,7 +66,7 @@
 //! IMPORTANT: this binary cannot yet point at a real multi-file project
 //! (e.g. zustand). ts-rust has no cross-file import/export resolution yet,
 //! so every file in a multi-file project would report spurious "cannot see
-//! this import" noise -- see the module resolution design work for why.
+//! this import" noise; see the module resolution design work for why.
 //! Single-file conformance fixtures are the only meaningful input today.
 
 use std::{
@@ -384,7 +384,7 @@ fn print_case(
                 "tsc flagged an error ts-rust did not -- likely a detection gap: this \
                  construct may not be checked yet"
             };
-            // Spans the two message columns as one wide cell -- the merged
+            // Spans the two message columns as one wide cell; the merged
             // width matches MSG_COL_WIDTH*2+3 (each column plus the " │ "
             // divider between them), so the right border still lines up
             // even though there's no internal divider for this one row.
@@ -571,7 +571,7 @@ fn ts_rust_diagnostics(
     for diagnostic in &result.diagnostics {
         if !matches!(diagnostic.severity, Severity::Error) {
             // Warnings are all "not yet checked" implementation-status
-            // markers with no tsc equivalent -- see the module doc comment.
+            // markers with no tsc equivalent; see the module doc comment.
             continue;
         }
         let (line, column) = line_index.line_col_utf8(diagnostic.start, source);
@@ -628,7 +628,7 @@ fn tsc_diagnostics(tsc_bin: &str, case: &Path) -> Result<SideDiagnostics, String
 // Parses one line of `tsc --pretty false` output, shaped like:
 //   file.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
 // Returns (line, column, is_error, code, message) on a match, without a
-// regex dependency -- tsc's format is stable and simple enough for plain
+// regex dependency: tsc's format is stable and simple enough for plain
 // string ops.
 fn parse_tsc_line(line: &str) -> Option<(u32, u32, bool, String, String)> {
     let open = line.find('(')?;

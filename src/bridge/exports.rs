@@ -261,6 +261,16 @@ fn push_declaration<'ast>(
     }
 }
 
+// In order: list the file's top-level declarations with the names each is exported
+// under, then attach `export { a as b }` specifiers (to them, or to what the file
+// imported) and the re-exports from other modules. Every interface and alias is
+// registered before any is written out, exported or not, so a body may name one that is
+// not exported and the bodies may name each other in any order. Everything built is then
+// written against the finished key table, and only the exported ones, with the
+// declarations they reach, leave the unit. `export *` is merged last, since a name the
+// file exports itself wins over a star's. Whatever cannot be exported cleanly sets
+// `incomplete` instead of being guessed, so a dependent sees fewer names, never a wrong
+// one.
 pub(crate) fn collect_exports<'ast>(
     program: &'ast Program<'ast>,
     ctx: &mut CheckContext<'ast, '_>,

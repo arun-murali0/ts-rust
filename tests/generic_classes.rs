@@ -11,12 +11,12 @@ fn check(fixture_source: &str, file_name: &str) -> Vec<Diagnostic> {
 
 // Filters to Severity::Error only, matching the pattern already used
 // elsewhere in this test suite (e.g. structural_types.rs's `errors()`,
-// recursive_types.rs) -- Warning-severity diagnostics are implementation-
+// recursive_types.rs). Warning-severity diagnostics are implementation-
 // status markers ("this expression kind isn't checked yet"), not something
 // a fixture's correctness should be judged on. Assignment expressions
 // (`x = y`, `this.x = y`) in particular are not yet handled anywhere in
 // infer_expression_type (see src/bridge/expressions/mod.rs's catch-all
-// arm), a pre-existing, checker-wide gap unrelated to generics -- it was
+// arm), a pre-existing, checker-wide gap unrelated to generics; it was
 // simply invisible in these fixtures before generic class bodies were
 // actually being checked at all (see check_class_declaration's now-fixed
 // missing type-parameter scope push).
@@ -87,7 +87,7 @@ fn generic_class_recursive_field_with_same_type_param_resolves() {
     single_error(&diagnostics, DiagnosticCode::ReturnTypeMismatch);
 }
 
-// tsc: "Generic type 'Box<T>' requires 1 type argument(s)." -- the existing
+// tsc: "Generic type 'Box<T>' requires 1 type argument(s)." The existing
 // count-check machinery in type_annotation.rs already worked off
 // declared_type_param_arity/decl, which now cover classes too, so this needed
 // no changes beyond the two namespace.rs edits.
@@ -105,7 +105,7 @@ fn generic_class_type_argument_count_mismatch_is_reported() {
 
 // check_class_declaration never pushed the class's own <T, ...> into scope
 // before checking constructor/method bodies (only resolve_class did, at
-// declare time, for field/param annotations) -- so a method other than the
+// declare time, for field/param annotations), so a method other than the
 // constructor that assigns `this.prop = someTParam` inside its own body hit
 // an unresolved-name path instead of correctly treating T as the same
 // GenericParameter node used everywhere else for this class.

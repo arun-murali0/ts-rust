@@ -34,7 +34,9 @@ enum DeclState {
     // The members are still being resolved. The declaration reads as an empty object,
     // which is what an unfinished declaration has always looked like to a caller.
     Resolving,
-    // The id of the body, an Object, which is what get() hands out for the Ref.
+    // The id of the body, an Object, which is what get() hands out for the Ref. Reached once,
+    // through resolve_ref, and that is the one moment an existing id starts reading as
+    // something else, which is why it advances `generation`.
     Resolved(TypeId),
     // Resolution gave up. Nothing outside the failed call was given a usable type, and
     // the Ref keeps reading as an empty object.
@@ -195,7 +197,9 @@ pub struct TypeArena {
     // it, since an id nobody has asked about has no stale answer.
     generation: u64,
 
-    // The declaration behind every Ref, indexed by DeclSlot.
+    // The declaration behind every Ref, indexed by DeclSlot. A Ref holds only its slot, so a
+    // declaration's state changes here while the id every member holds stays the same (LLD
+    // 1.7); that is why a recursive declaration needs no placeholder patched afterwards.
     decls: Vec<DeclInfo>,
 
     // The Named ids that are enums. An enum prints and relates as a union of its member
@@ -343,6 +347,9 @@ impl TypeArena {
         TypeId((self.types.len() - 1) as u32)
     }
 
+    // The kinds that share one id by content. A primitive already has a fixed slot, a union
+    // is interned by its own table (interned_unions) and a Ref is pushed directly (see
+    // alloc_ref), so none of them goes through the digest table.
     fn is_internable(ty: &Type) -> bool {
         matches!(
             ty,
@@ -858,7 +865,7 @@ impl TypeArena {
 
     // Allocates the Ref for a declaration that is about to be resolved and hands back its
     // id. This is what lets an interface, a class or an object-literal alias refer to
-    // itself through a property -- a linked list's `next: Node | null` -- before its own
+    // itself through a property (a linked list's `next: Node | null`) before its own
     // body exists: the self-reference resolves to this id by identity, and resolve_ref
     // later gives the same id its body (see namespace::resolve for how it is used).
     //

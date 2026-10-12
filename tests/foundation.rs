@@ -89,7 +89,7 @@ fn binary_operator_mismatch_is_caught() {
 // fixture is a namespace, which still goes to push_unsupported. It used to be a
 // do-while, and before that a for loop whose `i = i + 1` update happened to hit
 // the "unimplemented expression" warning, so the test passed only because
-// assignments were unchecked -- each time the checker learned the construct the
+// assignments were unchecked; each time the checker learned the construct the
 // fixture stopped testing anything real, so it should be something with no plan to
 // be supported soon.
 #[test]

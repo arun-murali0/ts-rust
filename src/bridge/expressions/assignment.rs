@@ -31,7 +31,7 @@ pub(super) fn infer_assignment_expression_type(
 
     let Some(target_type) = target_type else {
         // A destructuring target (`[a, b] = arr`, `({x} = obj)`), or one
-        // wrapped in `as`/`!`/a type assertion -- not modeled. Skips the
+        // wrapped in `as`/`!`/a type assertion, not modeled. Skips the
         // assignability check rather than guessing; the right-hand side's own
         // errors above still stand.
         return right_type;
@@ -73,7 +73,7 @@ pub(super) fn infer_assignment_expression_type(
         // "a"` reports the same way `x - "a"` would). Not checked here, and a
         // narrower gap than tsc: whether the *result* is itself assignable
         // back to the target's type (`x: "a" | "b"; x += "c";` is invalid in
-        // tsc since the result widens to plain string) -- left for later.
+        // tsc since the result widens to plain string), left for later.
         operator => match compound_assignment_operator(operator) {
             Some(binary_operator) => infer_binary_expression_type(
                 binary_operator,
@@ -180,6 +180,9 @@ fn narrow_member_on_assignment(
     }
 }
 
+// The type a write lands on. None for a target with no type to compare against
+// (destructuring, a type assertion), which skips the assignability check instead of
+// guessing; a wrong error is worse than a missing one.
 fn resolve_assignment_target_type(
     target: &AssignmentTarget,
     scoping: &Scoping,
@@ -213,6 +216,9 @@ fn resolve_assignment_target_type(
     }
 }
 
+// The arithmetic compound forms, mapped to the binary operation they stand for, so `x += y`
+// is checked with the operand rules of `x + y`. The logical forms short-circuit and the
+// rest are not modelled; both return None and the caller falls back to the right side.
 fn compound_assignment_operator(operator: AssignmentOperator) -> Option<BinaryOperator> {
     Some(match operator {
         AssignmentOperator::Addition => BinaryOperator::Addition,

@@ -217,11 +217,11 @@ fn array_covariance_allows_subtype_assignment() {
 
 // Before recursive-type resolution existed, a mutually recursive pair like
 // this couldn't be resolved at all, and the checker deliberately gave up
-// rather than infinite-looping -- surfacing that as an "unresolved
+// rather than infinite-looping, surfacing that as an "unresolved
 // annotation" diagnostic was the safe, intentional behavior at the time.
 // Now that mutually recursive interfaces genuinely resolve (see
 // tests/recursive_types.rs's mutually_recursive_interfaces_resolve and
-// friends), this fixture's code is legitimately valid TypeScript -- `{} as
+// friends), this fixture's code is legitimately valid TypeScript: `{} as
 // any` satisfies B's `a: A` structurally, same as real tsc would accept.
 // This test now asserts the improved behavior (no infinite loop, no
 // diagnostics) instead of the old give-up-safely one.

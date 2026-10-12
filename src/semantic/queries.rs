@@ -9,7 +9,7 @@ use crate::subtyping;
 /// implementation details of individual type-system algorithms.
 ///
 /// Despite taking `&mut` (for the cache below), this still asks nothing of
-/// the type system that a read-only view couldn't answer -- it does not
+/// the type system that a read-only view couldn't answer; it does not
 /// allocate types or otherwise mutate the arena. The `&mut` is purely to let
 /// repeated identical questions be answered from a cache instead of
 /// re-walking the type structure.
@@ -116,7 +116,7 @@ impl<'a> SemanticQueries<'a> {
     }
 
     // Every result gets cached unconditionally, including a single point lookup
-    // that would never be asked again -- checking for reuse potential first
+    // that would never be asked again: checking for reuse potential first
     // would cost more than the memoization ever saves. This is a leaf method:
     // it is the only thing in the checker allowed to call subtyping::is_subtype
     // directly, precisely so "did this go through the cache" has one place to
@@ -151,9 +151,9 @@ impl<'a> SemanticQueries<'a> {
     /// subtyping::is_disjoint for why an undecidable pair answers false.
     ///
     /// Symmetric, so the key stores the two ids in a fixed order and (a, b) shares
-    /// its entry with (b, a). Nothing calls this yet outside tests -- it is the
+    /// its entry with (b, a). Nothing calls this yet outside tests; it is the
     /// relation switch/if narrowing will use next to drop union members that
-    /// cannot equal a literal -- so the allow keeps the build quiet until then.
+    /// cannot equal a literal, so the allow keeps the build quiet until then.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_disjoint(&mut self, a: TypeId, b: TypeId) -> bool {
         let (first, second) = if a.index() <= b.index() {

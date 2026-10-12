@@ -39,20 +39,26 @@ macro_rules! key128 {
 }
 
 key128!(
-    /// Identity of a module, by the rule in LLD 3.1.1. Survives moving the project.
+    /// Identity of a module, by the rule in LLD 3.1.1. Survives moving the project, because it
+    /// is never built from a `FileId` (a run-local index that changes when a file is added)
+    /// or from the absolute root.
     ModuleKey
 );
 key128!(
-    /// Identity of one declaration: its module, local name and merge-group position.
+    /// Identity of one declaration: its module, local name and merge-group position. A
+    /// reference from one declaration to another carries this key and nothing else (HLD
+    /// ADR-5), so a change to one declaration's shape never reaches another's hash.
     DeclKey
 );
 key128!(
     /// Hash of a declaration's own public shape (LLD 3.3). Other declarations appear
-    /// in it by `DeclKey` only, so a body-only edit leaves it unchanged.
+    /// in it by `DeclKey` only, so a body-only edit leaves it unchanged. That is what lets a
+    /// dependent stop re-checking when only a body changed (early cutoff, LLD 6.3).
     SigHash
 );
 key128!(
-    /// Merkle hash of one type node (LLD 3.2).
+    /// Merkle hash of one type node (LLD 3.2). A node's children contribute their own hashes,
+    /// so a shared child is hashed once however many parents hold it.
     NodeHash
 );
 

@@ -135,7 +135,7 @@ fn infer_type_param_bindings_uncached(
         Type::GenericParameter(id, _, bound) => {
             // A parameter bound by an explicit call-site type argument
             // (identity<string>(x)) is not up for renegotiation by whatever
-            // argument happens to line up with it structurally -- explicit
+            // argument happens to line up with it structurally; explicit
             // wins outright, the same way TypeScript itself treats an
             // explicit type argument as authoritative rather than a hint.
             if locked.contains(&id) {
@@ -319,6 +319,8 @@ fn substitute_impl(
     bindings: &[(crate::types::TypeParameterId, TypeId)],
     keep_unbound: bool,
 ) -> TypeId {
+    // Nothing bound, nothing to rewrite: the id comes back as it is and no scratch state
+    // is built.
     if bindings.is_empty() {
         return type_id;
     }
@@ -535,8 +537,8 @@ impl Substitution<'_> {
 // Collects every distinct type parameter appearing in type_id, then hands them
 // back in declaration order rather than tree-walk-encounter order. An explicit
 // call-site type argument list (identity<string, number>(x, y)) has no
-// declaration span of its own to key a TypeParameterId lookup off of -- it is
-// just a positional list -- so the only way to zip it correctly against a
+// declaration span of its own to key a TypeParameterId lookup off of (it is
+// just a positional list), so the only way to zip it correctly against a
 // function's own T, U, ... is to recover the order they were declared in. That
 // order survives structurally: push_type_params numbers each parameter by its
 // position in the source `<...>` list (see TypeParameterId::parameter_index),

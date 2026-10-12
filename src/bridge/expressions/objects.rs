@@ -60,8 +60,8 @@ pub(super) fn infer_object_expression_type(
         // A key can be a plain identifier (`{ a: 1 }`), a string literal
         // (`{ "a": 1 }`), or a numeric literal (`{ 1: "x" }`); JavaScript stores
         // all three as string-keyed properties, so a numeric key is formatted the
-        // same way its runtime string form would be. Anything else -- a computed
-        // key (`{ [expr]: 1 }`) or a private name -- has no static name to give
+        // same way its runtime string form would be. Anything else, a computed
+        // key (`{ [expr]: 1 }`) or a private name, has no static name to give
         // this property, so it is skipped rather than guessed at.
         let name = match &property.key {
             PropertyKey::StaticIdentifier(key) => key.name.to_string(),

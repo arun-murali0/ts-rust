@@ -35,9 +35,11 @@ impl CancelToken {
     }
 }
 
-// What one unit of work reads and never changes. A unit is one file for now; it becomes
-// one strongly connected component of the module graph when the graph driver lands
-// (LLD 4.3), and the graph and the dependency outputs join this struct then.
+// What one unit of work reads and never changes. A unit is one file. The members of an
+// import cycle are still separate units: check_project checks them again, each pass
+// reading what the previous one exported, until the exports stop changing (settle_cycle in
+// module_resolution/check.rs). Checking a whole cycle as one unit in one arena (LLD 4.3) is
+// not what is done today. What the file imports reaches it through `imports`.
 pub struct UnitContext<'a> {
     pub file_id: FileId,
     pub file_name: &'a str,
@@ -196,6 +198,10 @@ impl Default for Worker {
     }
 }
 
+// What a unit that panicked reports: one internal-error diagnostic at offset 0, and an
+// output marked incomplete, with no exports and an export list that is not complete. A
+// dependent then reads the file's exports as missing, not as empty, so it reports nothing
+// against them.
 fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
     let message = messages::internal_checker_error();
     UnitOutput {

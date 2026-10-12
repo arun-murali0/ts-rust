@@ -130,8 +130,8 @@ fn bind_array_pattern(
         // infer_computed_member_access_type): destructuring past the end of a
         // real array yields undefined at runtime, and this checker cannot
         // prove the array is long enough to cover every position destructured,
-        // so each bound element includes undefined regardless of its position
-        // -- but only when there is a real array element type to union it
+        // so each bound element includes undefined regardless of its position,
+        // but only when there is a real array element type to union it
         // with in the first place. Any/Error stay as-is, so a bad source
         // (or an already-Any/Error one) doesn't cascade into a second,
         // unrelated diagnostic on every use of the destructured bindings.

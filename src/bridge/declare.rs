@@ -30,6 +30,11 @@ enum TopLevelItem<'a> {
     Function(&'a Function<'a>),
 }
 
+// The declarations the declare pass registers, in source order. `export` and
+// `export default` wrap the same declaration, so they are looked through here and the
+// rest of the pass sees an exported declaration as it sees a local one; what a file
+// exports is read back out later, in exports.rs. Anything else at the top level (an
+// expression as the default export, `export { a }`) declares nothing.
 fn top_level_items<'a>(program: &'a Program<'a>) -> Vec<TopLevelItem<'a>> {
     let mut items = Vec::new();
     for stmt in &program.body {
@@ -205,7 +210,7 @@ fn declare_class_constructor(class: &Class<'_>, ctx: &mut CheckContext<'_, '_>) 
             // A generic class's own type parameters need to be in
             // scope while its constructor's parameters are
             // resolved, the same as a generic function's are just
-            // above -- otherwise `T` in `constructor(value: T)`
+            // above, otherwise `T` in `constructor(value: T)`
             // fails to resolve, the whole signature falls back to
             // "untyped, can't check arity", and `new Box(1)` never
             // gets the inference-and-substitution treatment a

@@ -73,7 +73,8 @@ struct TypeEntry<'a> {
 // bridge::check_program), the same way implicit_any_params is.
 pub struct TypeArgumentIssue {
     pub name: String,
-    // Fewest type arguments a reference must give: parameters without a default.
+    // Fewest type arguments a reference must give: parameters without a default. `Pair<number>`
+    // is fine for `interface Pair<A, B = string>`, so only a count below this is an error.
     pub required: usize,
     // Most it may give: every declared parameter.
     pub expected: usize,
@@ -149,7 +150,7 @@ pub struct TypeNamespace<'a> {
     // first is appended here instead. resolve() below folds this in when the
     // kind is Interface, alongside decl itself, so nothing else has to know two
     // tables exist. A class or alias with a colliding name is unaffected: it
-    // still just overwrites in entries -- a separate limitation that interface
+    // still just overwrites in entries, a separate limitation that interface
     // merging does not address.
     merged_interface_parts: FxHashMap<String, Vec<&'a TSInterfaceDeclaration<'a>>>,
 
@@ -326,6 +327,9 @@ impl<'a> TypeNamespace<'a> {
         self.entries.contains_key(name)
     }
 
+    // Collected here instead of reported: the same parameter list can be resolved more than
+    // once. The identifier's start offset keys the entry, so a parameter is reported once
+    // however many times it is resolved; publish turns them into diagnostics.
     pub fn note_implicit_any_params(&mut self, params: &oxc_ast::ast::FormalParameters) {
         for param in &params.items {
             if param.type_annotation.is_some() {
@@ -354,11 +358,11 @@ impl<'a> TypeNamespace<'a> {
         std::mem::take(&mut self.unresolved_constraints)
     }
 
-    // The `<...>` list declared by the interface or type alias called `name`.
-    // Outer None: not something whose type parameters are modelled (a class,
-    // whose generics are not supported yet, a type parameter, an enum, or an
-    // unknown name), so nothing is ever reported against it and an unsupported
-    // feature cannot produce a false error. Inner None: a non-generic one.
+    // The `<...>` list declared by the interface, class or type alias called `name`.
+    // Outer None: not something whose type parameters are modelled (a type
+    // parameter, an enum, or an unknown name), so nothing is ever reported against
+    // it and an unsupported feature cannot produce a false error. Inner None: a
+    // non-generic one.
     fn declared_type_param_list(
         &self,
         name: &str,
@@ -446,6 +450,8 @@ impl<'a> TypeNamespace<'a> {
         resolved
     }
 
+    // A type reference can be resolved more than once (at declaration, then at each use),
+    // so an issue is kept once per source position and reported later, in publish.
     pub fn note_type_argument_issue(
         &mut self,
         name: &str,
@@ -480,6 +486,7 @@ impl<'a> TypeNamespace<'a> {
         }
     }
 
+    // Once per source position, for the same reason as note_type_argument_issue.
     pub fn note_constraint_violation(
         &mut self,
         parameter_name: &str,
@@ -571,6 +578,9 @@ impl<'a> TypeNamespace<'a> {
             .or_insert(span);
     }
 
+    // The entry starts unresolved and is resolved on first use, because declarations may
+    // name each other in any order. The collision is noted before the entry replaces an
+    // earlier one, so both declarations can be reported, as tsc does.
     pub fn insert_type_alias(
         &mut self,
         name: &str,
@@ -767,6 +777,9 @@ impl<'a> TypeNamespace<'a> {
         TypeParamScope { saved, activated }
     }
 
+    // Undoes what the matching push did: an entry the parameters shadowed comes back and a
+    // name that was not there before is removed, so a `T` of one declaration never leaks
+    // into the next and a `T` that shadowed a top-level one restores it.
     pub fn pop_type_params(&mut self, scope: TypeParamScope<'a>) {
         let keep = self
             .active_type_params
@@ -810,8 +823,8 @@ impl<'a> TypeNamespace<'a> {
         // so `Box<T>`'s body can refer to T and have it resolve to the same
         // GenericParameter node a caller will later substitute via
         // type_annotation::resolve_ts_type's TSTypeReference arm. The resulting
-        // resolved shape -- still containing bare GenericParameter placeholders
-        // -- is what gets cached in entry.resolved; substitution for a specific
+        // resolved shape, still containing bare GenericParameter placeholders,
+        // is what gets cached in entry.resolved; substitution for a specific
         // `Box<number>` happens later, per reference, against this one cached
         // generic shape, the same way a generic function's FunctionType is
         // resolved once and substituted per call.
@@ -826,7 +839,7 @@ impl<'a> TypeNamespace<'a> {
             // referring to the class's own name generically, `next: Box<T>`)
             // resolves inside resolve_class the same way. Substitution for a
             // specific `Box<number>` happens later, per reference, exactly as
-            // it does for an interface -- resolve_class itself needs no
+            // it does for an interface; resolve_class itself needs no
             // change at all for this.
             DeclKind::Class(class) => class.type_parameters.as_deref(),
             DeclKind::Resolved => None,
@@ -834,7 +847,7 @@ impl<'a> TypeNamespace<'a> {
 
         // An interface, a class, and a type-literal alias (`type X = { ... }`)
         // are always object-shaped, so a property inside one can legitimately
-        // refer back to the declaration itself -- a linked list's
+        // refer back to the declaration itself: a linked list's
         // `next: Node | null`, a tree's `children: Node[]`. For these, a Ref
         // to the declaration is registered as this name's resolved type
         // *before* its members are resolved, so the self-reference finds a real
@@ -867,7 +880,7 @@ impl<'a> TypeNamespace<'a> {
                     // Declaration merging: every part's members are resolved
                     // together as one shape, decl's own first, then each merged
                     // part's in the order they were declared. A property name
-                    // repeated across parts is not specially detected -- it hits
+                    // repeated across parts is not specially detected; it hits
                     // resolve_object_members' existing duplicate-name check, the
                     // same one that already applies within a single interface, and
                     // makes the whole merged interface unresolvable, which is safe
@@ -896,7 +909,7 @@ impl<'a> TypeNamespace<'a> {
         // A non-generic interface, alias or class prints as its own name from
         // here on ("Dog", not its member list). A generic one is left unnamed:
         // this cached shape still holds bare GenericParameter placeholders and
-        // is never itself the type of anything a person sees -- each
+        // is never itself the type of anything a person sees; each
         // instantiation (type_annotation::resolve_ts_type's TSTypeReference
         // arm) names its own substituted result instead ("Box<number>").
         let is_non_generic = type_params.is_none_or(|params| params.params.is_empty());
@@ -919,7 +932,7 @@ impl<'a> TypeNamespace<'a> {
                 // A member turned out to be unresolvable after all. A failed
                 // resolution's partial work is discarded, never handed to a
                 // caller, so nothing outside this call could have captured the
-                // Ref as real by now -- safe to just forget it.
+                // Ref as real by now, safe to just forget it.
                 arena.fail_ref(reference);
                 entry.resolved = None;
                 Resolution::NotFound
@@ -962,7 +975,7 @@ impl<'a> TypeNamespace<'a> {
                     // reference like `Box<number>` substitutes in
                     // type_annotation.rs. A parent with no type parameters, or
                     // heritage with no `<...>` at all, just uses the parent's
-                    // shape as-is -- the common, non-generic case.
+                    // shape as-is, the common, non-generic case.
                     let parent_type = match self.declared_type_param_decl(&parent_name.name) {
                         Some(decl) => {
                             let mut bindings: Bindings = Vec::with_capacity(decl.params.len());
@@ -1130,6 +1143,8 @@ impl<'a> TypeNamespace<'a> {
     }
 }
 
+// A later member of the same name replaces the earlier one in place, so the property keeps
+// its position in the list and takes the later member's type.
 fn upsert_property(
     properties: &mut Vec<PropertyEntry>,
     name: String,
