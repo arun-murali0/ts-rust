@@ -1196,7 +1196,7 @@ fn an_import_equals_require_of_a_missing_file_is_ts2307() {
 }
 
 #[test]
-fn a_module_with_export_equals_leaves_the_importer_unbound() {
+fn a_property_missing_from_an_export_equals_value_is_reported() {
     let project = run(
         "require-export-equals",
         &[
@@ -1209,7 +1209,7 @@ fn a_module_with_export_equals_leaves_the_importer_unbound() {
         .iter()
         .map(|d| d.code.tsc_code())
         .collect();
-    assert!(!codes.contains(&Some(2339)), "{:?}", project.errors("b.ts"));
+    assert_eq!(codes, vec![Some(2339)], "{:?}", project.errors("b.ts"));
 }
 
 // A dynamic import with a string argument is a dependency edge like any other.
@@ -1245,4 +1245,75 @@ fn a_dynamic_import_is_a_dependency_of_the_importing_file() {
             .unwrap()
     };
     assert_eq!(project.graph.dependencies(id_of("b.ts")), &[id_of("a.ts")]);
+}
+
+// `export = x`: the module is that one declaration.
+#[test]
+fn an_import_equals_require_of_an_export_equals_module_is_that_value() {
+    let project = run(
+        "export-equals-fn",
+        &[
+            (
+                "a.ts",
+                "function pad(s: string, n: number): string { return s }\nexport = pad;",
+            ),
+            (
+                "b.ts",
+                "import pad = require('./a');\nconst a: string = pad('x', 1);\nconst b: number = pad('x', 1);\npad(1, 1);",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Some(2322), Some(2345)],
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_default_import_of_an_export_equals_module_is_that_value() {
+    let project = run(
+        "export-equals-default",
+        &[
+            (
+                "a.ts",
+                "function pad(s: string): string { return s }\nexport = pad;",
+            ),
+            (
+                "b.ts",
+                "import pad from './a';\nconst n: number = pad('x');",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn an_export_equals_module_still_never_reports_a_missing_name() {
+    let project = run(
+        "export-equals-named",
+        &[
+            (
+                "a.ts",
+                "function pad(s: string): string { return s }\nexport = pad;",
+            ),
+            ("b.ts", "import { length } from './a';"),
+        ],
+    );
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
 }

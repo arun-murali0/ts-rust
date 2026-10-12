@@ -58,7 +58,20 @@ pub(super) fn bind_imports<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCo
                 {
                     let specifier = reference.expression.value.as_str();
                     report_missing_module(source, specifier, reference.expression.span, ctx);
-                    if decl.import_kind != ImportOrExportKind::Type {
+                    // A module that says `export = x` is that one thing; any other is the
+                    // object of its named exports.
+                    let whole = source.export_keys(specifier, "export=");
+                    if !whole.is_empty() {
+                        for key in whole {
+                            bind_key(
+                                ctx,
+                                source,
+                                key,
+                                &decl.id,
+                                decl.import_kind == ImportOrExportKind::Type,
+                            );
+                        }
+                    } else if decl.import_kind != ImportOrExportKind::Type {
                         bind_namespace_object(ctx, source, specifier, &decl.id);
                     }
                 }
@@ -132,11 +145,20 @@ fn bind_declaration<'ast>(
             }
             ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => {
                 report_missing_name(source, specifier, "default", spec.local.span, ctx);
+                // A module with no default that says `export = x` is what a default
+                // import gets (the interop every bundler and `esModuleInterop` give).
+                let imported = if source.export_keys(specifier, "default").is_empty()
+                    && !source.export_keys(specifier, "export=").is_empty()
+                {
+                    "export="
+                } else {
+                    "default"
+                };
                 bind_name(
                     ctx,
                     source,
                     specifier,
-                    "default",
+                    imported,
                     &spec.local,
                     whole_declaration_is_type,
                 );

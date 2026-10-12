@@ -25,8 +25,8 @@
 // something wrong.
 
 use oxc_ast::ast::{
-    BindingPattern, Declaration, ExportDefaultDeclarationKind, Function, ModuleExportName, Program,
-    Statement, TSTypeParameterDeclaration,
+    BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression, Function,
+    ModuleExportName, Program, Statement, TSTypeParameterDeclaration,
 };
 use oxc_semantic::SymbolId;
 use oxc_span::GetSpan;
@@ -390,9 +390,20 @@ pub(crate) fn collect_exports<'ast>(
             }
             // `export = x` and `export as namespace X` change what the module exports in a
             // way this pass does not read, so the list cannot be called complete.
-            Statement::TSExportAssignment(_) | Statement::TSNamespaceExportDeclaration(_) => {
+            // `export = name` hands the module's whole value to one declaration. It is
+            // listed under the name `export=`, which no source can write, so an
+            // `import x = require()` or a default import can find it. The module stays
+            // partial, because a named import of one of its properties is still legal.
+            Statement::TSExportAssignment(assign) => {
                 table.incomplete = true;
+                if let Expression::Identifier(id) = &assign.expression {
+                    specifiers.push(Specifier {
+                        local: id.name.to_string(),
+                        exported: "export=".to_string(),
+                    });
+                }
             }
+            Statement::TSNamespaceExportDeclaration(_) => table.incomplete = true,
             Statement::TSEnumDeclaration(d) => {
                 let node = Node::Enum {
                     symbol: d.id.symbol_id.get(),
