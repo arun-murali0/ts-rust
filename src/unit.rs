@@ -98,6 +98,10 @@ pub struct UnitOutput {
     // Export name to the key of the declaration under it. A name that is both a type and
     // a value appears once for each; the declaration's `kind` tells them apart.
     pub export_names: Vec<(String, DeclKey)>,
+    // True when `export_names` is the module's whole export list. A dependent reports a
+    // missing name only against a complete list; against a partial one the name may be
+    // an export that was left out.
+    pub exports_complete: bool,
 }
 
 const _: fn() = || {
@@ -174,6 +178,7 @@ impl Worker {
                 incomplete: table.incomplete,
                 exports: table.decls,
                 export_names: table.names,
+                exports_complete: table.collected && !table.incomplete,
             }),
             Ok(Ok(None)) => Err(UnitError::Cancelled),
             Ok(Err(error)) => Err(error.into()),
@@ -205,6 +210,7 @@ fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
         incomplete: true,
         exports: Vec::new(),
         export_names: Vec::new(),
+        exports_complete: false,
     }
 }
 
