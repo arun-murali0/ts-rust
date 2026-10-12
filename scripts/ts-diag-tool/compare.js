@@ -47,21 +47,53 @@
 // stored in its result cache with each file, so a cached run still reports what tsc cost;
 // pass --no-cache to measure it afresh.
 //
-// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache]
+// --module compares a whole project instead of independent files, which is how ts-rust now
+// checks (through its module graph, imports resolved across files). The target must be a
+// directory. ts-rust runs as before; tsc checks every file of the directory in ONE Program
+// (check-fixtures.js checkProject), run as a child process so its wall time and peak memory
+// are measured the same way ts-rust's are, instead of one isolated Program per file. The
+// per-file tsc cache is not used, since a project result depends on every file in it. Every
+// file is treated as its own module (moduleDetection: force), so independent scripts do not
+// collide in one global scope; on tests/fixtures the diagnostics equal the per-file mode's.
+//
+// --runs N repeats the measured runs of ts-rust (and, with --module, of tsc) N times and
+// reports the median time and median peak memory, so one noisy run does not decide the
+// figures. The default is 5 with --module and 1 otherwise (per-file tsc results come from a
+// cache, so repeating them would measure the cache). --threads N runs ts-rust with N worker
+// threads (RAYON_NUM_THREADS); tsc is single-threaded, so --threads 1 is the like-for-like
+// figure and the default (every core) is what a user gets.
+//
+// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache] [--module] [--runs N] [--threads N]
 
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawnSync } = require("child_process");
 const ts = require("typescript");
 const {
   checkFiles,
   collectTsFiles,
+  collectProjectFiles,
   defaultCachePath,
 } = require("./check-fixtures");
 const Table = require("cli-table3");
 
 const args = process.argv.slice(2);
-const positional = args.filter((a) => !a.startsWith("--"));
+// Flags that take a value: the value follows the flag and is not a target or a binary.
+const VALUE_FLAGS = ["--runs", "--threads"];
+const positional = args.filter(
+  (a, i) => !a.startsWith("--") && !VALUE_FLAGS.includes(args[i - 1]),
+);
+function intFlag(name) {
+  const i = args.indexOf(name);
+  if (i === -1) return null;
+  const value = Number(args[i + 1]);
+  if (!Number.isInteger(value) || value < 1) {
+    console.error(`error: ${name} needs a whole number of at least 1`);
+    process.exit(2);
+  }
+  return value;
+}
 const strictOnly = args.includes("--strict-only");
 const asJson = args.includes("--json");
 const jsonStream = args.includes("--json-stream");
@@ -69,13 +101,25 @@ const onlyDiffer = args.includes("--only-differ");
 const showDiffer = args.includes("--differ");
 // tsc results are cached per fixture (see check-fixtures.js); --no-cache forces a full run.
 const noCache = args.includes("--no-cache");
+// Cross-file mode: tsc checks the directory as one project (see the doc comment above).
+const moduleMode = args.includes("--module");
+const runs = intFlag("--runs") ?? (moduleMode ? 5 : 1);
+const threads = intFlag("--threads");
 
 const [target, tsRustBin] = positional;
 if (!target || !tsRustBin) {
   console.error(
-    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache]",
+    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache] [--module] [--runs N] [--threads N]",
   );
   process.exit(2);
+}
+
+function median(values) {
+  const v = values.filter((x) => x !== null && x !== undefined);
+  v.sort((a, b) => a - b);
+  if (v.length === 0) return null;
+  const mid = v.length >> 1;
+  return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
 }
 if (asJson && jsonStream) {
   console.error(
@@ -125,6 +169,12 @@ function fmtKb(kb) {
 status(`[1/2] Running ts-rust over ${target} ...`);
 
 const stat = fs.statSync(target);
+if (moduleMode && stat.isFile()) {
+  console.error(
+    "error: --module compares a project, so the target must be a directory, not a single file",
+  );
+  process.exit(2);
+}
 const scratchDir = fs.mkdtempSync("/tmp/ts-rust-compare-");
 let tsRustProjectRoot;
 
@@ -161,8 +211,8 @@ function hasPython3() {
   return python3Ok;
 }
 
-function spawnTsRust(extraArgs, wrapper) {
-  const cmd = [tsRustBin, "--project", tsconfigPath, ...extraArgs];
+// Runs `cmd` (an argv array), optionally inside one of the measuring wrappers above.
+function spawnMeasured(cmd, wrapper, env) {
   let file = cmd[0];
   let fileArgs = cmd.slice(1);
   if (wrapper === "time") {
@@ -176,12 +226,15 @@ function spawnTsRust(extraArgs, wrapper) {
   const res = spawnSync(file, fileArgs, {
     encoding: "utf8",
     maxBuffer: 1 << 30,
+    env: { ...process.env, ...env },
   });
   res.outerMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
   return res;
 }
 
-function runTsRust(extraArgs, { measure }) {
+// `label` names the program in error messages. Both ts-rust and the tsc child exit 0, or 1
+// when they found errors; anything else with no output is a real failure.
+function runMeasured(cmd, { measure, label, env }) {
   let res;
   let maxRssKb = null;
   let wallMs = null;
@@ -190,7 +243,7 @@ function runTsRust(extraArgs, { measure }) {
   if (measure && fs.existsSync("/usr/bin/time")) wrappers.push("time");
   if (measure && hasPython3()) wrappers.push("python");
   for (const wrapper of wrappers) {
-    res = spawnTsRust(extraArgs, wrapper);
+    res = spawnMeasured(cmd, wrapper, env);
     const err = res.stderr || "";
     let m;
     if (wrapper === "time") {
@@ -209,12 +262,12 @@ function runTsRust(extraArgs, { measure }) {
     }
   }
   if (maxRssKb === null) {
-    res = spawnTsRust(extraArgs, null);
+    res = spawnMeasured(cmd, null, env);
     wallMs = res.outerMs;
   }
   if (res.error) {
     console.error(
-      `error: failed to run ts-rust binary at ${tsRustBin}: ${res.error.message}`,
+      `error: failed to run ${label} (${cmd[0]}): ${res.error.message}`,
     );
     process.exit(2);
   }
@@ -222,11 +275,20 @@ function runTsRust(extraArgs, { measure }) {
   // diagnostics are still on stdout. Anything else with no output is a real failure.
   if (!res.stdout && res.status !== 0 && res.status !== 1) {
     console.error(
-      `error: ts-rust exited with status ${res.status}: ${(res.stderr || "").trim().split("\n").slice(0, 3).join(" ")}`,
+      `error: ${label} exited with status ${res.status}: ${(res.stderr || "").trim().split("\n").slice(0, 3).join(" ")}`,
     );
     process.exit(2);
   }
   return { stdout: res.stdout || "", wallMs, maxRssKb, how };
+}
+
+function runTsRust(extraArgs, { measure }) {
+  return runMeasured([tsRustBin, "--project", tsconfigPath, ...extraArgs], {
+    measure,
+    label: "the ts-rust binary",
+    // rayon reads this; without it ts-rust uses every core.
+    env: threads ? { RAYON_NUM_THREADS: String(threads) } : undefined,
+  });
 }
 
 // Same run twice, because ts-rust prints one code per diagnostic: its own TSR#### by default,
@@ -234,7 +296,15 @@ function runTsRust(extraArgs, { measure }) {
 // shows both, so a TSR code is never lost behind its mapping. Both runs list the same
 // diagnostics in the same order (checked below).
 const rawRun = runTsRust([], { measure: false });
-const mappedRun = runTsRust(["--tsc-codes"], { measure: true });
+// The measured runs. The first one's output is what is compared (every run prints the same
+// diagnostics); time and peak memory are the median over all of them, written onto
+// `mappedRun` so everything below reads one pair of figures.
+const mappedRuns = [];
+for (let i = 0; i < runs; i++)
+  mappedRuns.push(runTsRust(["--tsc-codes"], { measure: true }));
+const mappedRun = mappedRuns[0];
+mappedRun.wallMs = median(mappedRuns.map((r) => r.wallMs));
+mappedRun.maxRssKb = median(mappedRuns.map((r) => r.maxRssKb));
 fs.rmSync(tsconfigPath, { force: true });
 fs.rmSync(scratchDir, { recursive: true, force: true });
 
@@ -310,10 +380,8 @@ for (const d of tsRustDiags) {
 }
 for (const [file, diags] of tsRustByFile) tsRustByFile.set(file, byLine(diags));
 
-const tsRustWallMs =
-  mappedRun.wallMs === null
-    ? rawRun.wallMs
-    : Math.min(rawRun.wallMs, mappedRun.wallMs);
+// The unmeasured run above exists only for the TSR codes; its time is not used.
+const tsRustWallMs = mappedRun.wallMs ?? rawRun.wallMs;
 status(
   `      ts-rust reported ${tsRustDiags.length} error(s) in ${fmtMs(tsRustWallMs)}` +
     (mappedRun.maxRssKb !== null
@@ -323,9 +391,13 @@ status(
 
 // === Stage 2: run tsc file-by-file, printing/merging as each one lands ======
 
-const totalFilesGuess = collectTsFiles(target).length;
+const totalFilesGuess = (
+  moduleMode ? collectProjectFiles(target) : collectTsFiles(target)
+).length;
 status(
-  `[2/2] Running tsc over ${totalFilesGuess} file(s) (this is the slow part) ...`,
+  moduleMode
+    ? `[2/2] Running tsc over ${totalFilesGuess} file(s) as one project ...`
+    : `[2/2] Running tsc over ${totalFilesGuess} file(s) (this is the slow part) ...`,
 );
 
 // The group a file is listed under: its first three path parts, i.e. the folder. Looking at
@@ -637,43 +709,109 @@ function renderFile(file, tsRustLines, tscLines) {
   ]);
 }
 
-const { files, stats, perf } = checkFiles(target, {
-  strictOnly,
-  cachePath: noCache ? undefined : defaultCachePath(),
-  onFile: (fsPath, fileResults, index, total) => {
-    const file = stat.isFile() ? target : path.relative(process.cwd(), fsPath);
-    const tscLines = byLine(
-      fileResults
-        .filter((d) => d.category === "Error")
-        .map((d) => ({
-          file,
-          line: d.line,
-          code: `TS${d.code}`,
-          message: d.message,
-        })),
-    );
-    const tsRustLines = tsRustByFile.get(file) || new Map();
-    renderFile(file, tsRustLines, tscLines);
-  },
-});
+// Merges one file's tsc diagnostics with ts-rust's and renders the result.
+function onTscFile(fsPath, fileResults) {
+  const file = stat.isFile() ? target : path.relative(process.cwd(), fsPath);
+  const tscLines = byLine(
+    fileResults
+      .filter((d) => d.category === "Error")
+      .map((d) => ({
+        file,
+        line: d.line,
+        code: `TS${d.code}`,
+        message: d.message,
+      })),
+  );
+  const tsRustLines = tsRustByFile.get(file) || new Map();
+  renderFile(file, tsRustLines, tscLines);
+}
+
+// --module: tsc checks the directory as one Program in a child process, so its wall time
+// and peak memory come from the same wrappers as ts-rust's. The time is the whole process
+// (Node and TypeScript start-up included), the way ts-rust's includes its own start-up;
+// `programMs` is the part spent building and checking the Program, shown next to it.
+function runTscProject() {
+  const cmd = [
+    process.execPath,
+    path.join(__dirname, "check-fixtures.js"),
+    target,
+    "--project",
+    ...(strictOnly ? ["--strict-only"] : []),
+  ];
+  // Repeated like ts-rust's runs, and reported as the median, so the two sides are summarized
+  // the same way. The first run's diagnostics are the ones compared.
+  const results = [];
+  for (let i = 0; i < runs; i++) {
+    const run = runMeasured(cmd, {
+      measure: true,
+      label: "tsc (project mode)",
+    });
+    try {
+      results.push({ run, out: JSON.parse(run.stdout) });
+    } catch (error) {
+      console.error(
+        `error: could not read the tsc project result: ${error.message}`,
+      );
+      process.exit(2);
+    }
+  }
+  const { out } = results[0];
+  const byFile = new Map(out.files.map((f) => [f, []]));
+  for (const d of out.results) byFile.get(d.file).push(d);
+  out.files.forEach((f) => onTscFile(f, byFile.get(f)));
+  return {
+    files: out.files,
+    // Fields the performance section reads; nothing came from a cache.
+    stats: {
+      cached: 0,
+      ran: out.files.length,
+      ranMs: median(results.map((r) => r.run.wallMs)),
+      cachedMs: 0,
+      cachedUntimed: 0,
+    },
+    perf: {
+      maxRssKb: median(results.map((r) => r.run.maxRssKb)),
+      measuredThisRun: true,
+    },
+    project: {
+      programMs: median(results.map((r) => r.out.programMs)),
+      outsideRoots: out.outsideRoots,
+    },
+  };
+}
+
+const { files, stats, perf, project } = moduleMode
+  ? runTscProject()
+  : {
+      ...checkFiles(target, {
+        strictOnly,
+        cachePath: noCache ? undefined : defaultCachePath(),
+        onFile: (fsPath, fileResults) => onTscFile(fsPath, fileResults),
+      }),
+      project: null,
+    };
 flushTier();
-if (!noCache)
+if (!noCache && !moduleMode)
   status(`      tsc: ${stats.cached} from cache, ${stats.ran} checked.`);
 
 // === Time and memory =========================================================
 
 const tscWallMs = stats.ranMs + stats.cachedMs;
 const performance = {
+  runs,
   tsRust: {
     files: files.length,
+    threads: threads ?? os.cpus().length,
     wallMs: Math.round(tsRustWallMs * 10) / 10,
     maxRssKb: mappedRun.maxRssKb,
     memoryMeasuredWith: mappedRun.how,
   },
   tsc: {
     typescript: ts.version,
+    mode: moduleMode ? "project" : "per-file",
     files: files.length,
     wallMs: Math.round(tscWallMs),
+    ...(project ? { programMs: Math.round(project.programMs) } : {}),
     checkedThisRun: stats.ran,
     fromCache: stats.cached,
     fromCacheWithoutStoredTime: stats.cachedUntimed,
@@ -722,11 +860,24 @@ function printPerformance() {
         " than tsc",
     );
   log(
-    `${c.dim}  ts-rust: one process over every file, time includes process start-up.${c.reset}`,
+    `${c.dim}  ts-rust: one process over every file, ${p.tsRust.threads} thread(s)${threads ? "" : " (all cores)"}, time includes process start-up.${c.reset}`,
   );
-  log(
-    `${c.dim}  tsc ${p.tsc.typescript}: one isolated Program per file, ${p.tsc.checkedThisRun} checked now, ${p.tsc.fromCache} from cache.${c.reset}`,
-  );
+  if (runs > 1)
+    log(
+      `${c.dim}  Times and peak memory are the median of ${runs} runs${moduleMode ? " for both" : " for ts-rust"}.${c.reset}`,
+    );
+  if (project) {
+    log(
+      `${c.dim}  tsc ${p.tsc.typescript}: one Program over the whole project, run as its own process (Node and TypeScript start-up included);${c.reset}`,
+    );
+    log(
+      `${c.dim}  building and checking the Program took ${fmtMs(project.programMs)} of that.${c.reset}`,
+    );
+  } else {
+    log(
+      `${c.dim}  tsc ${p.tsc.typescript}: one isolated Program per file, ${p.tsc.checkedThisRun} checked now, ${p.tsc.fromCache} from cache.${c.reset}`,
+    );
+  }
   if (p.tsc.fromCache > 0)
     log(
       `${c.dim}  Cached files count the time they cost when last checked` +
