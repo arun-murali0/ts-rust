@@ -225,7 +225,7 @@ pub(super) fn infer_computed_member_access_type(
 ) -> TypeId {
     let key_type = infer_expression_type(key_expr, scoping, ctx);
 
-    // A Record<K, V>-tagged object accepts any key and yields V -- see
+    // A Record<K, V>-tagged object accepts any key and yields V; see
     // TypeArena::record_value_type's own doc comment on why K itself is not
     // checked here.
     if let Some(value_type) = ctx.arena.record_value_type(object_type) {

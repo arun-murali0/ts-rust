@@ -62,6 +62,11 @@ struct CallSite<'s, 'ast> {
     explicit_type_args: &'s [TypeId],
 }
 
+// Only a plain name or an `a.b` member is a callee this checker can type. Any other callee
+// (the result of another call, a computed access) gets the not-yet-checked warning and the
+// error type, which is compatible with everything, so a call it cannot read adds no
+// second error. A callee written as a function declaration's name is marked, so the call
+// instantiates the declaration afresh even from inside its own body (see check_callable).
 pub(super) fn infer_call_expression_type(
     call: &oxc_ast::ast::CallExpression,
     scoping: &Scoping,
@@ -115,6 +120,9 @@ pub(super) fn infer_call_expression_type(
     )
 }
 
+// Only `new Name(...)` is handled. A name there is a class declaration, so it is marked as
+// a declaration like a function's name: `new Box(x)` inside `Box` infers `T` again
+// instead of reusing the one being checked.
 pub(super) fn infer_new_expression_type(
     new_expr: &oxc_ast::ast::NewExpression,
     scoping: &Scoping,
@@ -325,6 +333,9 @@ fn report_no_overload_matches(
         }
     }
 
+    // Overloads that all failed on the same argument blame that argument, so the error
+    // sits on it. Failing on different ones, no single argument is to blame, so it sits on
+    // the call.
     let same_argument = rejected.iter().all(|(_, index, _)| *index == rejected[0].1);
     let span = if same_argument {
         arguments[rejected[0].1].span()
@@ -588,7 +599,7 @@ fn check_callable(
     // a type parameter comes after other checked arguments.
     // An explicit call-site type argument list (identity<string>(x)) is
     // positional, with no declaration span of its own, so it is zipped against
-    // the function's own type parameters in the order they were declared --
+    // the function's own type parameters in the order they were declared;
     // see ordered_generic_param_ids for how that order is recovered. Extra
     // type arguments beyond the function's own parameter count are ignored,
     // and a partial list (some but not all of the function's type parameters

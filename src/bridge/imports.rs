@@ -1,4 +1,4 @@
-// Step 6b: binding the names an `import` declaration brings in.
+// Binding the names an `import` declaration brings in.
 //
 // Runs at the start of the declare pass, before the file's own declarations, so every
 // later phase sees an imported name as it sees a local one: a type name resolves in the

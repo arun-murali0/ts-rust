@@ -88,6 +88,8 @@ fn infer_arrow_function_type_inner(
         let ArrowFunctionBody::FunctionBody(body) = &arrow.body else {
             return ctx.arena.error();
         };
+        // A block body has no return inference yet. Without an annotation its returns are
+        // checked against any, so nothing false can be said about them.
         let return_type = declared_return.unwrap_or_else(|| ctx.arena.any());
         let return_scope = ctx.enter_return_scope(Some(return_type), false);
         for body_stmt in &body.statements {

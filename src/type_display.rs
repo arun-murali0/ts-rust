@@ -7,9 +7,9 @@ use crate::types::Type;
 // messages do the same: turn a TypeId back into the source-like text tsc
 // would print for it.
 //
-// A cyclic type would recurse here forever. Nothing today builds one --
-// namespace::resolve reports a self-reference as Circular instead of looping
-// -- but a printer has no way to know that stays true, so depth is capped.
+// A cyclic type would recurse here forever. Nothing today builds one:
+// namespace::resolve reports a self-reference as Circular instead of looping,
+// but a printer has no way to know that stays true, so depth is capped.
 const MAX_DEPTH: usize = 32;
 
 pub fn display_type(arena: &TypeArena, type_id: TypeId) -> String {
@@ -169,7 +169,7 @@ fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize
     }
 
     // A named interface, class, alias, generic instantiation or enum prints
-    // its name instead of unfolding its shape -- `Dog`, not
+    // its name instead of unfolding its shape: `Dog`, not
     // `{ name: string; breed: string }`. Checked before the structural match
     // below so it applies uniformly, whatever the underlying Type is.
     if let Some(name) = arena.display_name(type_id) {

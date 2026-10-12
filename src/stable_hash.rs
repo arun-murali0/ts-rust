@@ -67,6 +67,9 @@ pub enum NodeIn<'a> {
     TypeParam(TypeParamKey),
 }
 
+// Every variant starts with a tag byte of its own, so two shapes cannot write the same
+// stream. The tags are part of the encoding like DeclKind's: never renumber one, bump
+// ENC_VERSION instead.
 pub fn hash_node(node: &NodeIn<'_>) -> NodeHash {
     let mut w = StreamWriter::new();
     match node {

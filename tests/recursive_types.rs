@@ -17,7 +17,7 @@ fn errors(diagnostics: &[Diagnostic]) -> Vec<&Diagnostic> {
 }
 
 // Before this, a self-reference inside an interface's own body hit
-// Resolution::Circular, which made the whole interface unresolvable -- so
+// Resolution::Circular, which made the whole interface unresolvable, so
 // `node.next` here would have silently typed as `error`, and this genuine
 // mismatch would never have been reported at all.
 // tsc: "Type 'ListNode | null' is not assignable to type 'number'."
@@ -42,7 +42,7 @@ fn linked_list_property_mismatch_is_caught() {
 
 // A resolves B resolves A: A's placeholder is registered before A's own body
 // is resolved, so when B's body refers back to A, it finds that placeholder
-// instead of failing circularly -- and by the time A's body finishes, B (and
+// instead of failing circularly, and by the time A's body finishes, B (and
 // the placeholder it captured) is already complete.
 #[test]
 fn mutually_recursive_interfaces_resolve() {
@@ -71,15 +71,15 @@ fn recursive_type_literal_alias_resolves() {
     assert_eq!(errors[0].code, DiagnosticCode::ReturnTypeMismatch);
 }
 
-// The common recursive-generic shape -- referring to itself with its own,
-// same type parameter (`next: Box<T>`) -- resolves correctly. A self-reference
+// The common recursive-generic shape, referring to itself with its own,
+// same type parameter (`next: Box<T>`), resolves correctly. A self-reference
 // with a *different*, fixed type argument (e.g. a Box<T> that also carries a
 // hardcoded Box<string>) is a known remaining gap: the placeholder is still
 // empty at that point, so substitution can't yet tell it apart from the bare
 // generic shape. Not exercised here since it doesn't work yet.
 //
-// This fixture's own body has no variable declaration -- box.value (number)
-// is returned from a function declared to return string -- so the real
+// This fixture's own body has no variable declaration; box.value (number)
+// is returned from a function declared to return string, so the real
 // mismatch here is a return-type mismatch, not a declared (variable) type
 // mismatch. See chain()'s `return box.value;` in the fixture.
 #[test]

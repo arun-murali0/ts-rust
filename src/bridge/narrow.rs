@@ -842,6 +842,9 @@ fn resolve_all_literals(tests: &[&Expression], arena: &mut TypeArena) -> Option<
     Some(literals)
 }
 
+// One tag that is not a known `typeof` result gives up on the whole switch, for the reason
+// typeof_check gives: a tag no type here can match would rule out every member and leave
+// `never`.
 fn resolve_all_typeof_tags(tests: &[&Expression]) -> Option<Vec<String>> {
     let mut tags = Vec::with_capacity(tests.len());
     for test in tests {
@@ -857,7 +860,7 @@ fn resolve_all_typeof_tags(tests: &[&Expression]) -> Option<Vec<String>> {
 }
 
 // The literal-resolution half of literal_check, split out so the switch narrowing
-// above can reuse it without needing a second identifier to match against -- a
+// above can reuse it without needing a second identifier to match against; a
 // case's test is compared to a discriminant already known by symbol_id, not
 // discovered from an ident/other pair the way a binary expression's two operands
 // are.
@@ -943,7 +946,7 @@ fn nullish_check(
 // union members against, so it returns None and the caller falls through to
 // empty_pair the same way an unrecognized shape always has. Takes the arena
 // directly, unlike nullish_check and typeof_check, since allocating the literal's
-// TypeId (interned, so a repeated "circle" always resolves to the same id -- see
+// TypeId (interned, so a repeated "circle" always resolves to the same id; see
 // narrow_by_literal) needs a mutable arena, not just the shared Scoping the other
 // *_check helpers read from.
 fn literal_check(
@@ -992,6 +995,9 @@ enum Presence {
     Unknown,
 }
 
+// Absent is only said of an object that lists its properties. A non-object, and a Record
+// (its keys come from K, not from a property list), read as Unknown, so neither branch
+// drops them.
 fn property_presence(arena: &TypeArena, member: TypeId, property: &str) -> Presence {
     let Type::Object(object) = arena.get(member) else {
         return Presence::Unknown;
@@ -1247,6 +1253,10 @@ fn literal_widens_to(arena: &TypeArena, wide: TypeId, literal: TypeId) -> bool {
     )
 }
 
+// The members of a union that can still equal one of the literals. A member that is one of
+// them stays. `any`, the error type and a type parameter stay because nothing is known
+// against them, `unknown` becomes the literals themselves, and a primitive keeps the
+// literals it widens from (`string` with "a" leaves "a").
 fn keep_matching(arena: &TypeArena, member: TypeId, literals: &[TypeId], kept: &mut Vec<TypeId>) {
     if literals.contains(&member) {
         kept.push(member);
@@ -1265,6 +1275,9 @@ fn keep_matching(arena: &TypeArena, member: TypeId, literals: &[TypeId], kept: &
     }
 }
 
+// The false side of the same test: the members left once the literals are ruled out.
+// `boolean` is `true | false` under one id, so ruling out one literal has to leave the
+// other, which is what `x !== true` must give.
 fn keep_remaining(
     arena: &mut TypeArena,
     member: TypeId,
@@ -1369,7 +1382,7 @@ fn narrow_by_nullish(
     let is_target = |arena: &TypeArena, t: TypeId| {
         // `==`/`!=` against either `null` or `undefined` matches both: this is
         // JavaScript's specific loose-equality-with-null quirk, not general
-        // loose equality, and it is symmetric -- `x == undefined` matches a
+        // loose equality, and it is symmetric: `x == undefined` matches a
         // `null` value too, the same as `x == null` does. `===`/`!==` only ever
         // matches the exact literal on the right, so target_is_null still
         // decides which single type counts there.
@@ -1434,6 +1447,9 @@ fn is_definitely_truthy(arena: &TypeArena, id: TypeId) -> bool {
     }
 }
 
+// Keeps what can still be truthy (or falsy). Only a member that is certainly the other
+// kind is dropped, so a doubt keeps the member: a narrowing may lose precision and must
+// never invent it.
 fn narrow_truthy(arena: &mut TypeArena, id: TypeId, want_truthy: bool) -> TypeId {
     match union_members(arena, id) {
         Some(members) => {
@@ -1520,6 +1536,11 @@ pub fn narrow_to_falsy(arena: &mut TypeArena, id: TypeId) -> TypeId {
     narrow_truthy(arena, id, false)
 }
 
+// Takes `null` and `undefined` out of a type: the value that is left once the nullish case
+// is ruled out. It is the left side of `??`, the result of `!`, a bound name that has a
+// default, and the operand of a read or an operation after the nullish error was already
+// reported. A lone `null` or `undefined` leaves `never`, which the caller reads as nothing
+// left to use.
 pub fn narrow_to_non_nullish(arena: &mut TypeArena, id: TypeId) -> TypeId {
     let is_nullish =
         |arena: &TypeArena, t: TypeId| matches!(arena.get(t), Type::Null | Type::Undefined);

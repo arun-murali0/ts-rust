@@ -18,7 +18,7 @@ pub fn is_subtype(arena: &TypeArena, sub: TypeId, sup: TypeId) -> bool {
 // comparing the same (sub, sup) pair again before either call has returned.
 // `seen` tracks pairs currently on the call stack. Re-entering one is treated
 // as true (coinductively: two types that only differ by "going in circles"
-// are equivalent) rather than as a fresh comparison to keep making -- this is
+// are equivalent) rather than as a fresh comparison to keep making; this is
 // the standard rule for equirecursive subtyping and is what breaks the loop.
 fn is_subtype_inner(arena: &TypeArena, sub: TypeId, sup: TypeId, seen: &mut PairStack) -> bool {
     if is_trivial_subtype(arena, sub, sup) {
@@ -68,7 +68,7 @@ fn is_subtype_uncached(arena: &TypeArena, sub: TypeId, sup: TypeId, seen: &mut P
 
         // undefined satisfies void (an implicit or bare `return;` is fine for a
         // void-returning function) but not the reverse, and nothing else is
-        // interchangeable with void either -- see Type::Void's own doc comment
+        // interchangeable with void either; see Type::Void's own doc comment
         // on the leniency this deliberately doesn't implement.
         (Type::Undefined, Type::Void) => true,
 

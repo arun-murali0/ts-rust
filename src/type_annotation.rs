@@ -319,7 +319,7 @@ fn check_type_argument_constraint(
 }
 
 // TypeScript's own built-in generics that this checker gives at least a
-// partial, honest representation rather than leaving totally unresolvable --
+// partial, honest representation rather than leaving totally unresolvable,
 // which, before Void got the same treatment, could take an entire enclosing
 // interface or function down with it through a single `?`.
 //
@@ -328,14 +328,14 @@ fn check_type_argument_constraint(
 // their own argument the same way `T[]` does. tsc actually requires the
 // argument here (TS2314) rather than defaulting a bare `Array` to
 // `Array<any>`, so a missing argument is treated the same as an unresolvable
-// one -- this checker doesn't raise its own arity diagnostic for a built-in
+// one; this checker doesn't raise its own arity diagnostic for a built-in
 // (only for a user's own generic), but it won't silently invent `any` either.
 //
 // `Promise<T>` has no await/`.then()` modeling at all yet, so it resolves to
 // an opaque, empty, named object: honest about what isn't checked (member
 // access on it correctly reports "does not exist") without blocking
 // everything around it. Unlike Array, a bad argument doesn't fail the whole
-// type here -- nothing structurally depends on it being right, since nothing
+// type here; nothing structurally depends on it being right, since nothing
 // looks inside a Promise anyway, so it's treated the same lenient way an
 // unresolvable explicit argument is treated for a user-defined generic
 // elsewhere in this file.
@@ -343,8 +343,8 @@ fn check_type_argument_constraint(
 // `Record<K, V>` gets the same opaque-object treatment as Promise, plus one
 // more thing Promise doesn't need: its value type V is recorded on the
 // application (see TypeArena::record_value_type) so a later property access
-// can return V instead of "does not exist". This does not model K at all --
-// any key is accepted, not just ones K would allow -- so it under-checks
+// can return V instead of "does not exist". This does not model K at all:
+// any key is accepted, not just ones K would allow, so it under-checks
 // rather than risking a false positive on a key it can't classify. `Partial`
 // and other mapped types need real mapped-type support this checker doesn't
 // have yet, and are deliberately left alone; a plain `Partial<T>` still
@@ -408,6 +408,8 @@ fn resolve_builtin_generic(
     }
 }
 
+// None for a literal type this checker does not model (a bigint, a template literal), which
+// leaves the annotation unresolved, so the declaration is not declared with a guessed type.
 fn resolve_literal_type(
     literal: &oxc_ast::ast::TSLiteral,
     arena: &mut TypeArena,
@@ -422,6 +424,8 @@ fn resolve_literal_type(
     }
 }
 
+// None as soon as one parameter has no annotation or does not resolve, so the whole
+// signature is unresolvable and a caller never holds one that is partly invented.
 pub fn resolve_function_params(
     params: &FormalParameters,
     namespace: &mut TypeNamespace,
@@ -484,7 +488,7 @@ fn optional_flags(params: &FormalParameters) -> Vec<bool> {
     flags
 }
 
-// None for a destructured pattern, which has no single name -- treated as
+// None for a destructured pattern, which has no single name, treated as
 // unnamed rather than guessed.
 pub(crate) fn binding_name(pattern: &BindingPattern) -> Option<std::rc::Rc<str>> {
     match pattern {
@@ -494,6 +498,9 @@ pub(crate) fn binding_name(pattern: &BindingPattern) -> Option<std::rc::Rc<str>>
     }
 }
 
+// The lenient form, for a function whose body is going to be checked: a parameter with no
+// annotation, or one that does not resolve, is `any` (a rest parameter `any[]`), so the
+// body is still checked instead of the whole function being given up on.
 pub fn resolve_params_with_any_fallback(
     params: &FormalParameters,
     namespace: &mut TypeNamespace,

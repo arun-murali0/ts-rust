@@ -242,6 +242,10 @@ impl DeclProvider for ImportsOf<'_> {
     }
 }
 
+// An import is answered through the edge the graph already resolved for this file and
+// specifier, so a specifier means the same file here as when the graph was built and
+// nothing is resolved during a check. A star re-export never carries `default`, as in the
+// language.
 impl ImportSource for ImportsOf<'_> {
     fn export_all(&self, specifier: &str) -> Vec<(String, DeclKey)> {
         let Some(target) = self

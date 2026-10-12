@@ -157,7 +157,7 @@ pub(super) fn check_class_declaration(
                         resolve_type_annotation(rt, &mut ctx.namespace, &mut ctx.arena)
                     });
                 let return_scope = ctx.enter_return_scope(return_type, false);
-                // `this` inside a static method is not the instance -- tsc types
+                // `this` inside a static method is not the instance; tsc types
                 // it as the class's constructor type, which this checker does
                 // not model. Clearing current_class_instance to None for just
                 // this body (rather than leaving the outer_class_instance value
@@ -222,7 +222,7 @@ pub(super) fn check_class_declaration(
 // correctly counts, and an assignment inside only one arm of an if with no
 // else, or an if/else where only one branch assigns, correctly does not. A
 // loop, switch, or try is not analyzed per-branch and never contributes an
-// assignment -- narrower than tsc, but only in the direction of reporting a
+// assignment, narrower than tsc, but only in the direction of reporting a
 // real gap rather than a false positive on correct code. Assignments inside a
 // nested function or arrow also never count, matching tsc, since they may run
 // after the constructor has finished.
@@ -288,7 +288,7 @@ fn report_uninitialized_properties(
 }
 
 // Property names definitely assigned (`this.name = ...`) by every path through
-// a sequence of statements. Union across the sequence -- each statement here
+// a sequence of statements. Union across the sequence; each statement here
 // runs unconditionally after the ones before it, so whatever any one of them
 // definitely assigns is definitely assigned by the end of the sequence too.
 // Does not descend into a nested function or arrow (see names_assigned_by).
@@ -301,7 +301,7 @@ fn definitely_assigned_names(stmts: &[Statement]) -> HashSet<String> {
 }
 
 // What one statement, on its own, definitely assigns. A loop, switch, try, or
-// anything else not matched here contributes nothing -- not because it never
+// anything else not matched here contributes nothing, not because it never
 // assigns anything, but because this analysis does not attempt to reason about
 // it, the same conservative "leave it a gap rather than risk a false positive"
 // stance the whole function takes.

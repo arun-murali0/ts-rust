@@ -24,7 +24,7 @@ fn single_error(diagnostics: &[Diagnostic], code: DiagnosticCode) -> &Diagnostic
 }
 
 // Array<T> was previously just an unresolvable name, since "Array" isn't
-// declared anywhere a user's own namespace would find it -- so a parameter
+// declared anywhere a user's own namespace would find it, so a parameter
 // typed Array<number> made the whole containing function unresolvable, the
 // same class of problem void had. Now it resolves the same as `number[]`.
 #[test]
@@ -77,7 +77,7 @@ fn promise_return_type_no_longer_blocks_resolution() {
     single_error(&diagnostics, DiagnosticCode::ArgumentNotAssignable);
 }
 
-// Deliberate divergence from tsc -- see the fixture's own comment. This
+// Deliberate divergence from tsc; see the fixture's own comment. This
 // checker's Promise<T> has no members at all, so .then() is honestly
 // reported missing rather than silently accepted.
 #[test]
@@ -109,7 +109,7 @@ fn record_dot_access_returns_value_type() {
     assert!(errors(&diagnostics).is_empty(), "got: {diagnostics:?}");
 }
 
-// K is not modelled -- see TypeArena::record_value_type's own doc comment --
+// K is not modelled (see TypeArena::record_value_type's own doc comment),
 // so this only proves a computed access resolves and returns V, not that a
 // key outside K would be rejected (it wouldn't be, which is the documented,
 // deliberate under-check).

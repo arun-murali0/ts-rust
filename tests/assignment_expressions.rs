@@ -24,7 +24,7 @@ fn single_error(diagnostics: &[Diagnostic], code: DiagnosticCode) -> &Diagnostic
 }
 
 // Assignment expressions used to hit the generic "unimplemented expression
-// kind" warning unconditionally -- no assignability check ran at all. tsc:
+// kind" warning unconditionally; no assignability check ran at all. tsc:
 // "Type 'string' is not assignable to type 'number'."
 #[test]
 fn variable_reassignment_type_mismatch_is_caught() {
@@ -54,7 +54,7 @@ fn property_assignment_type_mismatch_is_caught() {
 }
 
 // `total -= "text"` is checked as the `-` operator would be, reusing
-// infer_binary_expression_type -- so the diagnostic here is
+// infer_binary_expression_type, so the diagnostic here is
 // BinaryOperandTypeMismatch, not DeclaredTypeMismatch. `-=` is used rather than
 // `+=` on purpose: this checker's `+` deliberately accepts number + string
 // (JavaScript's string concatenation, see binary.rs), so it would report
@@ -77,7 +77,7 @@ fn compound_assignment_clean() {
 }
 
 // `x = 2` as an expression has the type of its right-hand side (number), so
-// assigning that into a `string`-typed variable is the real error here -- not
+// assigning that into a `string`-typed variable is the real error here, not
 // the inner `x = 2`, which is itself perfectly valid. Written without parens
 // because parenthesized expressions aren't unwrapped by the dispatcher yet,
 // which is a separate gap from assignment checking.

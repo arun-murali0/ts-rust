@@ -43,6 +43,10 @@ pub struct PParam {
     pub ty: u32,
 }
 
+// A node names its children by index into the same vector, always a lower index, so an
+// importer rebuilds the type in one bottom-up pass with no recursion (see the header). A
+// declaration appears by key (`DeclRef`, `App`), never by body; an `App` also carries its
+// instantiated body, which is the amendment to LLD 3.4 the header records.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PNode {
     Prim(Prim),
@@ -343,7 +347,9 @@ pub(crate) fn export_decl<R: KeyResolver>(
 
 // -- import ---------------------------------------------------------------------------
 
-/// One type parameter of an imported generic declaration, in this arena's terms.
+/// One type parameter of an imported generic declaration, in this arena's terms. An imported
+/// generic has no AST to read its parameter list from, so arity, defaults, bound checks and
+/// the `Pair<A, B>` display all read this one record instead of re-deriving it.
 #[derive(Clone, Debug)]
 pub(crate) struct ImportedParam {
     pub id: TypeParameterId,
@@ -518,6 +524,9 @@ impl Importer {
         Some(params)
     }
 
+    // Only an interface or a class gets a Ref slot here. The declaration is queued on
+    // `pending` and its body is read later, so a declaration that names itself finds the
+    // Ref already made and the cycle ends where it closes.
     fn ref_for(
         &mut self,
         arena: &mut TypeArena,

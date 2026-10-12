@@ -223,7 +223,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
     // Takes &mut self (not &self) because SemanticQueries carries a mutable
     // handle to relation_cache alongside the arena. Field-level destructuring
     // here borrows the two fields disjointly, but that disjointness is only
-    // visible inside this function body -- past this call boundary the returned
+    // visible inside this function body; past this call boundary the returned
     // SemanticQueries opaquely holds part of `self`, so callers cannot access
     // ctx.arena or ctx.relation_cache directly while a SemanticQueries from this
     // call is still alive. In practice this means any TypeId needed as an

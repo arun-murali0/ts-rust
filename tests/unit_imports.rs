@@ -6,9 +6,9 @@ use ts_rust::{
     UnitOutput, Worker,
 };
 
-// Step 6b: an import declaration binds the name to the dependency's real export. The
-// project is built by hand here, from the outputs of real unit runs, which is what the
-// driver does in 6c.
+// An import declaration binds the name to the dependency's real export. The project is
+// built by hand here, from the outputs of real unit runs, which is what check_project
+// does for a whole project (tests/project_imports.rs).
 
 #[derive(Default)]
 struct Project {

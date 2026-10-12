@@ -30,6 +30,15 @@ set -o pipefail
 #   ./scripts/compare-local.sh path/to/one_file.ts
 #   ./scripts/compare-local.sh tests/fixtures --strict-only   # old flag set
 #   ./scripts/compare-local.sh tests/fixtures --json          # machine-readable
+#   ./scripts/compare-local.sh path/to/project --module       # cross-file: tsc checks the
+#                                                             # directory as ONE project
+#
+# --module is for projects whose files import each other. ts-rust checks them through its
+# module graph, so tsc has to as well to give a fair time and peak memory: it checks every
+# file of the directory in one Program, in its own process, instead of one isolated Program
+# per file (which is right for tests/fixtures, where files reuse names, and stays the
+# default). The target must be a directory. Every file is its own module for tsc, so it also
+# works on tests/fixtures, where it gives the same diagnostics as the per-file mode.
 #
 # Environment:
 #   TS_RUST_BIN    ts-rust command override (default: target/release/ts-rust,

@@ -4,7 +4,7 @@ use crate::diagnostic_codes::DiagnosticCode;
 /// constructor per kind of diagnostic (see the `messages` module below).
 ///
 /// This exists so a call site can never pass a `DiagnosticCode` and a
-/// message string that don't actually correspond to each other -- there is
+/// message string that don't actually correspond to each other; there is
 /// no way to construct one of these except through a function that already
 /// knows which code goes with which text. `ctx.error()`/`ctx.warning()`
 /// take one of these instead of a `(code, message)` pair.
@@ -24,7 +24,7 @@ impl DiagnosticMessage {
 
 /// One function per diagnostic kind. A `DiagnosticCode` that has more than
 /// one distinct phrasing (e.g. "not callable" vs "not a constructor") gets
-/// more than one function here, still sharing the one code -- what this
+/// more than one function here, still sharing the one code; what this
 /// module guarantees is that code and text are chosen together, in one
 /// place, not that every code maps to exactly one string.
 pub mod messages {

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rust::{Diagnostic, FileOutcome, ModuleGraph, ModuleResolver, Severity, check_project};
 
-// Step 7a: an import that cannot be bound says so. A relative specifier no file answers
+// An import that cannot be bound says so. A relative specifier no file answers
 // is TS2307, a name a complete module does not export is TS2305, and a default import of
 // a module with no default is TS1192. Against a module whose export list left something
 // out (a class, `export *`) a missing name may be one we dropped, so nothing is said.

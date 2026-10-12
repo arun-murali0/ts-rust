@@ -21,8 +21,8 @@ fn check(fixture_source: &str, file_name: &str) -> Vec<Diagnostic> {
 // total diagnostic count: a `throw` fixture also hits this checker's separate,
 // pre-existing gap around throw statements (see statements/mod.rs), and that
 // warning is not this test's concern. What every fixture in the "flagged" group
-// must produce is exactly one UnreachableCode -- one, not one per statement in
-// the dead region -- regardless of what else the fixture happens to trip.
+// must produce is exactly one UnreachableCode (one, not one per statement in
+// the dead region), regardless of what else the fixture happens to trip.
 fn assert_reported_once(diagnostics: &[Diagnostic]) {
     let unreachable: Vec<_> = diagnostics
         .iter()
@@ -72,8 +72,8 @@ fn trailing_code_is_unreachable_only_once_both_if_branches_exit() {
 
 // The core reason this pass asks the graph rather than the AST: three dead
 // statements in a row still produce one diagnostic, at the first of them, not
-// three -- the other two are never even visited, once the first one stops the
-// walk (see walk_statements in src/bridge/unreachable_code.rs).
+// three; the other two are never even visited, once the first one stops the
+// walk (see visit_statements in src/bridge/unreachable_code.rs).
 #[test]
 fn a_dead_region_is_reported_once_not_per_statement() {
     let source = include_str!(

@@ -13,7 +13,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
 pub enum DiagnosticCode {
-    // 1000s -- assignability / type mismatch
+    // 1000s: assignability / type mismatch
     BinaryOperandTypeMismatch,
     ArgumentNotAssignable,
     ReturnTypeMismatch,
@@ -35,7 +35,7 @@ pub enum DiagnosticCode {
     ObjectPossiblyUndefined,
     ObjectPossiblyNullOrUndefined,
 
-    // 1100s -- calls
+    // 1100s: calls
     NotCallable,
     NotConstructor,
     ArgumentArityMismatch,
@@ -43,35 +43,35 @@ pub enum DiagnosticCode {
     SpreadArgumentNotTupleOrRest,
     NoOverloadMatches,
 
-    // 1200s -- name / member resolution
+    // 1200s: name / member resolution
     UnresolvedIdentifier,
     PropertyDoesNotExist,
     ModuleNotFound,
     NoExportedMember,
     NoDefaultExport,
 
-    // 1300s -- destructuring
+    // 1300s: destructuring
     ArrayDestructuringRequiresArray,
 
-    // 1500s -- generics
+    // 1500s: generics
     TypeArgumentCountMismatch,
     TypeArgumentCountRange,
     TypeIsNotGeneric,
     DuplicateTypeDeclaration,
     EnumDeclarationMerge,
 
-    // 1400s -- implicit any
+    // 1400s: implicit any
     ImplicitAnyParameter,
     ImplicitAnyElement,
     ImplicitAnyThis,
 
-    // 1600s -- reachability
+    // 1600s: reachability
     UnreachableCode,
 
-    // 1700s -- type construction
+    // 1700s: type construction
     ExpressionTooComplex,
 
-    // 9000s -- not yet implemented (all currently emitted as warnings)
+    // 9000s: not yet implemented (all currently emitted as warnings)
     UnimplementedCallExpressionKind,
     UnimplementedNewExpressionTarget,
     UntypedParameterSkipsArityCheck,
@@ -87,7 +87,7 @@ pub enum DiagnosticCode {
     UnresolvableDestructuringTypeAnnotation,
     UnresolvableTypeParameterConstraint,
 
-    // 9100s -- the checker itself failed (no tsc counterpart)
+    // 9100s: the checker itself failed (no tsc counterpart)
     InternalCheckerError,
 }
 

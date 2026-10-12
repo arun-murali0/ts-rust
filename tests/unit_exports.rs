@@ -1,6 +1,6 @@
 use ts_rust::{DeclKey, DeclKind, FileId, ModuleKey, UnitContext, UnitOutput, Worker};
 
-// Step 6a: a unit run with a module key hands back the file's annotated exports as
+// A unit run with a module key hands back the file's annotated exports as
 // portable declarations, plus a name -> DeclKey table for the importer to look names up in.
 
 fn module() -> ModuleKey {
@@ -121,7 +121,7 @@ fn an_unexported_declaration_nothing_reaches_stays_in_the_file() {
     assert_eq!(names(&out), vec!["Shown"], "{out:?}");
 }
 
-// Step 7c: the exports are read after the bodies are checked, so what was inferred is
+// The exports are read after the bodies are checked, so what was inferred is
 // what is exported.
 fn body_of<'a>(out: &'a UnitOutput, name: &str) -> &'a ts_rust::PortableType {
     &out.exports

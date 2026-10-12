@@ -118,7 +118,7 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
             // Deliberately no save/restore of ctx.narrow here, despite variable
             // declarations genuinely being block-scoped: TypeScript's narrowing
             // is not. It follows control flow, not lexical scope, and a bare
-            // `{ ... }` has no effect on control flow at all -- it's not a
+            // `{ ... }` has no effect on control flow at all; it's not a
             // branch, a loop, or an exit. A guard clause's narrowing does
             // survive past a bare block's closing brace in real TypeScript
             // (verified against tsc; see

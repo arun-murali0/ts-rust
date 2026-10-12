@@ -76,7 +76,7 @@ fn generic_instantiation_prints_with_its_argument() {
     );
 }
 
-// tsc: "Type 'Box<Dog>' is not assignable to type 'string'." -- the argument
+// tsc: "Type 'Box<Dog>' is not assignable to type 'string'." The argument
 // itself (Dog) has to already be named by the time Box's own name is built.
 #[test]
 fn generic_instantiation_argument_is_itself_named() {
@@ -87,7 +87,7 @@ fn generic_instantiation_argument_is_itself_named() {
     assert!(error.message.contains("'Box<Dog>'"), "got: {error:?}");
 }
 
-// tsc: "Type 'Box<number>' is not assignable to type 'Box<string>'." -- two
+// tsc: "Type 'Box<number>' is not assignable to type 'Box<string>'." Two
 // instantiations of the same generic must not collide on one shared name.
 #[test]
 fn two_instantiations_do_not_share_a_name() {

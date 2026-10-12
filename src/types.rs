@@ -46,7 +46,7 @@ pub enum Type {
     // A function with no meaningful return value (`function f(): void {}`).
     // Distinct from Undefined: undefined is assignable to void (an implicit or
     // bare `return;` satisfies a void return type), but void is not assignable
-    // back to undefined or anything else concrete -- see subtyping's own note on
+    // back to undefined or anything else concrete; see subtyping's own note on
     // this. Real TypeScript also lets a *function type* whose return is void
     // accept an implementation that returns something else, e.g. assigning
     // `() => number` where `() => void` is expected; that call-site leniency
@@ -271,7 +271,7 @@ impl TypeParameterId {
     // list (0 for the first `<T, ...>`, 1 for the second, and so on). Exposed so
     // an explicit call-site type argument list, which has no declaration_span of
     // its own to key off of, can still be zipped positionally against the
-    // parameters found in a function's structural type -- see
+    // parameters found in a function's structural type; see
     // generics::ordered_generic_param_ids.
     pub fn parameter_index(&self) -> u32 {
         self.parameter_index
@@ -293,7 +293,7 @@ pub struct Param {
 
     pub rest: bool,
 
-    // Kept for diagnostics only -- naming a missing argument -- so structural
+    // Kept for diagnostics only, naming a missing argument, so structural
     // equality ignores it; `(x: number) => void` and `(y: number) => void`
     // stay the same type.
     pub name: Option<Rc<str>>,

@@ -1,7 +1,7 @@
 // Stress and repeatability coverage for the (source, target) subtype cache
 // added to CheckContext::relation_cache / SemanticQueries. These tests don't
 // touch the cache's internals directly (it is private, reached only through
-// ctx.semantic()) -- they go through the public TypeChecker API and try to
+// ctx.semantic()); they go through the public TypeChecker API and try to
 // break the cache the way an internal implementation bug would actually
 // surface: a wrong diagnostic, a diagnostic that only appears sometimes, or a
 // count that drifts across repeated runs of the exact same source.
@@ -53,7 +53,7 @@ fn assert_identical_across_runs(source: &str, file_name: &str, runs: usize) -> V
 
 // Many arguments bound to the same type parameter within one call. Each
 // argument after the first re-checks its candidate against the *same*
-// existing TypeId (see semantic::generics::infer_type_param_bindings) --
+// existing TypeId (see semantic::generics::infer_type_param_bindings);
 // this is the clearest same-TypeId repeat the cache is meant to catch, so if
 // the cache ever returns a stale answer, this is where it would show up
 // first: as a widened-too-far or not-widened-enough inferred T.
@@ -172,7 +172,7 @@ fn wide_union_assignments_in_both_directions_stay_correct() {
 
 // The same wide-union source checked many times back to back through
 // independent TypeChecker instances, specifically looking for any
-// nondeterminism in diagnostic ordering or count -- a HashMap-backed cache
+// nondeterminism in diagnostic ordering or count: a HashMap-backed cache
 // (FxHashMap) has no guaranteed iteration order, so if any code path ever
 // iterated the cache itself (rather than only doing point lookups/inserts,
 // which is all is_subtype does), this is the kind of test that would catch
@@ -205,7 +205,7 @@ fn many_repeated_runs_of_a_union_heavy_source_never_flake() {
 // Interleaves a generic-binding-heavy section, a union-heavy section, and an
 // object/class-inheritance-heavy section in one file, so the cache
 // accumulates entries from all three shapes of check at once before any of
-// them finishes -- the scenario most likely to expose a cache key collision
+// them finishes: the scenario most likely to expose a cache key collision
 // if (TypeId, TypeId) pairs from unrelated parts of the check were ever
 // mixed up.
 #[test]
