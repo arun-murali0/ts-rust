@@ -46,6 +46,9 @@ pub enum DiagnosticCode {
     // 1200s -- name / member resolution
     UnresolvedIdentifier,
     PropertyDoesNotExist,
+    ModuleNotFound,
+    NoExportedMember,
+    NoDefaultExport,
 
     // 1300s -- destructuring
     ArrayDestructuringRequiresArray,
@@ -122,6 +125,9 @@ impl DiagnosticCode {
 
             UnresolvedIdentifier => "TSR1201",
             PropertyDoesNotExist => "TSR1202",
+            ModuleNotFound => "TSR1203",
+            NoExportedMember => "TSR1204",
+            NoDefaultExport => "TSR1205",
 
             ArrayDestructuringRequiresArray => "TSR1301",
 
@@ -197,6 +203,9 @@ impl DiagnosticCode {
 
             UnresolvedIdentifier => 2304,
             PropertyDoesNotExist => 2339,
+            ModuleNotFound => 2307,
+            NoExportedMember => 2305,
+            NoDefaultExport => 1192,
 
             ArrayDestructuringRequiresArray => 2488,
 

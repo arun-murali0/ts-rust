@@ -53,6 +53,7 @@ pub fn infer_expression_type(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
+    let expected = ctx.contextual.take();
     match expr {
         Expression::NumericLiteral(n) => ctx.arena.alloc(Type::NumberLiteral(n.value)),
         Expression::StringLiteral(s) => ctx.arena.alloc(Type::StringLiteral(s.value.to_string())),
@@ -139,9 +140,13 @@ pub fn infer_expression_type(
             infer_chain_element_type(&chain.expression, scoping, ctx)
         }
 
-        Expression::ObjectExpression(object) => infer_object_expression_type(object, scoping, ctx),
+        Expression::ObjectExpression(object) => {
+            infer_object_expression_type(object, expected, scoping, ctx)
+        }
 
-        Expression::ArrayExpression(array) => infer_array_expression_type(array, scoping, ctx),
+        Expression::ArrayExpression(array) => {
+            infer_array_expression_type(array, expected, scoping, ctx)
+        }
 
         Expression::ArrowFunctionExpression(arrow) => {
             infer_arrow_function_type(arrow, scoping, ctx)

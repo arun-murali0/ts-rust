@@ -20,9 +20,16 @@ pub(super) fn infer_assignment_expression_type(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
+    // The target is the contextual type of the right-hand side. It is read first, which
+    // reports nothing the right side's own inference would not (the target is only looked
+    // up here), and an unresolvable target simply gives no context.
+    let target_type = resolve_assignment_target_type(&assign.left, scoping, ctx);
+    if matches!(assign.operator, AssignmentOperator::Assign) {
+        ctx.contextual = target_type;
+    }
     let right_type = infer_expression_type(&assign.right, scoping, ctx);
 
-    let Some(target_type) = resolve_assignment_target_type(&assign.left, scoping, ctx) else {
+    let Some(target_type) = target_type else {
         // A destructuring target (`[a, b] = arr`, `({x} = obj)`), or one
         // wrapped in `as`/`!`/a type assertion -- not modeled. Skips the
         // assignability check rather than guessing; the right-hand side's own

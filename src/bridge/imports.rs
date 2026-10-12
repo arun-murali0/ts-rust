@@ -2,18 +2,28 @@
 //
 // Runs at the start of the declare pass, before the file's own declarations, so every
 // later phase sees an imported name as it sees a local one: a type name resolves in the
-// namespace, a value name has a type under its symbol. Nothing here reports a
-// diagnostic. A specifier the project does not know, or a name the module does not
-// export, binds nothing and the name stays unknown, which loses an error and never
-// invents one (the same rule exports follow when they leave something out).
+// namespace, a value name has a type under its symbol. A specifier the project does not
+// know, or a name the module does not export, binds nothing and the name stays unknown.
+//
+// Problem: that silence also hid a typo. `import { Usr } from "./a"` bound nothing and
+// reported nothing, so a broken import looked clean.
+// Picked: report only what is certain. A relative specifier no file answers is TS2307.
+// A name missing from a module whose export list is complete is TS2305 (TS1192 for a
+// default). Against a list that left something out (a class, `export *`, an inferred
+// value) the name may be one we dropped, so nothing is reported.
+// Cost: a bare specifier ("react") is never reported as missing until packages are read,
+// and a name missing from a partial module is still silent.
 
+use oxc_span::{GetSpan, Span};
+
+use crate::diagnostic_messages::messages;
 use oxc_ast::ast::{
     ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind, ModuleExportName, Program,
     Statement,
 };
 
 use crate::keys::{DeclKey, DeclKind};
-use crate::portable::{DeclProvider, ImportSource};
+use crate::portable::{DeclProvider, ImportSource, ModuleExports};
 
 use super::context::CheckContext;
 
@@ -22,10 +32,67 @@ pub(super) fn bind_imports<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCo
         return;
     };
     for stmt in &program.body {
-        if let Statement::ImportDeclaration(decl) = stmt {
-            bind_declaration(decl, source, ctx);
+        match stmt {
+            Statement::ImportDeclaration(decl) => {
+                report_missing_module(source, decl.source.value.as_str(), decl.source.span, ctx);
+                bind_declaration(decl, source, ctx);
+            }
+            Statement::ExportFromDeclaration(from) => {
+                let specifier = from.source.value.as_str();
+                report_missing_module(source, specifier, from.source.span, ctx);
+                for spec in &from.specifiers {
+                    let name = module_export_name(&spec.local);
+                    report_missing_name(source, specifier, &name, spec.local.span(), ctx);
+                }
+            }
+            Statement::ExportAllDeclaration(all) => {
+                report_missing_module(source, all.source.value.as_str(), all.source.span, ctx);
+            }
+            _ => {}
         }
     }
+}
+
+fn module_export_name(name: &ModuleExportName<'_>) -> String {
+    match name {
+        ModuleExportName::IdentifierName(n) => n.name.to_string(),
+        ModuleExportName::IdentifierReference(n) => n.name.to_string(),
+        ModuleExportName::StringLiteral(s) => s.value.to_string(),
+    }
+}
+
+// TS2307, for a relative specifier that no file of the project answers.
+fn report_missing_module<'ast>(
+    source: &dyn ImportSource,
+    specifier: &str,
+    span: Span,
+    ctx: &mut CheckContext<'ast, '_>,
+) {
+    if specifier.starts_with('.') && source.module_exports(specifier) == ModuleExports::Unresolved {
+        ctx.error(messages::module_not_found(specifier), span);
+    }
+}
+
+// TS2305 (TS1192 for `default`), for a name a complete module does not export.
+fn report_missing_name<'ast>(
+    source: &dyn ImportSource,
+    specifier: &str,
+    name: &str,
+    span: Span,
+    ctx: &mut CheckContext<'ast, '_>,
+) {
+    let ModuleExports::Known { complete: true } = source.module_exports(specifier) else {
+        return;
+    };
+    if !source.export_keys(specifier, name).is_empty() {
+        return;
+    }
+    let message = if name == "default" {
+        messages::no_default_export(specifier)
+    } else {
+        messages::no_exported_member(specifier, name)
+    };
+    ctx.error(message, span);
 }
 
 fn bind_declaration<'ast>(
@@ -45,9 +112,11 @@ fn bind_declaration<'ast>(
                 };
                 let type_only =
                     whole_declaration_is_type || spec.import_kind == ImportOrExportKind::Type;
+                report_missing_name(source, specifier, imported, spec.imported.span(), ctx);
                 bind_name(ctx, source, specifier, imported, &spec.local, type_only);
             }
             ImportDeclarationSpecifier::ImportDefaultSpecifier(spec) => {
+                report_missing_name(source, specifier, "default", spec.local.span, ctx);
                 bind_name(
                     ctx,
                     source,

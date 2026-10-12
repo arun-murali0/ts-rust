@@ -368,6 +368,33 @@ pub trait ImportSource: DeclProvider {
     /// value. Empty when the specifier names no module of the project or the module has
     /// no such export, which leaves the imported name unknown rather than wrong.
     fn export_keys(&self, specifier: &str, name: &str) -> Vec<DeclKey>;
+
+    /// What is known about the module a specifier names, so an import can tell a typo
+    /// from an export this checker cannot read yet. The default knows nothing, which
+    /// reports nothing.
+    fn module_exports(&self, _specifier: &str) -> ModuleExports {
+        ModuleExports::Unknown
+    }
+
+    /// Every name the module behind `specifier` exports, with the declaration under each,
+    /// for `export * from`. `default` is not among them, since a star re-export never
+    /// carries it. Empty when the module is unknown; `module_exports` says whether what
+    /// is returned is the whole list.
+    fn export_all(&self, _specifier: &str) -> Vec<(String, DeclKey)> {
+        Vec::new()
+    }
+}
+
+/// What an importing unit knows about the module behind a specifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModuleExports {
+    /// The project's resolution found no file for the specifier.
+    Unresolved,
+    /// A file exists, but its exports were not read (not checked, failed, or no key).
+    Unknown,
+    /// A file was checked. `complete` says whether the export list is the whole list;
+    /// a name missing from an incomplete list may be one that was left out.
+    Known { complete: bool },
 }
 
 /// Rebuilds portable declarations in one arena. One per unit run: it remembers which slot

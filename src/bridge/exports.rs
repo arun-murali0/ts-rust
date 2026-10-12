@@ -10,13 +10,17 @@
 // way of exporting a declaration: `export interface A`, `export default function f`, and
 // `export { a, b as c }` naming a declaration written elsewhere in the file.
 //
-// What is exported: an interface, type alias, function with a return annotation, and
-// `const`/`let`/`var` with a type annotation. A name that was imported and is exported
+// What is exported: an interface, type alias, function, and `const`/`let`/`var`. The
+// exports are read after the bodies are checked, so a function without a return
+// annotation and a variable without a type annotation are exported with the type that
+// was inferred for them. A name that was imported and is exported
 // again (`export { X }`, `export { X } from "./a"`) is not a new declaration: the table
 // maps it to the key it already has, and the dependent finds the declaration through the
-// same provider. Anything else that is exported (a class, an enum, a default expression,
-// `export *`, an unannotated value, an overload after the first, a declaration whose body
-// names something that is not itself exported) is left out and marks the table
+// same provider. An interface or alias that is not exported but that an export names
+// (`interface Hidden` and `export function f(h: Hidden)`) is exported under its own key
+// and no name: the dependent can follow the reference, and cannot import it. Anything
+// else that is exported (a class, an enum, a default expression, `export *`, an
+// overload after the first) is left out and marks the table
 // incomplete. Leaving an export out makes a dependent see nothing; it never makes it see
 // something wrong.
 
@@ -31,7 +35,9 @@ use crate::arena::{BUILTIN_GENERICS, DeclSlot, TypeId};
 use crate::fxhash::FxHashMap;
 use crate::keys::{DeclKey, DeclKind, ModuleKey, TypeParamKey};
 use crate::namespace::Resolution;
-use crate::portable::{DeclInput, Importer, PortableDecl, TypeParamInput, export_decl};
+use crate::portable::{
+    DeclInput, Importer, ModuleExports, PNode, PortableDecl, TypeParamInput, export_decl,
+};
 use crate::stable_walk::KeyResolver;
 use crate::types::{Type, TypeParameterId};
 
@@ -48,6 +54,9 @@ pub(crate) struct ExportTable {
     /// declaration is in another unit's `decls`.
     pub names: Vec<(String, DeclKey)>,
     pub incomplete: bool,
+    /// True when the collector ran at all (the unit had a module key). A table that
+    /// was never collected is not a complete list of nothing.
+    pub collected: bool,
 }
 
 // A top-level declaration the exports may be built from, and the names it is exported
@@ -66,10 +75,7 @@ enum Node<'ast> {
     Interface,
     Alias,
     Function(&'ast Function<'ast>),
-    Var {
-        symbol: Option<SymbolId>,
-        annotated: bool,
-    },
+    Var { symbol: Option<SymbolId> },
 }
 
 // One export waiting for the resolver to be complete: every exported declaration has to
@@ -222,7 +228,6 @@ fn push_declaration<'ast>(
                 let names = named(&id.name);
                 let node = Node::Var {
                     symbol: id.symbol_id.get(),
-                    annotated: declarator.type_annotation.is_some(),
                 };
                 push_item(items, seen, &id.name, DeclKind::Var, node, names);
             }
@@ -242,12 +247,17 @@ pub(crate) fn collect_exports<'ast>(
     ctx: &mut CheckContext<'ast, '_>,
     module: ModuleKey,
 ) -> ExportTable {
-    let mut table = ExportTable::default();
+    let mut table = ExportTable {
+        collected: true,
+        ..ExportTable::default()
+    };
     let mut items: Vec<Item<'ast>> = Vec::new();
     let mut seen: FxHashMap<(String, u8), u32> = FxHashMap::default();
     let mut specifiers: Vec<Specifier> = Vec::new();
     // `export { a } from "./a"`: the source as written, and its specifiers.
     let mut from_modules: Vec<(String, Vec<Specifier>)> = Vec::new();
+    // `export * from "./a"`: the source as written.
+    let mut stars: Vec<String> = Vec::new();
 
     for stmt in &program.body {
         match stmt {
@@ -305,8 +315,16 @@ pub(crate) fn collect_exports<'ast>(
                     .collect();
                 from_modules.push((from.source.value.to_string(), list));
             }
-            // `export * from` re-exports names this pass cannot list.
-            Statement::ExportAllDeclaration(_) => table.incomplete = true,
+            // `export * from "./a"` re-exports what ./a exports, read once the file's own
+            // exports are known. `export * as ns from` needs a namespace object type
+            // the portable form does not have.
+            Statement::ExportAllDeclaration(all) => {
+                if all.exported.is_some() {
+                    table.incomplete = true;
+                } else {
+                    stars.push(all.source.value.to_string());
+                }
+            }
             Statement::TSInterfaceDeclaration(d) => push_item(
                 &mut items,
                 &mut seen,
@@ -340,7 +358,6 @@ pub(crate) fn collect_exports<'ast>(
                     if let BindingPattern::BindingIdentifier(id) = &declarator.id {
                         let node = Node::Var {
                             symbol: id.symbol_id.get(),
-                            annotated: declarator.type_annotation.is_some(),
                         };
                         push_item(
                             &mut items,
@@ -396,15 +413,25 @@ pub(crate) fn collect_exports<'ast>(
 
     let mut keys = UnitKeys::default();
     let mut pending: Vec<Pending> = Vec::new();
-    for item in items.iter().filter(|item| !item.exported_as.is_empty()) {
+    // Every interface and alias of the file is registered, exported or not: an exported
+    // declaration may name one that is not (`interface Hidden` and `export function
+    // f(h: Hidden)`), and it can only be written out with a key if the resolver knows it.
+    // A declaration that cannot be built is skipped when it is not exported, and marks
+    // the table incomplete when it is.
+    for item in &items {
+        let exported = !item.exported_as.is_empty();
+        if !exported && !matches!(item.kind, DeclKind::Interface | DeclKind::Alias) {
+            continue;
+        }
         let built = match &item.node {
             Node::Interface | Node::Alias => interface_or_alias(ctx, module, item),
             Node::Function(f) => function(ctx, module, f, item),
-            Node::Var { symbol, annotated } => variable(ctx, module, *symbol, *annotated, item),
+            Node::Var { symbol } => variable(ctx, module, *symbol, item),
         };
         match built.and_then(|p| register(&mut keys, ctx, p)) {
             Some(p) => pending.push(p),
-            None => table.incomplete = true,
+            None if exported => table.incomplete = true,
+            None => {}
         }
     }
 
@@ -421,6 +448,9 @@ pub(crate) fn collect_exports<'ast>(
         unit: &keys,
         imported: &ctx.importer,
     };
+    // Every candidate is written out; which of them leave the unit is decided below.
+    let mut written: FxHashMap<DeclKey, (PortableDecl, Vec<String>)> = FxHashMap::default();
+    let mut order: Vec<DeclKey> = Vec::new();
     for p in pending {
         let input = DeclInput {
             key: p.key,
@@ -431,12 +461,66 @@ pub(crate) fn collect_exports<'ast>(
         };
         match export_decl(&ctx.arena, &resolver, &input) {
             Some(decl) => {
-                for name in p.exported_as {
-                    table.names.push((name, p.key));
-                }
-                table.decls.push(decl);
+                order.push(p.key);
+                written.insert(p.key, (decl, p.exported_as));
             }
-            None => table.incomplete = true,
+            None if !p.exported_as.is_empty() => table.incomplete = true,
+            None => {}
+        }
+    }
+
+    // The exported declarations leave under their names. A declaration they reach but do
+    // not export leaves under its own key and no name, so a dependent can follow the
+    // reference without being able to import it. Reached ones are found by walking the
+    // references of what already left, to a fixed point.
+    let mut leaving: Vec<DeclKey> = order
+        .iter()
+        .copied()
+        .filter(|key| !written[key].1.is_empty())
+        .collect();
+    let mut seen: std::collections::HashSet<DeclKey> = leaving.iter().copied().collect();
+    let mut cursor = 0;
+    while cursor < leaving.len() {
+        let key = leaving[cursor];
+        cursor += 1;
+        for node in written[&key].0.body.nodes.iter() {
+            if let PNode::DeclRef { key: reached, .. } | PNode::App { key: reached, .. } = node {
+                if written.contains_key(reached) && seen.insert(*reached) {
+                    leaving.push(*reached);
+                }
+            }
+        }
+    }
+    // A name the file exports itself wins over one a star re-export brings in, and the
+    // first star wins over a later one. The re-exported declarations are another unit's,
+    // found through the provider under the key they already have. A star over a module
+    // whose own list is partial, or that is not known, is partial too.
+    for source in stars {
+        let imports = ctx.imports;
+        let known = imports.map(|i| i.module_exports(&source));
+        if !matches!(known, Some(ModuleExports::Known { complete: true })) {
+            table.incomplete = true;
+        }
+        let local: std::collections::HashSet<String> = order
+            .iter()
+            .flat_map(|key| written[key].1.iter().cloned())
+            .chain(table.names.iter().map(|(name, _)| name.clone()))
+            .collect();
+        for (name, key) in imports.map(|i| i.export_all(&source)).unwrap_or_default() {
+            if !local.contains(&name) {
+                table.names.push((name, key));
+            }
+        }
+    }
+    for key in order {
+        if !seen.contains(&key) {
+            continue;
+        }
+        if let Some((decl, names)) = written.remove(&key) {
+            for name in names {
+                table.names.push((name, key));
+            }
+            table.decls.push(decl);
         }
     }
     table
@@ -476,9 +560,9 @@ fn function<'ast>(
     let id = f.id.as_ref()?;
     // The first overload is the only one the checker declares; a later one would be
     // exported under a key that has no type behind it. A function without a return
-    // annotation is declared with a placeholder `any` until its body is walked, which
-    // is a guess and not a signature.
-    if item.index > 0 || f.return_type.is_none() {
+    // annotation was declared with a placeholder `any` and its body has been walked by
+    // the time exports are read, so the signature holds the inferred return type.
+    if item.index > 0 {
         return None;
     }
     let body = ctx.symbols.get(id.symbol_id.get()?)?;
@@ -493,10 +577,12 @@ fn variable(
     ctx: &mut CheckContext<'_, '_>,
     module: ModuleKey,
     symbol: Option<SymbolId>,
-    annotated: bool,
     item: &Item<'_>,
 ) -> Option<Pending> {
-    if item.index > 0 || !annotated {
+    // The type is whatever the symbol holds once the bodies are checked: the annotation
+    // when there is one, otherwise what the initializer inferred (a `const` keeps its
+    // literal, a `let` is widened), which is the type tsc writes into a declaration file.
+    if item.index > 0 {
         return None;
     }
     let body = ctx.symbols.get(symbol?)?;

@@ -47,7 +47,8 @@ pub use error::CheckerError;
 pub use keys::{DeclKey, DeclKind, ENC_VERSION, ModuleKey, NodeHash, SigHash, TypeParamKey};
 pub use line_index::LineIndex;
 pub use portable::{
-    DeclProvider, ImportSource, PNode, PParam, PProp, PTypeParam, PortableDecl, PortableType,
+    DeclProvider, ImportSource, ModuleExports, PNode, PParam, PProp, PTypeParam, PortableDecl,
+    PortableType,
 };
 pub use stable_hash::Prim;
 pub use unit::{CancelToken, UnitContext, UnitError, UnitOutput, Worker};

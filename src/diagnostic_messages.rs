@@ -312,6 +312,27 @@ pub mod messages {
         )
     }
 
+    pub fn module_not_found(specifier: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::ModuleNotFound,
+            format!("Cannot find module '{specifier}' or its corresponding type declarations."),
+        )
+    }
+
+    pub fn no_exported_member(specifier: &str, name: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::NoExportedMember,
+            format!("Module '\"{specifier}\"' has no exported member '{name}'."),
+        )
+    }
+
+    pub fn no_default_export(specifier: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::NoDefaultExport,
+            format!("Module '\"{specifier}\"' has no default export."),
+        )
+    }
+
     pub fn unresolved_identifier(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::UnresolvedIdentifier,

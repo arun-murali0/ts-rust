@@ -103,33 +103,80 @@ fn an_exported_declaration_may_name_another_exported_one() {
 }
 
 #[test]
-fn an_export_that_names_an_unexported_declaration_is_unsupported() {
-    // The importer would be handed a reference to a key nobody exports.
+fn an_export_that_names_an_unexported_declaration_exports_it_under_its_own_key() {
+    // The importer is handed the reference and the declaration it points at, but only the
+    // exported name can be imported.
     let out = run("interface Hidden { x: number }
          export function f(h: Hidden): number { return h.x; }");
-    assert!(
-        out.incomplete,
-        "an unsupported export marks the unit incomplete"
-    );
-    assert!(names(&out).is_empty(), "{out:?}");
+    assert!(!out.incomplete, "{out:?}");
+    let public: Vec<&str> = out.export_names.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(public, vec!["f"], "{out:?}");
+    assert_eq!(names(&out), vec!["Hidden", "f"], "{out:?}");
 }
 
 #[test]
-fn an_unannotated_export_is_unsupported_not_guessed() {
-    let out = run("export interface P { x: number } export const n = 1;");
-    assert!(out.incomplete);
-    assert_eq!(
-        names(&out),
-        vec!["P"],
-        "the supported export still comes through"
-    );
+fn an_unexported_declaration_nothing_reaches_stays_in_the_file() {
+    let out = run("interface Lonely { x: number }
+         export interface Shown { y: number }");
+    assert_eq!(names(&out), vec!["Shown"], "{out:?}");
+}
+
+// Step 7c: the exports are read after the bodies are checked, so what was inferred is
+// what is exported.
+fn body_of<'a>(out: &'a UnitOutput, name: &str) -> &'a ts_rust::PortableType {
+    &out.exports
+        .iter()
+        .find(|d| &*d.name == name)
+        .unwrap_or_else(|| panic!("{name} is not exported: {out:?}"))
+        .body
 }
 
 #[test]
-fn a_function_without_a_return_annotation_is_unsupported() {
-    let out = run("export function f(a: number) { return a; }");
-    assert!(out.incomplete);
-    assert!(out.exports.is_empty());
+fn an_unannotated_const_is_exported_with_its_inferred_literal_type() {
+    use ts_rust::{PNode, Prim};
+    let out = run("export const n = 1; export const s = 'a';");
+    assert!(!out.incomplete, "{out:?}");
+    assert!(matches!(body_of(&out, "n").nodes[0], PNode::NumLit(_)));
+    assert!(matches!(&body_of(&out, "s").nodes[0], PNode::StrLit(v) if &**v == "a"));
+    let out = run("export let m = 1;");
+    assert!(matches!(
+        body_of(&out, "m").nodes[0],
+        PNode::Prim(Prim::Number)
+    ));
+}
+
+#[test]
+fn a_function_without_a_return_annotation_is_exported_with_the_inferred_return() {
+    use ts_rust::{PNode, Prim};
+    let out = run("export function f(a: number) { return a + 1; }");
+    assert!(!out.incomplete, "{out:?}");
+    let body = body_of(&out, "f");
+    let PNode::Function { ret, .. } = &body.nodes[body.root as usize] else {
+        panic!("a function: {body:?}");
+    };
+    assert!(matches!(
+        body.nodes[*ret as usize],
+        PNode::Prim(Prim::Number)
+    ));
+}
+
+#[test]
+fn an_inferred_object_literal_is_exported_widened() {
+    use ts_rust::PNode;
+    let out = run("export const o = { a: 1, b: 'x' };");
+    assert!(!out.incomplete, "{out:?}");
+    let body = body_of(&out, "o");
+    let PNode::Object { props, .. } = &body.nodes[body.root as usize] else {
+        panic!("an object: {body:?}");
+    };
+    assert_eq!(props.len(), 2);
+}
+
+#[test]
+fn an_arrow_function_constant_is_exported_with_its_inferred_signature() {
+    let out = run("export const h = (a: number) => a;");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(names(&out), vec!["h"]);
 }
 
 #[test]
@@ -356,9 +403,17 @@ fn export_braces_of_an_unknown_name_is_unsupported() {
 
 #[test]
 fn export_braces_of_an_unsupported_declaration_is_unsupported() {
-    let out = run("const n = 1; export { n };");
+    // A class has a value side the portable form does not carry yet.
+    let out = run("class K {} export { K };");
     assert!(out.incomplete);
     assert!(out.exports.is_empty());
+}
+
+#[test]
+fn export_braces_of_an_unannotated_constant_exports_its_inferred_type() {
+    let out = run("const n = 1; export { n };");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(names(&out), vec!["n"]);
 }
 
 #[test]

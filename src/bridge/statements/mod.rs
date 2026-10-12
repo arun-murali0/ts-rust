@@ -42,7 +42,10 @@ pub(super) fn check_return_statement(
     // undefined for a bare `return;`, matching what a function that falls off the
     // end (or returns with no value) actually produces at runtime.
     let actual = match &ret.argument {
-        Some(expr) => infer_expression_type(expr, scoping, ctx),
+        Some(expr) => {
+            ctx.contextual = ctx.current_return_type;
+            infer_expression_type(expr, scoping, ctx)
+        }
         None => ctx.arena.undefined(),
     };
 

@@ -360,3 +360,395 @@ fn a_file_with_a_syntax_error_does_not_stop_its_importers() {
         FileOutcome::Checked(_)
     ));
 }
+
+// Step 7b: an exported declaration may name one that is not exported. The hidden one
+// leaves the file under its own key, so the exporter is complete and its signature
+// crosses files with the hidden type intact.
+#[test]
+fn an_exported_function_naming_an_unexported_interface_crosses_files() {
+    let project = run(
+        "hidden-interface",
+        &[
+            (
+                "a.ts",
+                "interface Hidden { id: number }\nexport function f(h: Hidden): number { return h.id }",
+            ),
+            (
+                "b.ts",
+                "import { f } from './a';\nf({ id: 1 });\nf({ id: 'x' });",
+            ),
+        ],
+    );
+    assert!(project.diagnostics("a.ts").is_empty());
+    let errors = project.errors("b.ts");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    // A property of an object literal argument is reported on the property, as tsc does.
+    assert_eq!(errors[0].code.tsc_code(), Some(2322));
+}
+
+#[test]
+fn a_hidden_declaration_is_reached_through_a_chain_of_hidden_ones() {
+    let project = run(
+        "hidden-chain",
+        &[
+            (
+                "a.ts",
+                "interface Inner { n: number }\ninterface Outer { inner: Inner }\nexport const o: Outer = { inner: { n: 1 } };",
+            ),
+            (
+                "b.ts",
+                "import { o } from './a';\nconst s: string = o.inner.n;",
+            ),
+        ],
+    );
+    let errors = project.errors("b.ts");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code.tsc_code(), Some(2322));
+}
+
+#[test]
+fn a_hidden_declaration_cannot_be_imported_by_name() {
+    let project = run(
+        "hidden-not-importable",
+        &[
+            (
+                "a.ts",
+                "interface Hidden { id: number }\nexport function f(h: Hidden): number { return h.id }",
+            ),
+            ("b.ts", "import { Hidden } from './a';"),
+        ],
+    );
+    let errors = project.errors("b.ts");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code.tsc_code(), Some(2305));
+}
+
+// Step 7c across files: an inferred export is used as if it had been annotated.
+#[test]
+fn an_inferred_export_crosses_files() {
+    let project = run(
+        "inferred",
+        &[
+            (
+                "a.ts",
+                "export const count = 1;\nexport let label = 'x';\nexport function double(n: number) { return n * 2; }\nexport const origin = { x: 0, y: 0 };",
+            ),
+            (
+                "b.ts",
+                "import { count, label, double, origin } from './a';\nconst a: string = count;\nconst b: number = label;\nconst c: string = double(2);\nconst d: string = origin.x;",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2322); 4], "{:?}", project.errors("b.ts"));
+}
+
+#[test]
+fn a_correct_use_of_an_inferred_export_is_clean() {
+    let project = run(
+        "inferred-clean",
+        &[
+            (
+                "a.ts",
+                "export let label = 'x';\nexport function double(n: number) { return n * 2; }",
+            ),
+            (
+                "b.ts",
+                "import { label, double } from './a';\nconst a: string = label;\nconst c: number = double(2);",
+            ),
+        ],
+    );
+    assert!(project.errors("b.ts").is_empty());
+}
+
+// Step 7 (export *): `export * from` re-exports what the other module exports, under the
+// keys it already has, except `default`.
+#[test]
+fn a_star_re_export_carries_the_other_modules_exports() {
+    let project = run(
+        "star",
+        &[
+            (
+                "a.ts",
+                "export interface User { name: string }\nexport function id(n: number): number { return n }",
+            ),
+            ("barrel.ts", "export * from './a';"),
+            (
+                "b.ts",
+                "import { User, id } from './barrel';\nconst u: User = { name: 1 };\nconst n: string = id(1);",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Some(2322), Some(2322)],
+        "{:?}",
+        project.errors("b.ts")
+    );
+    assert!(project.errors("barrel.ts").is_empty());
+}
+
+#[test]
+fn a_star_re_export_chains_through_several_barrels() {
+    let project = run(
+        "star-chain",
+        &[
+            ("a.ts", USER),
+            ("one.ts", "export * from './a';"),
+            ("two.ts", "export * from './one';"),
+            (
+                "b.ts",
+                "import { User } from './two';\nconst u: User = { name: 1 };",
+            ),
+        ],
+    );
+    assert_eq!(project.errors("b.ts").len(), 1);
+}
+
+#[test]
+fn a_star_re_export_does_not_carry_the_default() {
+    let project = run(
+        "star-default",
+        &[
+            (
+                "a.ts",
+                "export default function f(): number { return 1 }\nexport interface User { name: string }",
+            ),
+            ("barrel.ts", "export * from './a';"),
+            ("b.ts", "import f from './barrel';"),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(1192)]);
+}
+
+#[test]
+fn a_local_export_wins_over_a_star_re_export_of_the_same_name() {
+    let project = run(
+        "star-local-wins",
+        &[
+            ("a.ts", "export interface Shape { a: number }"),
+            (
+                "barrel.ts",
+                "export * from './a';\nexport interface Shape { b: string }",
+            ),
+            (
+                "b.ts",
+                "import { Shape } from './barrel';\nconst s: Shape = { b: 'x' };",
+            ),
+        ],
+    );
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_star_re_export_of_a_partial_module_makes_the_barrel_partial() {
+    // a.ts has a class the portable form cannot carry yet, so the barrel cannot claim to
+    // list everything: a missing name is not reported against it.
+    let project = run(
+        "star-partial",
+        &[
+            (
+                "a.ts",
+                "export interface User { name: string }\nexport class K {}",
+            ),
+            ("barrel.ts", "export * from './a';"),
+            ("b.ts", "import { K } from './barrel';"),
+        ],
+    );
+    assert!(project.errors("b.ts").is_empty());
+}
+
+#[test]
+fn a_star_re_export_of_a_missing_file_is_ts2307() {
+    let project = run("star-missing", &[("barrel.ts", "export * from './gone';")]);
+    let codes: Vec<_> = project
+        .errors("barrel.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2307)]);
+}
+
+// Step 7e: the members of a cycle see what each other exports.
+#[test]
+fn members_of_a_cycle_use_each_others_exports() {
+    let project = run(
+        "cycle-sees-members",
+        &[
+            (
+                "a.ts",
+                "import { B } from './b';\nexport interface A { b: B }\nconst x: A = { b: { n: 'x' } };",
+            ),
+            (
+                "b.ts",
+                "import { A } from './a';\nexport interface B { n: number }\nexport function peek(a: A): number { return a.b.n }",
+            ),
+        ],
+    );
+    let a = project.errors("a.ts");
+    assert_eq!(a.len(), 1, "{a:?}");
+    assert_eq!(a[0].code.tsc_code(), Some(2322));
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_misspelled_name_inside_a_cycle_is_reported_once_it_settles() {
+    let project = run(
+        "cycle-typo",
+        &[
+            (
+                "a.ts",
+                "import { Bee } from './b';\nexport interface A { n: number }",
+            ),
+            (
+                "b.ts",
+                "import { A } from './a';\nexport interface B { a: A }",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("a.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2305)]);
+    assert!(project.errors("b.ts").is_empty());
+}
+
+#[test]
+fn a_file_that_imports_a_cycle_sees_the_settled_exports() {
+    let project = run(
+        "cycle-importer",
+        &[
+            (
+                "a.ts",
+                "import { B } from './b';\nexport interface A { b: B }",
+            ),
+            (
+                "b.ts",
+                "import { A } from './a';\nexport interface B { n: number }",
+            ),
+            (
+                "c.ts",
+                "import { A } from './a';\nconst a: A = { b: { n: 'x' } };",
+            ),
+        ],
+    );
+    assert_eq!(project.errors("c.ts").len(), 1);
+}
+
+// Step 7g: the report says which declarations of other files a file's check read, which
+// is what an incremental run needs to know a file does not depend on a change.
+fn reads_of(project: &Checked, file: &str) -> Vec<ts_rust::DeclKey> {
+    for report in &project.report.files {
+        let path = project.graph.files().path(report.file_id).unwrap();
+        if path.file_name().unwrap().to_string_lossy() == file {
+            return report.reads.clone();
+        }
+    }
+    panic!("{file} is not in the report");
+}
+
+fn key_in(project: &Checked, file: &str, name: &str, kind: ts_rust::DeclKind) -> ts_rust::DeclKey {
+    for report in &project.report.files {
+        let path = project.graph.files().path(report.file_id).unwrap();
+        if path.file_name().unwrap().to_string_lossy() == file {
+            let module = project.graph.module_key(report.file_id).unwrap();
+            return ts_rust::DeclKey::new(module, name, kind, 0);
+        }
+    }
+    panic!("{file} is not in the report");
+}
+
+#[test]
+fn a_file_reads_only_the_declarations_it_imports() {
+    let project = run(
+        "reads",
+        &[
+            (
+                "a.ts",
+                "export interface User { name: string }\nexport interface Unused { n: number }",
+            ),
+            (
+                "b.ts",
+                "import { User } from './a';\nconst u: User = { name: 'x' };",
+            ),
+        ],
+    );
+    let reads = reads_of(&project, "b.ts");
+    assert!(reads.contains(&key_in(
+        &project,
+        "a.ts",
+        "User",
+        ts_rust::DeclKind::Interface
+    )));
+    assert!(!reads.contains(&key_in(
+        &project,
+        "a.ts",
+        "Unused",
+        ts_rust::DeclKind::Interface
+    )));
+    assert!(reads_of(&project, "a.ts").is_empty());
+}
+
+#[test]
+fn a_file_reads_the_declarations_its_imports_reach() {
+    let project = run(
+        "reads-transitive",
+        &[
+            (
+                "a.ts",
+                "interface Hidden { id: number }\nexport function f(h: Hidden): number { return h.id }",
+            ),
+            ("b.ts", "import { f } from './a';\nf({ id: 1 });"),
+        ],
+    );
+    let reads = reads_of(&project, "b.ts");
+    assert!(reads.contains(&key_in(&project, "a.ts", "f", ts_rust::DeclKind::Function)));
+    assert!(reads.contains(&key_in(
+        &project,
+        "a.ts",
+        "Hidden",
+        ts_rust::DeclKind::Interface
+    )));
+}
+
+#[test]
+fn the_reads_are_sorted_and_the_same_on_every_run() {
+    let files = [
+        (
+            "a.ts",
+            "export interface A { a: number }\nexport interface B { b: number }",
+        ),
+        ("b.ts", "import { B, A } from './a';\nlet x: A | B;"),
+    ];
+    let first = reads_of(&run("reads-order-1", &files), "b.ts");
+    let second = reads_of(&run("reads-order-2", &files), "b.ts");
+    assert_eq!(first.len(), 2);
+    let mut sorted = first.clone();
+    sorted.sort();
+    assert_eq!(first, sorted);
+    assert_eq!(first, second);
+}

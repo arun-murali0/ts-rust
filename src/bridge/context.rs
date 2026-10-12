@@ -78,6 +78,12 @@ pub struct CheckContext<'ast, 'src> {
     // very next function expression checked is known to have no contextual
     // `this`, so its body should run with implicit_this set. Consumed on entry.
     pub next_function_has_no_this: bool,
+    // The declared type the very next expression is being checked against, handed down by
+    // a caller that has one (an annotated variable, a return type, a parameter). Only an
+    // object or array literal reads it, to keep a literal property whose declared type is
+    // a literal; infer_expression_type takes it on entry, so it never reaches a deeper
+    // expression by accident.
+    pub contextual: Option<TypeId>,
 
     // The type of each branch of every conditional expression checked so far, by the
     // expression's start offset. tsc reports a ternary that does not fit its target
@@ -168,6 +174,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             current_class_instance: None,
             implicit_this: false,
             next_function_has_no_this: false,
+            contextual: None,
             conditional_arms: std::collections::HashMap::new(),
             jump_frames: Vec::new(),
             pending_loop_label: None,
