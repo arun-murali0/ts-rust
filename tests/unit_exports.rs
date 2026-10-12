@@ -336,7 +336,7 @@ fn a_default_exported_interface_is_listed_under_default() {
 
 #[test]
 fn a_default_export_with_no_declaration_to_key_is_unsupported() {
-    assert!(run("export default class Thing {}").incomplete);
+    assert!(run("export default class {}").incomplete);
     assert!(run("export default 1 + 2;").incomplete);
     assert!(run("export default function (a: number): number { return a; }").incomplete);
 }
@@ -403,8 +403,8 @@ fn export_braces_of_an_unknown_name_is_unsupported() {
 
 #[test]
 fn export_braces_of_an_unsupported_declaration_is_unsupported() {
-    // A class has a value side the portable form does not carry yet.
-    let out = run("class K {} export { K };");
+    // A namespace has a value side the portable form does not carry yet.
+    let out = run("namespace N { export const x = 1; } export { N };");
     assert!(out.incomplete);
     assert!(out.exports.is_empty());
 }
@@ -420,4 +420,46 @@ fn export_braces_of_an_unannotated_constant_exports_its_inferred_type() {
 fn a_declaration_not_exported_by_either_route_stays_out() {
     let out = run("interface A { x: number } interface B { y: number } export { A };");
     assert_eq!(names(&out), vec!["A"]);
+}
+
+#[test]
+fn an_enum_is_exported_as_a_declaration_of_kind_enum() {
+    let out = run("export enum Color { Red, Green }");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(names(&out), vec!["Color"]);
+    assert_eq!(out.exports[0].kind, DeclKind::Enum);
+}
+
+#[test]
+fn an_enum_that_is_not_exported_is_nothing_to_us() {
+    let out = run("enum Hidden { A } export interface P { x: number }");
+    assert_eq!(names(&out), vec!["P"]);
+    assert!(!out.incomplete);
+}
+
+#[test]
+fn a_class_is_exported_as_an_instance_declaration_and_a_constructor() {
+    let out = run("export class K { n: number = 1; }");
+    assert!(!out.incomplete, "{out:?}");
+    let mut kinds: Vec<_> = out.exports.iter().map(|d| d.kind).collect();
+    kinds.sort_by_key(|k| *k as u8);
+    assert_eq!(kinds, vec![DeclKind::Class, DeclKind::Var]);
+    let public: Vec<&str> = out.export_names.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(public, vec!["K", "K"], "{out:?}");
+}
+
+#[test]
+fn a_default_exported_class_is_listed_under_default() {
+    let out = run("export default class Thing {}");
+    assert!(!out.incomplete, "{out:?}");
+    assert!(out.export_names.iter().all(|(n, _)| n == "default"));
+    assert_eq!(out.export_names.len(), 2);
+}
+
+#[test]
+fn a_default_exported_identifier_is_listed_under_default() {
+    let out = run("const v = 1; export default v;");
+    assert!(!out.incomplete, "{out:?}");
+    let public: Vec<&str> = out.export_names.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(public, vec!["default"]);
 }

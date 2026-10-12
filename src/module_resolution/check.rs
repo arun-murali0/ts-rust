@@ -92,7 +92,10 @@ pub fn check_project(graph: &ModuleGraph) -> ProjectReport {
             if let Some(unit_exports) = unit_exports {
                 exports.add(report.file_id, unit_exports);
             }
-            files.push(report);
+            // A package's declaration file is read for what it exports and never reported.
+            if !graph.is_dependency_declaration(report.file_id) {
+                files.push(report);
+            }
         }
     }
     files.sort_by_key(|report| report.file_id);
@@ -109,7 +112,7 @@ fn check_files(
     ids: &[FileId],
 ) -> Vec<(FileReport, Option<UnitExports>)> {
     ids.par_iter()
-        .filter(|id| graph.is_checkable(**id))
+        .filter(|id| graph.is_checkable(**id) || graph.is_dependency_declaration(**id))
         // One worker per thread, so its arena is reused from file to file; the
         // worker clears it after every unit, so nothing carries over.
         .map_init(Worker::new, |worker, id| {

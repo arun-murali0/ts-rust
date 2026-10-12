@@ -795,6 +795,43 @@ impl TypeArena {
         }
     }
 
+    /// The two types an enum stands for, from its resolved members: the type position (the
+    /// union of the member literals, under the enum's name and marked as an enum) and the
+    /// value position (an object of the members, which prints as `typeof Name`). One
+    /// builder for a local declaration and for one imported from another file, so the two
+    /// cannot drift apart.
+    pub fn build_enum(&mut self, name: &str, members: Vec<(String, TypeId)>) -> (TypeId, TypeId) {
+        let member_types: Vec<TypeId> = members.iter().map(|(_, type_id)| *type_id).collect();
+        let union = self.alloc_union(member_types);
+        // Prints as `Weird`, not the union of its member literals, in a message. The name
+        // goes on a wrapper around the union: a one-member enum collapses to its member's
+        // literal type, an id every identical literal shares, and that id stays unnamed.
+        let type_name = self.alloc_name(name.to_string());
+        let type_position = self.alloc_named(type_name, union);
+        self.mark_enum(type_position);
+
+        // A member read off the enum (`Color.Red`) prints as `Color` in a message, the way
+        // tsc widens an enum literal when it is the source of a mismatch, so each member's
+        // type carries the enum's name. The wrapper is transparent to every relation.
+        let enum_name = self.alloc_name(name.to_string());
+        let properties = members
+            .into_iter()
+            .map(|(member, type_id)| crate::types::PropertyEntry {
+                name: member.into(),
+                type_id: self.alloc_named(enum_name, type_id),
+                optional: false,
+                is_method: false,
+            })
+            .collect();
+        // ObjectType::new sorts by name, which the merge-join in
+        // subtyping::object_is_subtype relies on; members arrive in declaration order.
+        let value_type = self.alloc(Type::Object(crate::types::ObjectType::new(properties)));
+        // The enum object itself prints as `typeof Color`.
+        let object_name = self.alloc_name(format!("typeof {name}"));
+        let value_type = self.alloc_named(object_name, value_type);
+        (type_position, value_type)
+    }
+
     pub fn mark_enum(&mut self, type_id: TypeId) {
         self.enum_types.push(type_id);
     }

@@ -25,8 +25,8 @@
 // something wrong.
 
 use oxc_ast::ast::{
-    BindingPattern, Declaration, ExportDefaultDeclarationKind, Function, ModuleExportName, Program,
-    Statement, TSTypeParameterDeclaration,
+    BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression, Function,
+    ModuleExportName, Program, Statement, TSTypeParameterDeclaration,
 };
 use oxc_semantic::SymbolId;
 use oxc_span::GetSpan;
@@ -76,6 +76,11 @@ enum Node<'ast> {
     Alias,
     Function(&'ast Function<'ast>),
     Var { symbol: Option<SymbolId> },
+    Enum { symbol: Option<SymbolId> },
+    // The instance side of a class: read from the namespace like an interface.
+    Class,
+    // The constructor, the class name used as a value.
+    ClassValue { symbol: Option<SymbolId> },
 }
 
 // One export waiting for the resolver to be complete: every exported declaration has to
@@ -232,8 +237,22 @@ fn push_declaration<'ast>(
                 push_item(items, seen, &id.name, DeclKind::Var, node, names);
             }
         }
-        // A class or an enum has a value side the portable form does not carry yet; a
-        // namespace or a module block likewise. Not exported, they are nothing to us.
+        Declaration::TSEnumDeclaration(d) => {
+            let names = named(&d.id.name);
+            let node = Node::Enum {
+                symbol: d.id.symbol_id.get(),
+            };
+            push_item(items, seen, &d.id.name, DeclKind::Enum, node, names);
+        }
+        Declaration::ClassDeclaration(c) => {
+            if let Some(id) = &c.id {
+                push_class(items, seen, &id.name, id.symbol_id.get(), named(&id.name));
+            } else if exported {
+                *incomplete = true;
+            }
+        }
+        // A namespace or a module block has a value side the portable form does not carry
+        // yet. Not exported, they are nothing to us.
         _ => {
             if exported {
                 *incomplete = true;
@@ -292,8 +311,25 @@ pub(crate) fn collect_exports<'ast>(
                         names,
                     );
                 }
-                // An anonymous function, a class, or an expression: no declaration of
-                // ours to give a key to.
+                ExportDefaultDeclarationKind::ClassDeclaration(c) if c.id.is_some() => {
+                    if let Some(id) = &c.id {
+                        push_class(
+                            &mut items,
+                            &mut seen,
+                            &id.name,
+                            id.symbol_id.get(),
+                            vec!["default".to_string()],
+                        );
+                    }
+                }
+                // `export default Foo` names a declaration of this file, so it is
+                // `export { Foo as default }`.
+                ExportDefaultDeclarationKind::Identifier(id) => specifiers.push(Specifier {
+                    local: id.name.to_string(),
+                    exported: "default".to_string(),
+                }),
+                // An anonymous function or class, or any other expression: no declaration
+                // of ours to give a key to.
                 _ => table.incomplete = true,
             },
             Statement::ExportNamedDeclaration(named) => {
@@ -341,6 +377,46 @@ pub(crate) fn collect_exports<'ast>(
                 Node::Alias,
                 Vec::new(),
             ),
+            Statement::ClassDeclaration(c) => {
+                if let Some(id) = &c.id {
+                    push_class(
+                        &mut items,
+                        &mut seen,
+                        &id.name,
+                        id.symbol_id.get(),
+                        Vec::new(),
+                    );
+                }
+            }
+            // `export = x` and `export as namespace X` change what the module exports in a
+            // way this pass does not read, so the list cannot be called complete.
+            // `export = name` hands the module's whole value to one declaration. It is
+            // listed under the name `export=`, which no source can write, so an
+            // `import x = require()` or a default import can find it. The module stays
+            // partial, because a named import of one of its properties is still legal.
+            Statement::TSExportAssignment(assign) => {
+                table.incomplete = true;
+                if let Expression::Identifier(id) = &assign.expression {
+                    specifiers.push(Specifier {
+                        local: id.name.to_string(),
+                        exported: "export=".to_string(),
+                    });
+                }
+            }
+            Statement::TSNamespaceExportDeclaration(_) => table.incomplete = true,
+            Statement::TSEnumDeclaration(d) => {
+                let node = Node::Enum {
+                    symbol: d.id.symbol_id.get(),
+                };
+                push_item(
+                    &mut items,
+                    &mut seen,
+                    &d.id.name,
+                    DeclKind::Enum,
+                    node,
+                    Vec::new(),
+                );
+            }
             Statement::FunctionDeclaration(f) => {
                 if let Some(id) = &f.id {
                     push_item(
@@ -413,6 +489,16 @@ pub(crate) fn collect_exports<'ast>(
 
     let mut keys = UnitKeys::default();
     let mut pending: Vec<Pending> = Vec::new();
+    // In a declaration file a top-level declaration with no `export` is exported anyway
+    // unless the file says otherwise (`export {}`), and which of the two it is cannot be
+    // told here. So such a file's list is partial: what it names explicitly still crosses,
+    // and a name missing from it is never reported.
+    if program.source_type.is_typescript_definition()
+        && items.iter().any(|item| item.exported_as.is_empty())
+    {
+        table.incomplete = true;
+    }
+
     // Every interface and alias of the file is registered, exported or not: an exported
     // declaration may name one that is not (`interface Hidden` and `export function
     // f(h: Hidden)`), and it can only be written out with a key if the resolver knows it.
@@ -420,13 +506,21 @@ pub(crate) fn collect_exports<'ast>(
     // the table incomplete when it is.
     for item in &items {
         let exported = !item.exported_as.is_empty();
-        if !exported && !matches!(item.kind, DeclKind::Interface | DeclKind::Alias) {
+        if !exported
+            && !matches!(
+                item.kind,
+                DeclKind::Interface | DeclKind::Alias | DeclKind::Class
+            )
+        {
             continue;
         }
         let built = match &item.node {
             Node::Interface | Node::Alias => interface_or_alias(ctx, module, item),
             Node::Function(f) => function(ctx, module, f, item),
             Node::Var { symbol } => variable(ctx, module, *symbol, item),
+            Node::Enum { symbol } => enumeration(ctx, module, *symbol, item),
+            Node::Class => interface_or_alias(ctx, module, item),
+            Node::ClassValue { symbol } => variable(ctx, module, *symbol, item),
         };
         match built.and_then(|p| register(&mut keys, ctx, p)) {
             Some(p) => pending.push(p),
@@ -589,6 +683,51 @@ fn variable(
     Some(pending_of(module, item, body))
 }
 
+// An enum is exported by its value-position type: an object of the member literals, which
+// is all the importer needs to rebuild both the type and the value. A merged enum, or one
+// the declare pass could not resolve (a computed member), has no such type here and is
+// left out.
+fn enumeration(
+    ctx: &mut CheckContext<'_, '_>,
+    module: ModuleKey,
+    symbol: Option<SymbolId>,
+    item: &Item<'_>,
+) -> Option<Pending> {
+    if item.index > 0 {
+        return None;
+    }
+    let body = ctx.symbols.get(symbol?)?;
+    Some(pending_of(module, item, body))
+}
+
+// A class is two declarations that share its name: the instance type, which another type
+// can name, and the constructor, which is the name used as a value. Each is exported under
+// the same names, and an import of the name binds both.
+fn push_class<'ast>(
+    items: &mut Vec<Item<'ast>>,
+    seen: &mut FxHashMap<(String, u8), u32>,
+    name: &str,
+    symbol: Option<SymbolId>,
+    names: Vec<String>,
+) {
+    push_item(
+        items,
+        seen,
+        name,
+        DeclKind::Class,
+        Node::Class,
+        names.clone(),
+    );
+    push_item(
+        items,
+        seen,
+        name,
+        DeclKind::Var,
+        Node::ClassValue { symbol },
+        names,
+    );
+}
+
 fn pending_of(module: ModuleKey, item: &Item<'_>, body: TypeId) -> Pending {
     Pending {
         key: DeclKey::new(module, &item.name, item.kind, item.index),
@@ -609,7 +748,10 @@ fn register<'ast>(
     ctx: &mut CheckContext<'ast, '_>,
     mut p: Pending,
 ) -> Option<Pending> {
-    if matches!(p.kind, DeclKind::Interface | DeclKind::Alias) {
+    if matches!(
+        p.kind,
+        DeclKind::Interface | DeclKind::Alias | DeclKind::Class
+    ) {
         let declared = ctx.namespace.declared_type_param_decl(&p.name);
         p = with_type_params(ctx, p, declared)?;
         // The slot the rest of the unit knows this declaration by.

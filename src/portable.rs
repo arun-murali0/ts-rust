@@ -430,8 +430,8 @@ impl Importer {
 
     /// The local type of the declaration under `key`: a `Ref` for an interface or a
     /// class, the alias's body under its name for an alias, the body itself for a
-    /// function or a variable. None for a kind that is not portable yet (enum,
-    /// namespace) or a key the provider does not have.
+    /// function or a variable. None for a kind that is not portable yet (a
+    /// namespace; an enum has two types and comes through `import_enum`) or a key the provider does not have.
     pub(crate) fn import_decl(
         &mut self,
         arena: &mut TypeArena,
@@ -458,6 +458,32 @@ impl Importer {
         };
         self.drain(arena, provider);
         Some(ty)
+    }
+
+    /// The type position and the value position of the enum under `key`, rebuilt from the
+    /// member literals the declaration carries. None for any other kind, or a key the
+    /// provider does not have.
+    pub(crate) fn import_enum(
+        &mut self,
+        arena: &mut TypeArena,
+        provider: &dyn DeclProvider,
+        key: DeclKey,
+    ) -> Option<(TypeId, TypeId)> {
+        let decl = provider.decl(key)?;
+        if decl.kind != DeclKind::Enum {
+            return None;
+        }
+        let body = self.body(arena, provider, &decl);
+        let Type::Object(object) = arena.get(body).clone() else {
+            return None;
+        };
+        let members: Vec<(String, TypeId)> = object
+            .properties
+            .iter()
+            .map(|p| (p.name.to_string(), p.type_id))
+            .collect();
+        self.drain(arena, provider);
+        Some(arena.build_enum(&decl.name, members))
     }
 
     /// The type parameters of the generic declaration under `key`, as local types: what a

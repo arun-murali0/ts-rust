@@ -49,6 +49,39 @@ pub fn scan_module_requests(source: &str, file_name: &str) -> ModuleScan {
             });
         }
     }
+    // The parser's module record covers `import` and `export ... from` only. Two more
+    // forms ask for a module and are read off the syntax tree: `import x = require("m")`
+    // at the top level, and `import("m")` with a plain string for its argument.
+    for statement in &parsed.program.body {
+        if let oxc_ast::ast::Statement::TSImportEqualsDeclaration(decl) = statement {
+            if let oxc_ast::ast::TSModuleReference::ExternalModuleReference(reference) =
+                &decl.module_reference
+            {
+                requests.push(ModuleRequest {
+                    specifier: reference.expression.value.as_str().to_owned(),
+                    is_type: decl.import_kind == oxc_ast::ast::ImportOrExportKind::Type,
+                    is_import: true,
+                    start: decl.span.start,
+                });
+            }
+        }
+    }
+    for dynamic in parsed.module_record.dynamic_imports.iter() {
+        let written =
+            &source[dynamic.module_request.start as usize..dynamic.module_request.end as usize];
+        let quote = written.chars().next();
+        if written.len() >= 2
+            && matches!(quote, Some('\'' | '"'))
+            && written.ends_with(quote.unwrap())
+        {
+            requests.push(ModuleRequest {
+                specifier: written[1..written.len() - 1].to_owned(),
+                is_type: false,
+                is_import: true,
+                start: dynamic.span.start,
+            });
+        }
+    }
     // The parser keeps requests in a hash map keyed by specifier, whose iteration order
     // changes from run to run. Source order makes the graph reproducible.
     requests.sort_by_key(|request| request.start);

@@ -752,3 +752,568 @@ fn the_reads_are_sorted_and_the_same_on_every_run() {
     assert_eq!(first, sorted);
     assert_eq!(first, second);
 }
+
+// Step 7d, enums: one declaration carries both names, the type (the union of the member
+// literals, printed as the enum) and the value (an object of the members).
+#[test]
+fn an_enum_crosses_files_as_a_type_and_a_value() {
+    let project = run(
+        "enum-basic",
+        &[
+            ("a.ts", "export enum Color { Red, Green }"),
+            (
+                "b.ts",
+                "import { Color } from './a';\nconst ok: Color = Color.Red;\nconst bad: string = Color.Green;\nconst wrong: Color = 'x';",
+            ),
+        ],
+    );
+    let errors = project.errors("b.ts");
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert_eq!(errors[0].code.tsc_code(), Some(2322));
+    assert!(
+        errors[0].message.contains("'Color'"),
+        "{}",
+        errors[0].message
+    );
+    assert_eq!(errors[1].code.tsc_code(), Some(2322));
+    assert!(project.errors("a.ts").is_empty());
+}
+
+#[test]
+fn a_string_enum_member_keeps_its_value_across_files() {
+    let project = run(
+        "enum-string",
+        &[
+            ("a.ts", "export enum Dir { Up = 'UP', Down = 'DOWN' }"),
+            (
+                "b.ts",
+                "import { Dir } from './a';\nconst d: Dir = Dir.Up;\nconst n: number = Dir.Down;",
+            ),
+        ],
+    );
+    let errors = project.errors("b.ts");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+}
+
+#[test]
+fn an_enum_does_not_make_the_exporter_partial() {
+    // The module's list is complete, so a name it does not export is reported.
+    let project = run(
+        "enum-complete",
+        &[
+            (
+                "a.ts",
+                "export enum Color { Red }\nexport interface P { c: Color }",
+            ),
+            ("b.ts", "import { Nope } from './a';"),
+        ],
+    );
+    let errors = project.errors("b.ts");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code.tsc_code(), Some(2305));
+}
+
+#[test]
+fn an_enum_named_by_an_exported_interface_still_checks() {
+    let project = run(
+        "enum-in-interface",
+        &[
+            (
+                "a.ts",
+                "export enum Color { Red, Green }\nexport interface P { c: Color }",
+            ),
+            (
+                "b.ts",
+                "import { Color, P } from './a';\nconst p: P = { c: Color.Red };\nconst q: P = { c: 'x' };",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn an_enum_is_re_exported_through_a_barrel() {
+    let project = run(
+        "enum-barrel",
+        &[
+            ("a.ts", "export enum Color { Red, Green }"),
+            ("one.ts", "export { Color } from './a';"),
+            ("two.ts", "export * from './one';"),
+            (
+                "b.ts",
+                "import { Color } from './two';\nconst bad: string = Color.Red;",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn an_imported_enum_passed_on_by_the_importing_file_still_works() {
+    let project = run(
+        "enum-pass-on",
+        &[
+            ("a.ts", "export enum Color { Red }"),
+            ("one.ts", "import { Color } from './a';\nexport { Color };"),
+            (
+                "b.ts",
+                "import { Color } from './one';\nconst bad: string = Color.Red;",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn an_aliased_import_of_an_enum_binds_both_names() {
+    let project = run(
+        "enum-alias",
+        &[
+            ("a.ts", "export enum Color { Red }"),
+            (
+                "b.ts",
+                "import { Color as C } from './a';\nconst c: C = C.Red;\nconst bad: string = C.Red;",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn an_enum_with_a_computed_member_stays_out_and_makes_the_unit_partial() {
+    let project = run(
+        "enum-computed",
+        &[
+            (
+                "a.ts",
+                "declare function f(): number;\nexport enum E { A = f() }",
+            ),
+            ("b.ts", "import { Nope } from './a';"),
+        ],
+    );
+    assert!(project.errors("b.ts").is_empty());
+}
+
+// Step 7d, classes: the instance type and the constructor are two declarations that share
+// the class's name, and an import of the name binds both.
+#[test]
+fn a_class_crosses_files_as_a_type_and_a_constructor() {
+    let project = run(
+        "class-basic",
+        &[
+            (
+                "a.ts",
+                "export class Point {\n  x: number;\n  constructor(x: number) { this.x = x; }\n  dist(): number { return this.x; }\n}",
+            ),
+            (
+                "b.ts",
+                "import { Point } from './a';\nconst p: Point = new Point(1);\nconst bad: string = p.x;\nconst worse = new Point('a');",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Some(2322), Some(2345)],
+        "{:?}",
+        project.errors("b.ts")
+    );
+    assert!(
+        project.errors("a.ts").is_empty(),
+        "{:?}",
+        project.errors("a.ts")
+    );
+}
+
+#[test]
+fn a_default_exported_class_crosses_files() {
+    let project = run(
+        "class-default",
+        &[
+            ("a.ts", "export default class K { n: number = 1; }"),
+            (
+                "b.ts",
+                "import K from './a';\nconst k: K = new K();\nconst s: string = k.n;",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_generic_class_crosses_files() {
+    let project = run(
+        "class-generic",
+        &[
+            (
+                "a.ts",
+                "export class Box<T> {\n  value: T;\n  constructor(v: T) { this.value = v; }\n}",
+            ),
+            (
+                "b.ts",
+                "import { Box } from './a';\nconst b: Box<number> = new Box(1);\nconst s: string = b.value;",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_class_does_not_make_the_exporter_partial() {
+    let project = run(
+        "class-complete",
+        &[
+            ("a.ts", "export class K { n: number = 1; }"),
+            ("b.ts", "import { Nope } from './a';"),
+        ],
+    );
+    let errors = project.errors("b.ts");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code.tsc_code(), Some(2305));
+}
+
+#[test]
+fn a_class_is_re_exported_through_a_barrel() {
+    let project = run(
+        "class-barrel",
+        &[
+            ("a.ts", "export class K { n: number = 1; }"),
+            ("barrel.ts", "export * from './a';"),
+            (
+                "b.ts",
+                "import { K } from './barrel';\nconst s: string = new K().n;",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn an_exported_function_can_name_an_unexported_class() {
+    let project = run(
+        "class-hidden",
+        &[
+            (
+                "a.ts",
+                "class Hidden { id: number = 1; }\nexport function f(h: Hidden): number { return h.id; }",
+            ),
+            ("b.ts", "import { f } from './a';\nf(5);"),
+        ],
+    );
+    assert!(
+        project.errors("a.ts").is_empty(),
+        "{:?}",
+        project.errors("a.ts")
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_default_exported_identifier_crosses_files() {
+    let project = run(
+        "default-identifier",
+        &[
+            ("a.ts", "const v = 1;\nexport default v;"),
+            ("b.ts", "import v from './a';\nconst s: string = v;"),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_class_that_extends_another_does_not_invent_errors() {
+    let project = run(
+        "class-extends",
+        &[
+            (
+                "a.ts",
+                "class A { a: number = 1; }\nexport class B extends A { b: string = 'x'; }",
+            ),
+            (
+                "b.ts",
+                "import { B } from './a';\nconst x: B = new B();\nconst n: number = x.b.length;",
+            ),
+        ],
+    );
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+// Step 7d, `import * as ns`: the module's value exports as one object.
+#[test]
+fn a_namespace_import_is_an_object_of_the_modules_value_exports() {
+    let project = run(
+        "star-as",
+        &[
+            (
+                "a.ts",
+                "export interface User { name: string }\nexport function f(n: number): number { return n }\nexport const k = 1;\nexport enum Color { Red }",
+            ),
+            (
+                "b.ts",
+                "import * as ns from './a';\nconst r: string = ns.f(1);\nconst c: string = ns.Color.Red;\nconst ok: number = ns.f(2);\nns.missing;",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Some(2322), Some(2322), Some(2339)],
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_namespace_import_of_a_partial_module_stays_unbound() {
+    // `namespace N` is not readable yet, so a.ts's list may be missing exports and `ns`
+    // must not claim a property does not exist.
+    let project = run(
+        "star-as-partial",
+        &[
+            (
+                "a.ts",
+                "export const k = 1;\nexport namespace N { export const x = 1; }",
+            ),
+            ("b.ts", "import * as ns from './a';\nns.anything;"),
+        ],
+    );
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_type_only_namespace_import_binds_no_value() {
+    let project = run(
+        "star-as-type",
+        &[
+            ("a.ts", "export const k = 1;"),
+            ("b.ts", "import type * as ns from './a';"),
+        ],
+    );
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+// `import x = require(...)` binds the module's value exports like `import * as x`.
+#[test]
+fn an_import_equals_require_binds_the_modules_value_exports() {
+    let project = run(
+        "require",
+        &[
+            (
+                "a.ts",
+                "export const k = 1;\nexport function f(n: number): number { return n }",
+            ),
+            (
+                "b.ts",
+                "import a = require('./a');\nconst s: string = a.f(1);\nconst ok: number = a.f(2);",
+            ),
+        ],
+    );
+    let errors: Vec<_> = project
+        .errors("b.ts")
+        .into_iter()
+        .filter(|d| d.code.tsc_code() == Some(2322))
+        .collect();
+    assert_eq!(errors.len(), 1, "{:?}", project.errors("b.ts"));
+}
+
+#[test]
+fn an_import_equals_require_of_a_missing_file_is_ts2307() {
+    let project = run(
+        "require-missing",
+        &[("b.ts", "import a = require('./gone');")],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2307)]);
+}
+
+#[test]
+fn a_property_missing_from_an_export_equals_value_is_reported() {
+    let project = run(
+        "require-export-equals",
+        &[
+            ("a.ts", "const k = 1;\nexport = k;"),
+            ("b.ts", "import a = require('./a');\na.anything;"),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2339)], "{:?}", project.errors("b.ts"));
+}
+
+// A dynamic import with a string argument is a dependency edge like any other.
+#[test]
+fn a_dynamic_import_is_a_dependency_of_the_importing_file() {
+    let project = run(
+        "dynamic",
+        &[
+            ("a.ts", "export const k = 1;"),
+            (
+                "b.ts",
+                "export async function g() { return import('./a'); }",
+            ),
+        ],
+    );
+    let id_of = |name: &str| {
+        project
+            .report
+            .files
+            .iter()
+            .map(|r| r.file_id)
+            .find(|id| {
+                project
+                    .graph
+                    .files()
+                    .path(*id)
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    == name
+            })
+            .unwrap()
+    };
+    assert_eq!(project.graph.dependencies(id_of("b.ts")), &[id_of("a.ts")]);
+}
+
+// `export = x`: the module is that one declaration.
+#[test]
+fn an_import_equals_require_of_an_export_equals_module_is_that_value() {
+    let project = run(
+        "export-equals-fn",
+        &[
+            (
+                "a.ts",
+                "function pad(s: string, n: number): string { return s }\nexport = pad;",
+            ),
+            (
+                "b.ts",
+                "import pad = require('./a');\nconst a: string = pad('x', 1);\nconst b: number = pad('x', 1);\npad(1, 1);",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Some(2322), Some(2345)],
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_default_import_of_an_export_equals_module_is_that_value() {
+    let project = run(
+        "export-equals-default",
+        &[
+            (
+                "a.ts",
+                "function pad(s: string): string { return s }\nexport = pad;",
+            ),
+            (
+                "b.ts",
+                "import pad from './a';\nconst n: number = pad('x');",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn an_export_equals_module_still_never_reports_a_missing_name() {
+    let project = run(
+        "export-equals-named",
+        &[
+            (
+                "a.ts",
+                "function pad(s: string): string { return s }\nexport = pad;",
+            ),
+            ("b.ts", "import { length } from './a';"),
+        ],
+    );
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
