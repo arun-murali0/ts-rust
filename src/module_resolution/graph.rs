@@ -203,9 +203,11 @@ impl ModuleGraph {
         self.root.as_deref()
     }
 
-    /// The stable identity of `id` (LLD 3.1.1): Project under the root, External for a
-    /// file outside it. None for a file inside `node_modules`: its Package key needs the
-    /// `package.json` walk, which is not written yet, and a wrong key is worse than none.
+    /// The stable identity of `id` (LLD 3.1.1): Project under the root, Package for a file
+    /// inside `node_modules` (named for the package, its version and the path inside it,
+    /// not for where it was installed), External for any other file outside the root.
+    /// None for a file in `node_modules` whose package has no readable `package.json` with
+    /// a name and a version: a wrong key is worse than none.
     pub fn module_key(&self, id: FileId) -> Option<crate::keys::ModuleKey> {
         use crate::keys::ModuleKey;
         let path = self.files.path(id)?;
@@ -214,8 +216,8 @@ impl ModuleGraph {
                 return Some(ModuleKey::project(&rel));
             }
         }
-        if path.components().any(|c| c.as_os_str() == "node_modules") {
-            return None;
+        if in_node_modules(path) {
+            return package_key(path);
         }
         let text = path.to_str()?.replace('\\', "/");
         Some(ModuleKey::external(&text))
@@ -276,6 +278,23 @@ impl ModuleGraph {
         self.files
             .path(id)
             .is_some_and(|path| is_typescript(path) && !in_node_modules(path))
+    }
+
+    /// A declaration file inside `node_modules`: checked so that what it exports can be
+    /// imported, but never reported on, since checking someone else's package is not this
+    /// project's job.
+    pub fn is_dependency_declaration(&self, id: FileId) -> bool {
+        self.files.path(id).is_some_and(|path| {
+            in_node_modules(path)
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.ends_with(".d.ts")
+                            || name.ends_with(".d.mts")
+                            || name.ends_with(".d.cts")
+                    })
+        })
     }
 
     /// The files whose contents differ from what the graph read. A rewrite that leaves
@@ -464,6 +483,96 @@ fn is_scannable(path: &Path) -> bool {
 
 fn is_typescript(path: &Path) -> bool {
     matches!(extension(path), Some("ts" | "tsx" | "mts" | "cts"))
+}
+
+// The Package key of a file under `node_modules/<name>` or `node_modules/@scope/<name>`:
+// the package's own name and version from its `package.json`, and the path of the file
+// inside the package. The innermost `node_modules` counts, so a nested install is keyed
+// by the package it belongs to.
+fn package_key(path: &Path) -> Option<crate::keys::ModuleKey> {
+    let parts: Vec<std::path::Component<'_>> = path.components().collect();
+    let at = parts
+        .iter()
+        .rposition(|part| part.as_os_str() == "node_modules")?;
+    let first = parts.get(at + 1)?.as_os_str().to_str()?;
+    let name_len = if first.starts_with('@') { 2 } else { 1 };
+    let end = at + 1 + name_len;
+    // The file has to be inside the package directory, not be it.
+    if end >= parts.len() {
+        return None;
+    }
+    let name = parts[at + 1..end]
+        .iter()
+        .map(|part| part.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?
+        .join("/");
+    let directory: PathBuf = parts[..end].iter().collect();
+    let manifest = std::fs::read_to_string(directory.join("package.json")).ok()?;
+    let declared = json_top_level_string(&manifest, "name")?;
+    let version = json_top_level_string(&manifest, "version")?;
+    // A manifest that names another package than its directory is not trusted to key it.
+    if declared != name {
+        return None;
+    }
+    let subpath = parts[end..]
+        .iter()
+        .map(|part| part.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?
+        .join("/");
+    Some(crate::keys::ModuleKey::package(&name, &version, &subpath))
+}
+
+// The string value of a key at the top level of a JSON object, read without a JSON
+// parser: the project has none, and a manifest is the only JSON it reads. Strings are
+// walked with their escapes, and only depth one counts, so a `"version"` inside
+// `dependencies` is never mistaken for the package's own. None when the key is missing or
+// its value is not a string.
+fn json_top_level_string(text: &str, key: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            b'"' => {
+                let (value, next) = read_json_string(text, i)?;
+                i = next;
+                if depth == 1 && value == key {
+                    let rest = text[i..].trim_start();
+                    let rest = rest.strip_prefix(':')?.trim_start();
+                    if rest.starts_with('"') {
+                        let offset = text.len() - rest.len();
+                        return read_json_string(text, offset).map(|(v, _)| v);
+                    }
+                    return None;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+// The string that starts at the quote at `start`, and the index just past its closing
+// quote.
+fn read_json_string(text: &str, start: usize) -> Option<(String, usize)> {
+    let mut out = String::new();
+    let mut chars = text[start + 1..].char_indices();
+    while let Some((offset, c)) = chars.next() {
+        match c {
+            '"' => return Some((out, start + 1 + offset + 1)),
+            '\\' => match chars.next()?.1 {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                other => out.push(other),
+            },
+            other => out.push(other),
+        }
+    }
+    None
 }
 
 fn in_node_modules(path: &Path) -> bool {

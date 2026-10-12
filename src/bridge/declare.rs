@@ -5,7 +5,7 @@ use oxc_ast::ast::{
 };
 
 use crate::type_annotation::{resolve_function_params, resolve_type_annotation};
-use crate::types::{ObjectType, PropertyEntry, Type};
+use crate::types::Type;
 
 use super::context::CheckContext;
 
@@ -259,39 +259,10 @@ fn declare_enum(decl: &oxc_ast::ast::TSEnumDeclaration, ctx: &mut CheckContext<'
     // A TypeScript enum is really two separate names sharing one identifier: used
     // in a type position, it means the union of its member literal types; used in
     // a value position, it means an object whose properties are its members. Both
-    // are registered here from the same resolved member list.
-    let member_types: Vec<_> = members.iter().map(|(_, type_id)| *type_id).collect();
-    let type_position = ctx.arena.alloc_union(member_types);
-    // Prints as `Weird`, not the union of its member literals, in a message. The name
-    // goes on a wrapper around the union: a one-member enum collapses to its member's
-    // literal type, an id every identical literal shares, and that id stays unnamed.
-    let name = ctx.arena.alloc_name(decl.id.name.to_string());
-    let type_position = ctx.arena.alloc_named(name, type_position);
-    ctx.arena.mark_enum(type_position);
+    // are built from the same resolved member list.
+    let (type_position, value_type) = ctx.arena.build_enum(&decl.id.name, members);
     ctx.namespace
         .insert_enum(&decl.id.name, type_position, decl.id.span);
-
-    // A member read off the enum (`Color.Red`) prints as `Color` in a message, the way
-    // tsc widens an enum literal when it is the source of a mismatch, so each member's
-    // type carries the enum's name. The wrapper is transparent to every relation.
-    let enum_name = ctx.arena.alloc_name(decl.id.name.to_string());
-    let properties = members
-        .into_iter()
-        .map(|(name, type_id)| PropertyEntry {
-            name: name.into(),
-            type_id: ctx.arena.alloc_named(enum_name, type_id),
-            optional: false,
-            is_method: false,
-        })
-        .collect();
-    // ObjectType::new sorts by name. Members are collected here in declaration
-    // order (`enum E { B, A }` gives [B, A]), and the merge-join in
-    // subtyping::object_is_subtype misaligns on unsorted input, which made an enum
-    // object wrongly fail to be assignable to a structural type it satisfies.
-    let value_type = ctx.arena.alloc(Type::Object(ObjectType::new(properties)));
-    // The enum object itself prints as `typeof Color`.
-    let object_name = ctx.arena.alloc_name(format!("typeof {}", decl.id.name));
-    let value_type = ctx.arena.alloc_named(object_name, value_type);
     ctx.symbols.declare(symbol_id, value_type);
 }
 

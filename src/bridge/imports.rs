@@ -19,11 +19,12 @@ use oxc_span::{GetSpan, Span};
 use crate::diagnostic_messages::messages;
 use oxc_ast::ast::{
     ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind, ModuleExportName, Program,
-    Statement,
+    Statement, TSModuleReference,
 };
 
 use crate::keys::{DeclKey, DeclKind};
 use crate::portable::{DeclProvider, ImportSource, ModuleExports};
+use crate::types::{ObjectType, PropertyEntry, Type};
 
 use super::context::CheckContext;
 
@@ -47,6 +48,20 @@ pub(super) fn bind_imports<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCo
             }
             Statement::ExportAllDeclaration(all) => {
                 report_missing_module(source, all.source.value.as_str(), all.source.span, ctx);
+            }
+            // `import x = require(\"./a\")` is `import * as x` for a module with named
+            // exports; for one that uses `export =` the list is partial and `x` stays
+            // unbound.
+            Statement::TSImportEqualsDeclaration(decl) => {
+                if let TSModuleReference::ExternalModuleReference(reference) =
+                    &decl.module_reference
+                {
+                    let specifier = reference.expression.value.as_str();
+                    report_missing_module(source, specifier, reference.expression.span, ctx);
+                    if decl.import_kind != ImportOrExportKind::Type {
+                        bind_namespace_object(ctx, source, specifier, &decl.id);
+                    }
+                }
             }
             _ => {}
         }
@@ -126,11 +141,66 @@ fn bind_declaration<'ast>(
                     whole_declaration_is_type,
                 );
             }
-            // `import * as ns` needs a namespace object type the portable form does not
-            // have yet.
-            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {}
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(spec) => {
+                if !whole_declaration_is_type {
+                    bind_namespace_object(ctx, source, specifier, &spec.local);
+                }
+            }
         }
     }
+}
+
+// `import * as ns`: `ns` is an object whose properties are the module's value exports (a
+// function, a variable, an enum, a class constructor). A type the module exports is not a
+// property, and `ns.Name` in a type position is not read yet, so that annotation stays
+// unresolved and says nothing.
+//
+// Problem: a property missing from the object would be reported as not existing, so the
+// object is only built from a module whose export list is complete. Against a partial one
+// `ns` stays unbound, which loses an error and never invents one.
+fn bind_namespace_object<'ast>(
+    ctx: &mut CheckContext<'ast, '_>,
+    source: &dyn ImportSource,
+    specifier: &str,
+    local: &oxc_ast::ast::BindingIdentifier<'_>,
+) {
+    if source.module_exports(specifier) != (ModuleExports::Known { complete: true }) {
+        return;
+    }
+    let Some(symbol_id) = local.symbol_id.get() else {
+        return;
+    };
+    let provider: &dyn DeclProvider = source;
+    let mut properties: Vec<PropertyEntry> = Vec::new();
+    for (name, key) in source.export_all(specifier) {
+        let Some(decl) = provider.decl(key) else {
+            continue;
+        };
+        let type_id = match decl.kind {
+            DeclKind::Function | DeclKind::Var => {
+                ctx.importer.import_decl(&mut ctx.arena, provider, key)
+            }
+            DeclKind::Enum => ctx
+                .importer
+                .import_enum(&mut ctx.arena, provider, key)
+                .map(|(_, value)| value),
+            _ => None,
+        };
+        let Some(type_id) = type_id else {
+            continue;
+        };
+        if properties.iter().any(|p| &*p.name == name.as_str()) {
+            continue;
+        }
+        properties.push(PropertyEntry {
+            name: name.into(),
+            type_id,
+            optional: false,
+            is_method: false,
+        });
+    }
+    let object = ctx.arena.alloc(Type::Object(ObjectType::new(properties)));
+    ctx.symbols.declare(symbol_id, object);
 }
 
 // Binds `local` to every declaration the module exports under `imported`. A name that
@@ -188,6 +258,21 @@ fn bind_key<'ast>(
             };
             if let Some(symbol_id) = local.symbol_id.get() {
                 ctx.symbols.declare(symbol_id, type_id);
+            }
+        }
+        // An enum is a type and a value under one name; `import type` brings in the type.
+        DeclKind::Enum => {
+            let Some((type_position, value_type)) =
+                ctx.importer.import_enum(&mut ctx.arena, provider, key)
+            else {
+                return;
+            };
+            ctx.namespace
+                .insert_imported(&local.name, type_position, Vec::new());
+            if !type_only {
+                if let Some(symbol_id) = local.symbol_id.get() {
+                    ctx.symbols.declare(symbol_id, value_type);
+                }
             }
         }
         _ => {}

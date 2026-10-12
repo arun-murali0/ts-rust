@@ -23,10 +23,11 @@ impl ModuleResolver {
 
     /// Resolves `specifier` as written in `from`, the importing file.
     pub fn resolve_from_file(&self, from: &Path, specifier: &str) -> Result<PathBuf, ModuleError> {
-        self.resolver
+        let found = self
+            .resolver
             .resolve_file(from, specifier)
-            .map(|resolution| resolution.path().to_path_buf())
-            .map_err(|error| unresolved(from, specifier, &error))
+            .map(|resolution| resolution.path().to_path_buf());
+        self.with_types_fallback(from, specifier, found)
     }
 
     /// Like `resolve_from_file`, but looks for declaration files, which is what an
@@ -37,11 +38,67 @@ impl ModuleResolver {
         from: &Path,
         specifier: &str,
     ) -> Result<PathBuf, ModuleError> {
-        self.resolver
+        let found = self
+            .resolver
             .resolve_dts(from, specifier)
-            .map(|resolution| resolution.path().to_path_buf())
-            .map_err(|error| unresolved(from, specifier, &error))
+            .map(|resolution| resolution.path().to_path_buf());
+        self.with_types_fallback(from, specifier, found)
     }
+
+    // A package that ships JavaScript and no declarations of its own is typed by
+    // `@types/<name>`, which is where TypeScript looks next. So a package specifier that
+    // resolved to a JavaScript file, or to nothing, is tried as its `@types` package, and
+    // that wins when it exists. A relative specifier never is.
+    fn with_types_fallback(
+        &self,
+        from: &Path,
+        specifier: &str,
+        found: Result<PathBuf, oxc_resolver::ResolveError>,
+    ) -> Result<PathBuf, ModuleError> {
+        let wants_types = match &found {
+            Ok(path) => is_javascript(path),
+            Err(_) => true,
+        };
+        if wants_types {
+            if let Some(types) = types_specifier(specifier) {
+                if let Ok(resolution) = self.resolver.resolve_dts(from, &types) {
+                    return Ok(resolution.path().to_path_buf());
+                }
+            }
+        }
+        found.map_err(|error| unresolved(from, specifier, &error))
+    }
+}
+
+fn is_javascript(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("js" | "mjs" | "cjs" | "jsx")
+    )
+}
+
+// `lodash/fp` is `@types/lodash/fp`; `@scope/name` is `@types/scope__name`. None for a
+// relative or absolute specifier, which no `@types` package stands for.
+fn types_specifier(specifier: &str) -> Option<String> {
+    if specifier.starts_with('.') || specifier.starts_with('/') || specifier.starts_with("@types/")
+    {
+        return None;
+    }
+    let (name, rest) = match specifier.strip_prefix('@') {
+        Some(scoped) => {
+            let (scope, tail) = scoped.split_once('/')?;
+            let (name, rest) = match tail.split_once('/') {
+                Some((name, rest)) => (name, format!("/{rest}")),
+                None => (tail, String::new()),
+            };
+            (format!("{scope}__{name}"), rest)
+        }
+        None => match specifier.split_once('/') {
+            Some((name, rest)) => (name.to_string(), format!("/{rest}")),
+            None => (specifier.to_string(), String::new()),
+        },
+    };
+    Some(format!("@types/{name}{rest}"))
 }
 
 impl Default for ModuleResolver {
