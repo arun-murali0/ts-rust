@@ -21,8 +21,17 @@ use super::infer_expression_type;
 // compatible with everything, instead of guessing a partial shape that would
 // produce false "property does not exist" errors. Spreading null or undefined adds
 // nothing and is fine.
+//
+// Problem: every property was widened as soon as it was read, so `{ tag: 'x' }` became
+// `{ tag: string }` and was then rejected against `tag: 'x'`, an error tsc does not give.
+// Picked: when the caller knows the declared type (`expected`), a property whose declared
+// type holds a literal keeps its literal, and the declared property type is handed down so
+// a nested object or array is read the same way. Everything else widens as before.
+// Cost: only an annotated variable, a return, a call argument, an assignment and the
+// literals nested in those get this; other positions still widen.
 pub(super) fn infer_object_expression_type(
     object: &oxc_ast::ast::ObjectExpression,
+    expected: Option<TypeId>,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
@@ -60,8 +69,23 @@ pub(super) fn infer_object_expression_type(
             PropertyKey::NumericLiteral(key) => key.value.to_string(),
             _ => continue,
         };
+        let declared = expected
+            .map(|e| declared_properties(ctx, e, &name))
+            .unwrap_or_default();
+        // Several members of a union can declare the property differently; the literal is
+        // kept if any of them holds one, and a single declaration is also the context a
+        // nested literal is read against.
+        ctx.contextual = if declared.len() == 1 {
+            Some(declared[0])
+        } else {
+            None
+        };
         let type_id = infer_expression_type(&property.value, scoping, ctx);
-        let type_id = crate::types::widen(&ctx.arena, type_id);
+        let type_id = if declared.iter().any(|d| holds_literal(ctx, *d)) {
+            type_id
+        } else {
+            crate::types::widen(&ctx.arena, type_id)
+        };
         upsert_property(
             &mut properties,
             PropertyEntry {
@@ -78,6 +102,35 @@ pub(super) fn infer_object_expression_type(
         return ctx.arena.error();
     }
     ctx.arena.alloc(Type::Object(ObjectType::new(properties)))
+}
+
+// The declared types of property `name` in `expected`: an object has it directly, a union
+// of objects has one per member that declares it, and anything else has none.
+fn declared_properties(ctx: &CheckContext<'_, '_>, expected: TypeId, name: &str) -> Vec<TypeId> {
+    let mut found: Vec<TypeId> = Vec::new();
+    let members: Vec<TypeId> = match ctx.arena.get(expected) {
+        Type::Union(members) => members.clone(),
+        _ => vec![expected],
+    };
+    for member in members {
+        if let Type::Object(object) = ctx.arena.get(member) {
+            if let Some(property) = object.properties.iter().find(|p| &*p.name == name) {
+                if !found.contains(&property.type_id) {
+                    found.push(property.type_id);
+                }
+            }
+        }
+    }
+    found
+}
+
+// Whether a declared type is, or is a union containing, a literal type.
+pub(super) fn holds_literal(ctx: &CheckContext<'_, '_>, declared: TypeId) -> bool {
+    match ctx.arena.get(declared) {
+        Type::StringLiteral(_) | Type::NumberLiteral(_) | Type::BooleanLiteral(_) => true,
+        Type::Union(members) => members.iter().any(|m| holds_literal(ctx, *m)),
+        _ => false,
+    }
 }
 
 // Keeps names unique, which ObjectType's sorted merge-join relies on: a repeated
@@ -99,6 +152,7 @@ fn upsert_property(properties: &mut Vec<PropertyEntry>, entry: PropertyEntry) {
 // types::widen), because tsc treats `const xs = []` as an array that fills up later.
 pub(super) fn infer_array_expression_type(
     array: &oxc_ast::ast::ArrayExpression,
+    expected: Option<TypeId>,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
@@ -128,9 +182,16 @@ pub(super) fn infer_array_expression_type(
         let Some(expr) = element.as_expression() else {
             continue;
         };
+        let declared_item = match expected.map(|e| ctx.arena.get(e)) {
+            Some(Type::Array(item)) => Some(*item),
+            _ => None,
+        };
+        ctx.contextual = declared_item;
         let type_id = infer_expression_type(expr, scoping, ctx);
-
-        let type_id = crate::types::widen(&ctx.arena, type_id);
+        let type_id = match declared_item {
+            Some(d) if holds_literal(ctx, d) => type_id,
+            _ => crate::types::widen(&ctx.arena, type_id),
+        };
         if !element_types.contains(&type_id) {
             element_types.push(type_id);
         }

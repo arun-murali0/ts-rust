@@ -568,6 +568,13 @@ fn check_callable(
                     None
                 }
                 other => other.as_expression().and_then(|expr| {
+                    // The parameter this argument lands on is its contextual type, so a
+                    // literal property is kept where the parameter declares a literal.
+                    ctx.contextual = function_type
+                        .params
+                        .get(index)
+                        .filter(|param| !param.rest && !after_spread)
+                        .map(|param| param.type_id);
                     let inferred = infer_expression_type(expr, scoping, ctx);
                     (!after_spread).then_some(inferred)
                 }),

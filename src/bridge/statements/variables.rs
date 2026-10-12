@@ -83,10 +83,13 @@ fn check_identifier_declarator(
         }
     }
 
-    let inferred_type = declarator
-        .init
-        .as_ref()
-        .map(|init| infer_expression_type(init, scoping, ctx));
+    let inferred_type = declarator.init.as_ref().map(|init| {
+        // The annotation is the contextual type of the initializer.
+        if let AnnotationOutcome::Resolved(declared) = &annotation_outcome {
+            ctx.contextual = Some(*declared);
+        }
+        infer_expression_type(init, scoping, ctx)
+    });
 
     match (annotation_outcome, inferred_type) {
         (AnnotationOutcome::Unresolvable, _) => {
