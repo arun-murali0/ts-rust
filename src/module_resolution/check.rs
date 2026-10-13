@@ -1,5 +1,5 @@
 use std::fs;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rayon::prelude::*;
 
@@ -250,20 +250,59 @@ fn ambient_providers(graph: &ModuleGraph) -> Vec<FileId> {
 // The most times the members of a cycle are checked again after the first pass.
 const CYCLE_ROUNDS: usize = 4;
 
+// Stack for each file-checking worker thread.
+//
+// Problem: a project run aborted with a stack overflow on a file that is a single
+// chain of about 1,500 `+` operators (TypeScript's own binderBinaryExpressionStress).
+// Such a chain parses into a left-nested tree 1,500 levels deep, and walking it
+// recurses once per level inside oxc's visitors (oxc_ast_visit's walk_expression
+// and walk_binary_expression, 16,000 frames in the backtrace), which is not our
+// code to make iterative. The same file passes when it is the only one checked,
+// because that runs on the main thread, whose stack is about 8 MB. Rayon's
+// workers are spawned threads, and a spawned thread gets about 2 MB by default.
+// Picked: build the workers with a stack that is comfortably deeper than any file
+// we have seen, 64 MB. It is address space that is only touched where a file
+// really recurses deeply, so ordinary runs do not use more memory.
+// Cost: a chain several times longer than this one would still overflow. Fixing
+// that for good means a depth limit in the parser or an iterative walk, which is
+// oxc's to provide; this only removes the gap between the main thread and the
+// workers. The old workaround was to export RUST_MIN_STACK before running.
+const WORKER_STACK_BYTES: usize = 64 * 1024 * 1024;
+
+// The pool is built once and kept, since each worker owns an arena that is reused
+// from file to file. If the threads cannot be created, None sends the caller to
+// rayon's global pool, which works but has the small default stack.
+fn worker_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .stack_size(WORKER_STACK_BYTES)
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
 // Checks the files of one layer in parallel, against `exports` as it stands.
 fn check_files(
     graph: &ModuleGraph,
     exports: &ProjectExports,
     ids: &[FileId],
 ) -> Vec<(FileReport, Option<UnitExports>)> {
-    ids.par_iter()
-        .filter(|id| graph.is_checkable(**id) || graph.is_dependency_declaration(**id))
-        // One worker per thread, so its arena is reused from file to file; the
-        // worker clears it after every unit, so nothing carries over.
-        .map_init(Worker::new, |worker, id| {
-            check_file(graph, exports, worker, *id)
-        })
-        .collect()
+    let check_layer = || {
+        ids.par_iter()
+            .filter(|id| graph.is_checkable(**id) || graph.is_dependency_declaration(**id))
+            // One worker per thread, so its arena is reused from file to file; the
+            // worker clears it after every unit, so nothing carries over.
+            .map_init(Worker::new, |worker, id| {
+                check_file(graph, exports, worker, *id)
+            })
+            .collect()
+    };
+    match worker_pool() {
+        Some(pool) => pool.install(check_layer),
+        None => check_layer(),
+    }
 }
 
 // Members of a cycle import each other, so the first pass finds nothing among them. What

@@ -1,8 +1,9 @@
-use crate::arena::{PairStack, TypeArena, TypeId};
-use crate::fxhash::FxHashMap;
+use crate::arena::{TypeArena, TypeId};
+use crate::fxhash::{FxBuildHasher, FxHashMap};
 use crate::semantic::queries::{RelationCache, SemanticQueries};
 use crate::types::{FunctionType, ObjectType, PropertyEntry, Type};
 use smallvec::SmallVec;
+use std::collections::HashSet;
 
 // Structural inference: walks a generic function's declared parameter type
 // alongside a call's actual argument type in lockstep, recording a binding the
@@ -35,7 +36,7 @@ pub(crate) fn infer_type_param_bindings(
         bindings,
         locked,
         cache,
-        &mut SmallVec::new(),
+        &mut SeenPairs::default(),
     )
 }
 
@@ -98,12 +99,32 @@ fn same_literal_base(arena: &TypeArena, a: TypeId, b: TypeId) -> bool {
     matches!((literal_base(arena, a), literal_base(arena, b)), (Some(x), Some(y)) if x == y)
 }
 
+// The (param_type, arg_type) pairs one inference call has already matched, or is
+// matching right now.
+type SeenPairs = HashSet<(TypeId, TypeId), FxBuildHasher>;
+
 // A recursive param_type (e.g. `Box<T>`'s own self-referential `next: Box<T>`,
 // still holding the bare GenericParameter shape while it's being matched
 // against a real argument) can lead back to matching the same (param_type,
-// arg_type) pair against itself before the first match finishes. `seen` tracks
-// pairs currently being walked; re-entering one contributes nothing further
+// arg_type) pair against itself before the first match finishes. `seen` holds the
+// pairs this call has started on; reaching one again contributes nothing further
 // worth inferring, so it's simply skipped rather than walked again.
+//
+// Problem: `seen` used to be a stack, and a pair was removed again as soon as its
+// match finished. That only stops a pair from containing itself; the same pair
+// reached by a different route was matched in full again. With classes that point
+// at each other (`class C0 { p1: C1; p2: C2; ... }`, as in TypeScript's
+// resolvingClassDeclarationWhenInBaseTypeResolution) the number of routes grows
+// exponentially, and a call such as `use(c0)` for a parameter of type C0 never
+// finished, even though nothing in it is generic.
+// Picked: keep every pair for the rest of the call. A pair matched a second time
+// would offer the same candidate to the same parameters, and offering a candidate
+// the binding already covers changes nothing, so the only thing skipped is repeated
+// work. tsc keeps its own visited pairs for the whole inference in the same way.
+// Cost: if a binding is widened after a pair was matched, that pair is not offered
+// again against the wider binding. Both the first match and a repeat are compared
+// with the binding as it stands, so a candidate that was ignored once for being
+// unrelated to the binding can no longer be picked up by a later route to it.
 fn infer_type_param_bindings_inner(
     arena: &mut TypeArena,
     param_type: TypeId,
@@ -111,15 +132,12 @@ fn infer_type_param_bindings_inner(
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
     locked: &[crate::types::TypeParameterId],
     cache: &mut RelationCache,
-    seen: &mut PairStack,
+    seen: &mut SeenPairs,
 ) {
-    let pair = (param_type, arg_type);
-    if seen.contains(&pair) {
+    if !seen.insert((param_type, arg_type)) {
         return;
     }
-    seen.push(pair);
     infer_type_param_bindings_uncached(arena, param_type, arg_type, bindings, locked, cache, seen);
-    seen.pop();
 }
 
 fn infer_type_param_bindings_uncached(
@@ -129,7 +147,7 @@ fn infer_type_param_bindings_uncached(
     bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
     locked: &[crate::types::TypeParameterId],
     cache: &mut RelationCache,
-    seen: &mut PairStack,
+    seen: &mut SeenPairs,
 ) {
     match arena.get(param_type).clone() {
         Type::GenericParameter(id, _, bound) => {
@@ -611,69 +629,83 @@ fn ordered_generic_param_ids_inner(
 }
 
 pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
-    let mut outermost_cut = usize::MAX;
-    scan_for_type_param(arena, type_id, &mut SmallVec::new(), &mut outermost_cut)
+    if let Some(known) = arena.cached_mentions_type_param(type_id) {
+        return known;
+    }
+    let mut visited: HashSet<TypeId, FxBuildHasher> = HashSet::default();
+    let found = scan_for_type_param(arena, type_id, &mut visited);
+    if !found {
+        // The walk reached every type reachable from type_id and none of them is a
+        // parameter, so the same is true of each type it passed through: whatever
+        // one of them reaches, type_id reaches too. All of them are remembered in
+        // one go, which is what keeps the next question about any of them to a lookup.
+        for id in visited {
+            arena.remember_mentions_type_param(id, false);
+        }
+    }
+    found
 }
 
 // The "does this type mention a type parameter" question. Answers are kept in
 // the arena (TypeArena::cached_mentions_type_param), not per call: the checker
 // asks it for every call expression, mostly about types that never change, and
 // interning has turned the type graph into a DAG, so the same `number[]` or
-// `{ id: number }` node hangs off many parents. The old version kept only the
-// ids on the current path, so a shared node was walked again for every parent.
+// `{ id: number }` node hangs off many parents.
 //
-// Caching needs care because of recursive types. A type reachable from itself
-// (Node { next: Node }, through the Ref namespace::resolve gives its declaration) is cut
-// where it re-enters an id that is still open, and that cut answers "false" only
-// because the answer is being computed. A node whose walk was cut at an *outer*
-// open id has not really been decided: that outer id may reach a parameter
-// through some other branch. So `true` is always kept (one parameter anywhere is
-// enough), while `false` is kept only when every cut in the walk pointed at the
-// node itself or below it, meaning its whole subtree was actually explored.
-//
-// `open` is the current path, outermost first. `lowest_cut` collects the
-// smallest index in `open` that any cut below this call pointed at.
+// Problem: the walk used to keep only the ids on its current path, and to
+// remember a `false` only for a node whose walk had not been cut short by a
+// cycle. In a graph where classes refer to each other (Node { next: Node }, through
+// the Ref namespace::resolve gives its declaration), almost every node is cut by
+// some cycle, so almost nothing was remembered and a node shared by many parents
+// was walked again for every path that led to it. The number of paths grows
+// exponentially with the number of classes: TypeScript's own
+// resolvingClassDeclarationWhenInBaseTypeResolution test, about 50 generic classes
+// that refer to each other across namespaces, never finished.
+// Picked: one visited set for the whole question. A node already visited is not
+// walked again, so the walk is linear in the types reachable from the start.
+// Returning `false` for it is right whatever is still open above it: the question
+// is only whether some parameter is reachable, so if there is one, it will be
+// found by the walk that is still running, and the `true` it produces travels up
+// through every open node (and is remembered for each) without looking at the
+// visited node's answer again.
+// Cost: a `true` is only remembered for the nodes on the path to the parameter, not
+// for the other nodes the walk visited first; asking about those again walks them
+// again, once. A `false` is remembered for every visited node, see
+// contains_type_param.
 fn scan_for_type_param(
     arena: &TypeArena,
     type_id: TypeId,
-    open: &mut SmallVec<[TypeId; 8]>,
-    lowest_cut: &mut usize,
+    visited: &mut HashSet<TypeId, FxBuildHasher>,
 ) -> bool {
     if let Some(known) = arena.cached_mentions_type_param(type_id) {
         return known;
     }
-    if let Some(position) = open.iter().position(|&id| id == type_id) {
-        *lowest_cut = (*lowest_cut).min(position);
+    if !visited.insert(type_id) {
         return false;
     }
 
-    let depth = open.len();
-    open.push(type_id);
-    let mut cut_below = usize::MAX;
     let found = match arena.get(type_id) {
         Type::GenericParameter(_, _, _) => true,
-        Type::Array(element) => scan_for_type_param(arena, *element, open, &mut cut_below),
+        Type::Array(element) => scan_for_type_param(arena, *element, visited),
         Type::Function(f) => {
             f.params
                 .iter()
-                .any(|p| scan_for_type_param(arena, p.type_id, open, &mut cut_below))
-                || scan_for_type_param(arena, f.return_type, open, &mut cut_below)
+                .any(|p| scan_for_type_param(arena, p.type_id, visited))
+                || scan_for_type_param(arena, f.return_type, visited)
         }
         Type::Object(o) => o
             .properties
             .iter()
-            .any(|p| scan_for_type_param(arena, p.type_id, open, &mut cut_below)),
+            .any(|p| scan_for_type_param(arena, p.type_id, visited)),
         Type::Union(members) | Type::Intersection(members) => members
             .iter()
-            .any(|&m| scan_for_type_param(arena, m, open, &mut cut_below)),
+            .any(|&m| scan_for_type_param(arena, m, visited)),
         _ => false,
     };
-    open.pop();
 
-    if found || cut_below >= depth {
-        arena.remember_mentions_type_param(type_id, found);
+    if found {
+        arena.remember_mentions_type_param(type_id, true);
     }
-    *lowest_cut = (*lowest_cut).min(cut_below);
     found
 }
 

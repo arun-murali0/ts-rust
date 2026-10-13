@@ -7,15 +7,45 @@ use crate::types::Type;
 // messages do the same: turn a TypeId back into the source-like text tsc
 // would print for it.
 //
-// A cyclic type would recurse here forever. Nothing today builds one:
-// namespace::resolve reports a self-reference as Circular instead of looping,
-// but a printer has no way to know that stays true, so depth is capped.
+// A cyclic type would recurse here forever. Nothing today builds one --
+// namespace::resolve reports a self-reference as Circular instead of looping
+// -- but a printer has no way to know that stays true, so depth is capped.
 const MAX_DEPTH: usize = 32;
+
+// Problem: MAX_DEPTH bounds how deep the printer goes, not how much it writes. A
+// generic class whose instantiation is an object with two members that point
+// back at it (`class G<T> { a: G<T>; b: G<T> }`, `BiMap<K, V>` with `inverse()`)
+// prints two sub-types per level, so 32 levels is 2^32 members. One "not
+// assignable" message asked for a 4 GB string and the whole process aborted.
+// Picked: also cap the length of the text. Once the output passes MAX_OUTPUT every
+// further call returns at once, and display_type cuts the text and ends it with
+// `...`, so the work stops roughly where the cap is reached.
+// Cost: a legitimately long type is cut. The cap is far above anything a real
+// message needs, and well above tsc's own 160 character truncation, so this is a
+// guard against runaway output and not an attempt at matching tsc's wording.
+// Printing an instantiation by name (`G<string>`) would shorten these messages
+// more, but it needs the class's type arguments kept on the instance type, which
+// is a larger change to how instances are built.
+const MAX_OUTPUT: usize = 2048;
+
+// Applies the MAX_OUTPUT cut once, after the whole type has been written, at a
+// character boundary so a multi-byte name is never split.
+fn finish(mut out: String) -> String {
+    if out.len() > MAX_OUTPUT {
+        let mut end = MAX_OUTPUT;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+        out.push_str("...");
+    }
+    out
+}
 
 pub fn display_type(arena: &TypeArena, type_id: TypeId) -> String {
     let mut out = String::new();
     write_type(arena, type_id, &mut out, MAX_DEPTH);
-    out
+    finish(out)
 }
 
 // How tsc words the source side of a "not assignable" message: a literal is
@@ -126,7 +156,7 @@ fn union_display_order(arena: &TypeArena, members: &[TypeId]) -> Vec<TypeId> {
 pub fn display_signature(arena: &TypeArena, function: &crate::types::FunctionType) -> String {
     let mut out = String::new();
     write_signature(arena, function, true, &mut out, MAX_DEPTH);
-    out
+    finish(out)
 }
 
 fn write_signature(
@@ -163,13 +193,18 @@ fn write_signature(
 }
 
 fn write_type(arena: &TypeArena, type_id: TypeId, out: &mut String, depth: usize) {
+    // Over the output cap (see MAX_OUTPUT): write nothing more, so the recursion
+    // below unwinds instead of expanding another level.
+    if out.len() > MAX_OUTPUT {
+        return;
+    }
     if depth == 0 {
         out.push_str("...");
         return;
     }
 
     // A named interface, class, alias, generic instantiation or enum prints
-    // its name instead of unfolding its shape: `Dog`, not
+    // its name instead of unfolding its shape -- `Dog`, not
     // `{ name: string; breed: string }`. Checked before the structural match
     // below so it applies uniformly, whatever the underlying Type is.
     if let Some(name) = arena.display_name(type_id) {

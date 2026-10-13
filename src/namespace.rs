@@ -126,6 +126,38 @@ pub struct TypeNamespace<'a> {
     // annotation inside the body would never match the parameter T came from.
     type_param_cache: FxHashMap<TypeParameterId, TypeId>,
 
+    // The type parameters whose constraint is being resolved right now.
+    //
+    // Problem: `class C<T extends C = any> {}` crashed the process with a stack
+    // overflow. Resolving T's constraint `C` needs C's defaults filled in, which
+    // pushes C's own type parameters again (push_decl_type_params), which resolves
+    // T's constraint `C` again, and so on. type_param_cache cannot stop it, because
+    // an entry is only written after the constraint has resolved, so every pass
+    // through the loop is a cache miss.
+    // Picked: record the parameter here for the duration of its constraint
+    // resolution, and let a re-entrant visit see it as an unconstrained parameter
+    // instead of recursing. The outer call is still the one that caches the real
+    // parameter, with its constraint.
+    // Cost: the inner, unconstrained node is built and thrown away on every
+    // re-entrant visit, which only happens for a constraint that names its own
+    // declaration, so it is rare and cheap. tsc's own wording for the cycle is not
+    // reproduced here yet; this keeps the checker alive, nothing more.
+    resolving_constraints: Vec<TypeParameterId>,
+
+    // The type parameters whose `= Default` is being resolved right now.
+    //
+    // Problem: `interface I<T = I> {}` (and the same on a class or type alias)
+    // overflowed the stack. The default `I` is written without arguments, so
+    // resolving it asks for I's defaults, which resolves T's default `I` again.
+    // This is the same shape as resolving_constraints above, one step earlier in
+    // the chain, and it does not pass through the constraint at all.
+    // Picked: the same marker, kept per parameter. A re-entrant request for a
+    // default that is already being resolved gets no default, which the caller
+    // already handles as "unresolvable" and turns into the error type.
+    // Cost: the circular default is not reported yet. tsc says TS2716 ("Type
+    // parameter 'T' has a circular default"); this only keeps the checker alive.
+    resolving_defaults: Vec<TypeParameterId>,
+
     // The generic declarations that came from another file, by the local name they are
     // bound to. They have no AST, so arity, arguments, defaults and bounds that a
     // local declaration reads from its `<T, ...>` list are read from here instead (see
@@ -247,6 +279,8 @@ impl<'a> TypeNamespace<'a> {
             declaration_spans: FxHashMap::default(),
             reported_first_declaration: Vec::new(),
             type_param_cache: FxHashMap::default(),
+            resolving_constraints: Vec::new(),
+            resolving_defaults: Vec::new(),
             imported_generics: FxHashMap::default(),
             implicit_any_params: Vec::new(),
             unresolved_constraints: Vec::new(),
@@ -485,10 +519,19 @@ impl<'a> TypeNamespace<'a> {
         decl: &'a oxc_ast::ast::TSTypeParameterDeclaration<'a>,
         index: usize,
     ) -> Option<TypeId> {
-        let default = decl.params.get(index)?.default.as_ref()?;
+        let param = decl.params.get(index)?;
+        let default = param.default.as_ref()?;
+        // Already resolving this very default further up the stack: it names its own
+        // declaration (see resolving_defaults), so there is no answer to give.
+        let id = TypeParameterId::with_file(self.file_id, param.span().start, index as u32);
+        if self.resolving_defaults.contains(&id) {
+            return None;
+        }
+        self.resolving_defaults.push(id);
         let scope = self.push_decl_type_params(arena, Some(decl));
         let resolved = resolve_ts_type(default, self, arena);
         self.pop_type_params(scope);
+        self.resolving_defaults.pop();
         resolved
     }
 
@@ -799,11 +842,19 @@ impl<'a> TypeNamespace<'a> {
             // once per declaration, not once per push_type_params call.
             let type_id = match self.type_param_cache.get(&id).copied() {
                 Some(cached) => cached,
+                // Re-entered while this very parameter's constraint is still being
+                // resolved (see resolving_constraints). Not cached: the outer call
+                // owns the cache entry and will write the constrained node.
+                None if self.resolving_constraints.contains(&id) => {
+                    arena.alloc(Type::GenericParameter(id, name.clone(), None))
+                }
                 None => {
+                    self.resolving_constraints.push(id);
                     let constraint = param
                         .constraint
                         .as_ref()
                         .and_then(|c| crate::type_annotation::resolve_ts_type(c, self, arena));
+                    self.resolving_constraints.pop();
                     if param.constraint.is_some()
                         && constraint.is_none()
                         && !self
