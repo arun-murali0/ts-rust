@@ -21,32 +21,21 @@ The historical milestones establish:
 - classes, inheritance, methods, constructors, and `this`;
 - expression and statement checking;
 - parameters and destructuring;
-- first-tier generic functions and argument inference.
+- generics on functions, interfaces, aliases and classes, with argument inference;
+- intersection types and cross-file imports and exports.
 
 The executable contracts live in the named fixture suites under `tests/fixtures/`.
 
 ## Immediate engineering plan
 
-### 1. Strengthen Generics Tier 1
-
-Turn the current generic-function implementation into a reusable semantic subsystem while preserving the existing Tier 1 regression contract.
-
-Target capabilities:
-
-- type-parameter identity and scope;
-- generic function signatures;
-- inference from arguments;
-- multiple type parameters;
-- inference through arrays and object properties;
-- explicit type arguments;
-- substitution;
-- constraint checking;
-- type-parameter defaults where supported;
-- instantiated return types;
-- recursive inference protection;
-- generic methods and classes when their existing declaration model can support them cleanly.
-
-The important design rule is that generic inference should be a semantic operation, not a collection of special cases inside call-expression checking.
+### 1. Finish what crossing files started
+Generics are done as a semantic subsystem (see [generics](architecture/generics.md)), and the design rule they followed still holds: inference is a semantic operation, not a collection of special cases inside call-expression checking. The immediate work is the cross-file part that is still partial:
+- export classes, enums and overloads;
+- `export * as ns`, default classes and default expressions;
+- read packages, so `node_modules` imports bind;
+- tsconfig `paths` and `baseUrl`;
+- re-check only what changed.
+Each item keeps the rule from [cross-file-types](architecture/cross-file-types.md): what cannot be carried is recorded as left out, so a dependent reports less and never something different.
 
 ### 2. Grow the semantic query boundary
 
@@ -96,9 +85,7 @@ Do not turn `TypeArena` or `CheckContext` into a universal service container.
 The preferred semantic dependency order is:
 
 ```text
-Generics Tier 1 completion
-        ↓
-stronger inference and constraints
+Cross-file exports and imports
         ↓
 keyof + indexed access
         ↓

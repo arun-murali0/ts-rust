@@ -7,7 +7,9 @@ theoretically "foundational" but less-frequently-used advanced type operators.
 Module resolution uses `oxc_resolver` for path/specifier resolution (node_modules
 walk, package.json exports/main/types, tsconfig paths/baseUrl, extension probing).
 Everything checker-side (symbol tables, cross-file lookup, .d.ts parsing,
-import-cycle handling) is still ts-rust's own work.
+import-cycle handling) is ts-rust's own work. Cross-file lookup and cycle handling are
+done for annotated and inferred exports (docs/architecture/cross-file-types.md); .d.ts
+parsing is not.
 
 ---
 
@@ -46,22 +48,26 @@ Section 11, core subset:
 Path/specifier resolution delegated to `oxc_resolver`. Remaining work is
 checker-side:
 1. Module graph/driver - DONE, behind the `module-resolution` feature (see
-   docs/module-resolution.md): `ModuleGraph` resolves each import via
+   docs/architecture/module-resolution.md): `ModuleGraph` resolves each import via
    `oxc_resolver`, keeps unresolved edges, finds cycles, orders files into
-   dependency layers, and `check_project` checks the layers in parallel. Files
-   are still checked one at a time; nothing is looked up across files yet.
-2. Extend `namespace.rs`'s symbol-table concept so each checked file exposes
-   an export table, and import sites look into another file's table instead
-   of only their own scope.
-3. `import type` as a checker-side distinction (not resolver-side).
+   dependency layers, and `check_project` checks the layers in parallel.
+2. Each checked file exposes an export table, and import sites look into the
+   file they name - DONE (`UnitOutput.exports` and `export_names`, bound by
+   `bridge/imports.rs`; see docs/architecture/cross-file-types.md). Cycle
+   members are checked again until their exports settle, and a missing name or
+   module is reported (TS2305, TS2307, TS1192) only against a complete export list.
+3. `import type` as a checker-side distinction - the type-only flag is read when
+   an import is bound.
+4. Still to do: export classes, enums and overloads; `export * as ns`, default
+   classes and expressions; packages (an import from `node_modules` binds
+   nothing yet).
 
 Why here: unblocks every other stage from being single-file-only, which is
 the single biggest realism gap in real-world usage - almost no real
 TypeScript project is one file.
 
-Not done in the first part: tsconfig `paths`/`baseUrl` (the resolver is built
-without a tsconfig), ambient modules, and re-checking only changed files and
-their dependents.
+Not done: tsconfig `paths`/`baseUrl` (the resolver is built without a tsconfig),
+ambient modules, and re-checking only changed files and their dependents.
 
 Dependencies: none structurally, but benefits from Stage 1 being stable so
 generic types resolve correctly once they can cross file boundaries.
@@ -71,8 +77,8 @@ generic types resolve correctly once they can cross file boundaries.
 ## Stage 3 - Tuples & intersections
 
 Section 1.4:
-- Tuple types, readonly tuples, optional/rest elements
-- Intersection types, intersection reduction
+- Tuple types, readonly tuples, optional/rest elements - not done
+- Intersection types, intersection reduction - DONE (docs/architecture/intersections.md)
 - Union reduction / subsumption
 
 Why here: extremely common in real code (function signatures with fixed-shape
@@ -90,7 +96,7 @@ Dependencies: none.
 Section 9. Shipped: `instanceof`, `in`, discriminated unions (a property of an
 identifier, in `if` and `switch`), `switch` grouped labels / default / `typeof`,
 `&&` / `||` conditions, assignment narrowing, branch joins and loop exit
-narrowing. See docs/control-flow-narrowing.md.
+narrowing. See docs/architecture/narrowing.md.
 
 Remaining:
 - Switch exhaustiveness

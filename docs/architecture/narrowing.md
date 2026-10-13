@@ -217,3 +217,8 @@ break" only skips a narrowing.
 - Captured variables. A closure starts with a copy of the surrounding narrowing, which is
   right for a variable that is never reassigned and wrong for one that is.
 - Loop fixed points. The body is walked once.
+## 17. Added after the first write-up
+- **A declared union narrows to its initializer.** `const w: Wide = "variant0"` is the literal on the next line, as in tsc, and the wide-union benchmark uses parameters for that reason (commits `21641e3` and `6d87fce`).
+- **Narrowing through an assignment.** `(x = f()) !== null` narrows `x` (`21641e3`).
+- **More statements follow control flow.** `do-while`, `for-of`, `for-in`, `try`, `throw` and labeled statements are walked, with loop and try narrowing following the same overlay rules as sections 10 and 15.
+- **A property read on a nullable value reports the cause.** `x.length` on `string | null` is `'x' is possibly 'null'` (TS18047, 18048 for `undefined`, 18049 for both), named as written (`user.address`), or `Object is possibly 'null'` (TS2531, 2532, 2533) when there is no name. The property is then looked up on what is left, so a missing property is still reported, and an optional chain is left alone (`891b176`). This is a diagnostic rather than a narrowing rule, but it uses the same non-nullish type narrowing produces.

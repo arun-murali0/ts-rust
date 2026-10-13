@@ -2,7 +2,7 @@
 
 > **Status: substantially complete.** Type parameters are supported on functions, interfaces, type aliases, and classes; inference, substitution, defaults, explicit type arguments, constraints, and recursive generic shapes all work. This replaces the earlier `generics-tier1.md`, which described a functions-only implementation that no longer reflects the code. What's genuinely still missing is listed at the end, not scattered through the document as caveats.
 
-This document follows generics as it actually grew: one new `Type` variant, a structural inference algorithm, a substitution pass — and then, notably, two capabilities (generic classes, recursive types) that needed almost no new code of their own once the first three pieces existed in the right shape. That last part is the most interesting design decision in this file, and it's covered on its own in [architecture.md](architecture.md)'s "Recursive types and generic classes" section; this document is the semantic story, that one is the implementation story.
+This document follows generics as it actually grew: one new `Type` variant, a structural inference algorithm, a substitution pass — and then, notably, two capabilities (generic classes, recursive types) that needed almost no new code of their own once the first three pieces existed in the right shape. That last part is the most interesting design decision in this file. The part of it that lives in the arena, how a declaration gets an id before its members exist, is told in section 2.5 of [arena](arena.md); this document is the semantic story, that one is the implementation story.
 
 ## 1. One new type variant, not a parallel type system
 
@@ -20,18 +20,19 @@ A type parameter's identity is derived from where it is written in the source, n
 
 ```rust
 pub struct TypeParameterId {
+    file_id: FileId,
     declaration_span_start: u32,
     parameter_index: u32,
 }
 ```
 
-Two type parameters — in the same declaration or different ones — can only share a `TypeParameterId` if they are, in fact, the same declared parameter. This is what lets a function's own `T`, an interface's own `T`, and a class's own `T` all be spelled the same without ever being confused with each other: `Box<T>`'s `T` and `identity<T>`'s `T` get different `declaration_span_start`s, so they're different `GenericParameter` nodes even though nothing about their name distinguishes them.
+The `file_id` was added when sessions and file identity landed: two files' parameters at the same byte offset would otherwise be the same id once they share semantic state (see section 4 of [case-study](../case-study.md)). Two type parameters — in the same declaration or different ones — can only share a `TypeParameterId` if they are, in fact, the same declared parameter. This is what lets a function's own `T`, an interface's own `T`, and a class's own `T` all be spelled the same without ever being confused with each other: `Box<T>`'s `T` and `identity<T>`'s `T` get different `declaration_span_start`s, so they're different `GenericParameter` nodes even though nothing about their name distinguishes them.
 
 This replaced an earlier version keyed on the `TSTypeParameter` AST node's raw pointer address. The pointer version worked for the same reason — a stable key across the declare pass and the check pass, which both independently need to agree on the same node for `T` — but tied identity to one process's memory layout rather than to a property of the source text itself. A source-derived key is stable across separate parses of unchanged source; a pointer is only guaranteed stable within the one parse that produced it.
 
 ## 3. Scoping: shadow a name in the flat namespace, not a scope tree
 
-`TypeNamespace` is a single flat map from name to declaration — there's no block or module scoping for types anywhere in this checker (see [architecture.md](architecture.md)). Generic type parameters fit into that same flat model by *temporarily shadowing* a name:
+`TypeNamespace` is a single flat map from name to declaration — there's no block or module scoping for types anywhere in this checker (see [architecture.md](../architecture.md)). Generic type parameters fit into that same flat model by *temporarily shadowing* a name:
 
 ```text
 enter function<T>(...)
@@ -92,13 +93,13 @@ A default (`<T, U = T>`) is resolved with the declaration's own earlier paramete
 
 Generic interfaces (`interface Box<T> { value: T }`) and type aliases (`type Pair<A, B> = { first: A; second: B }`) resolve through exactly the pipeline described in §3–§5: their own `<T, ...>` is pushed as a shadow before their body resolves, the resulting shape is cached with bare `GenericParameter` placeholders still in it, and each reference (`Box<number>`, `Pair<string, boolean>`) substitutes against that one cached generic shape independently — two instantiations of the same generic type stay distinct (`Box<number>` is never confused with `Box<string>`) because substitution allocates a fresh copy per reference rather than mutating the cached shape in place.
 
-**Generic classes needed almost no class-specific code**, because `resolve_class` (the function that walks a class's fields and methods into a structural shape) has no idea classes can be generic at all — it just calls the same `resolve_type_annotation`/`resolve_function_params` helpers every other declaration kind uses, which look names up in the shared namespace. Since the *caller* (`resolve()` in `namespace.rs`) already pushes the class's own `<T, ...>` as a shadow before invoking `resolve_class`, a field typed `value: T` or a method parameter typed `T` resolves correctly with zero changes to `resolve_class` itself. This is covered in full, including the one place this composition initially *didn't* reach (checking constructor/method bodies, a separate pass from declaration resolution), in [architecture.md](architecture.md).
+**Generic classes needed almost no class-specific code**, because `resolve_class` (the function that walks a class's fields and methods into a structural shape) has no idea classes can be generic at all — it just calls the same `resolve_type_annotation`/`resolve_function_params` helpers every other declaration kind uses, which look names up in the shared namespace. Since the *caller* (`resolve()` in `namespace.rs`) already pushes the class's own `<T, ...>` as a shadow before invoking `resolve_class`, a field typed `value: T` or a method parameter typed `T` resolves correctly with zero changes to `resolve_class` itself. The one place this composition initially *didn't* reach was checking constructor and method bodies, which is a separate pass from declaration resolution; section 12 of [case-study](../case-study.md) tells that story.
 
 **Type argument count is checked the same way for every generic kind.** `Box<number, string>` for a single-parameter `Box<T>`, or a bare `Box` reference where `Box<T>` has no default, both go through the same arity check (`declared_type_param_arity`/`declared_type_param_decl` in `namespace.rs`), which reports the required-vs-total parameter counts once per declaration regardless of whether it's an interface, an alias, or a class.
 
 ## 8. Recursive types: interfaces, classes, and (limited) generics together
 
-A self-referencing shape — `interface Node { next: Node | null }`, a linked list; `class Box<T> { next: Box<T> | null }`, a recursive generic class — resolves rather than being rejected as circular. The mechanism (allocate a placeholder object, register it as the name's resolved type *before* members resolve, then fill the placeholder in once they finish) is shared by interfaces, classes, and type-literal aliases alike; it's covered in detail in [architecture.md](architecture.md), since it's really a `namespace.rs` design decision more than a generics-specific one.
+A self-referencing shape — `interface Node { next: Node | null }`, a linked list; `class Box<T> { next: Box<T> | null }`, a recursive generic class — resolves rather than being rejected as circular. The mechanism is shared by interfaces, classes, and object-literal aliases alike: the declaration is a `Ref` to a slot that is handed out *before* its members resolve, and `resolve_ref` gives the slot its body once they finish. The `Ref` itself is never rewritten. An earlier version allocated an empty placeholder object and overwrote it in place; that was replaced on 2026-10-05 (see sections 2.5 and 4 of [arena](arena.md)). It is covered there because it is really an arena and `namespace.rs` design decision more than a generics-specific one.
 
 What's still limited here: this protects *declaration*-level recursion (a type referring to itself by name while resolving). It is not a general coinductive relation checker — two recursive types being compared for subtyping still walk their full structure each time rather than detecting "I've compared these two nodes before" during the comparison itself, which is fine for the depths that show up in realistic code but would eventually need its own guard for a pathological deeply-nested case.
 

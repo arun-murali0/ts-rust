@@ -49,7 +49,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 - [x] Union types
 - [ ] Union reduction / subsumption (beyond flatten + dedupe)
 - [x] Intersection types: `A & B` annotations, flattening, distribution over unions, primitive and literal rules, `{}` dropped next to an object, member access, calls through function members, generic inference and substitution (checked against tsc, `tests/intersection_types.rs`)
-- [~] Intersection reduction: discriminant conflicts reduce to `never` lazily; TS2590 is not reported, and narrowing does not look into intersections
+- [~] Intersection reduction: discriminant conflicts reduce to `never` lazily, and a distribution that is too large is reported as TS2590 (`TSR1701`); narrowing does not look into intersections
 - [ ] `keyof T`
 - [ ] Indexed access `T[K]`
 - [ ] Non-null assertion type effect (`!`) — expression exists; full model `[~]`
@@ -100,7 +100,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 ### 3.3 Call / construct
 - [x] Call signatures (function types)
 - [x] Construct signatures (`new`) — basic
-- [ ] Multiple call signatures (overloads)
+- [~] Multiple call signatures (overloads): only through an intersection of function types, where the first member that accepts the call is used and the failure is TS2554, TS2345 or TS2769 as in tsc; overload declarations are not modelled
 - [ ] Multiple construct signatures
 - [ ] Hybrid types (call + properties)
 
@@ -268,7 +268,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 
 - [ ] Contextual typing of parameters
 - [ ] Contextual typing of return
-- [ ] Contextual typing of object literals
+- [~] Contextual typing of object literals: a property is typed against the declared type it is checked against, so a literal is kept where the declaration holds one (nested objects, array elements and unions of objects included); generic parameters, tuples and spreads are not covered
 - [ ] Contextual typing of array / tuple literals
 - [ ] Contextual typing of JSX (if applicable)
 - [ ] Best common type / candidate unions
@@ -279,11 +279,11 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 
 ## 11. Modules & namespaces (type side)
 
-- [ ] ES module exports (types + values)
-- [ ] ES module imports
-- [ ] `export type` / `import type`
-- [ ] Re-exports
-- [ ] Default export types
+- [~] ES module exports (types + values): interfaces, aliases, functions and constants, annotated or inferred, cross files; classes, enums and overloads are left out and mark the export list incomplete
+- [~] ES module imports: named and default imports bind to the dependency's real exports, and TS2307, TS2305 and TS1192 are reported against a complete export list; bare specifiers are not reported
+- [~] `export type` / `import type`: the type-only flag is read when an import is bound
+- [~] Re-exports: `export { X } from` and `export * from` work; `export * as ns` does not
+- [~] Default export types: a default function, interface or declaration works; default classes, expressions and anonymous defaults do not
 - [ ] Ambient modules (`declare module`)
 - [ ] Wildcard / pattern ambient modules
 - [ ] Namespace merging
@@ -294,7 +294,7 @@ Marks below reflect **ts-rust today** (`[x]` done, `[~]` partial, `[ ]` missing)
 
 ### 11.1 Project graph (resolution layer, `module-resolution` feature)
 
-These are regression-tested in `tests/module_resolution.rs`. They are about finding and ordering files, so they are not part of the tsc diagnostic comparison, and none of them binds a name across files.
+These are regression-tested in `tests/module_resolution.rs`. They are about finding and ordering files, so they are not part of the tsc diagnostic comparison. Binding a name across files is tested separately in `tests/unit_exports.rs`, `tests/unit_imports.rs`, `tests/project_imports.rs` and `tests/import_diagnostics.rs`.
 
 - [x] Extensionless, directory (`index`) and `.js`-to-`.ts` specifiers
 - [x] Package `exports` with the `types` condition, subpath exports and `#imports`
@@ -303,6 +303,7 @@ These are regression-tested in `tests/module_resolution.rs`. They are about find
 - [x] Unresolved imports kept as edges, syntax errors flagged
 - [x] Import cycles (including a file importing itself) and dependency layers
 - [x] Parallel project check with a report for every file, in `FileId` order
+- [x] Each layer's exports reach the files that import it, and the members of a cycle are checked again until their exports settle (at most four rounds)
 - [x] Changed-file detection (fingerprint, then content hash)
 - [x] `FileId` follows path order, whatever order the entries are given in
 - [x] petgraph topology agrees with the graph's own cycle search and orders components dependencies first
@@ -352,7 +353,7 @@ These are regression-tested in `tests/module_resolution.rs`. They are about find
 
 - [x] Core type errors (assignability, arity, constraints)
 - [~] Error recovery without cascades (`Error` type)
-- [ ] Related information / error chains
+- [~] Related information / error chains: a not-assignable error prints tsc's chain of reasons (`src/explain.rs`)
 - [~] Exact `tsc` error codes / messages (wording matches for the strict fixture set)
 - [ ] Suppression (`@ts-ignore` / `@ts-expect-error`)
 - [ ] Suggestion diagnostics
@@ -367,14 +368,15 @@ These are regression-tested in `tests/module_resolution.rs`. They are about find
 | Generics (functions, interfaces, aliases, classes) | High |
 | Classes / structural subtyping | Medium–high |
 | Narrowing | Medium–high (property discriminants, `in`, `instanceof`, joins; no property paths or predicates) |
-| Tuples / intersections / index signatures | Low / none |
+| Intersections | Medium |
+| Tuples / index signatures | None |
 | `keyof` / indexed / mapped / conditional / template | None |
 | Overloads / full contextual typing | None / low |
-| Modules / project / `.d.ts` | Resolution and project graph only (opt-in feature); no cross-file binding |
+| Modules / project / `.d.ts` | Resolution, project graph and cross-file imports and exports of interfaces, aliases, functions and constants (opt-in feature); no classes, enums, overloads, packages or `.d.ts` |
 | Lib utility types | Minimal |
 
 **To “cover all TS types”:** every unchecked item above is in scope.  
-**Practical order:** modules (§11) → mid gaps (tuples, intersections, index, overloads, contextual) → operators (§8) → full flow (§9) → lib (§14).
+**Practical order:** modules (§11) → mid gaps (tuples, index, overloads, contextual) → operators (§8) → full flow (§9) → lib (§14).
 
 ---
 

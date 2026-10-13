@@ -28,22 +28,27 @@ referring to them by a small id, gives us three things:
 pub struct TypeId(u32);
 
 pub struct TypeArena {
-    types: Vec<Type>,          // the source of truth
-    display_names: FxHashMap<TypeId, String>,
-    record_value_types: FxHashMap<TypeId, TypeId>,
-    interned: FxHashMap<u64, TypeId>,
+    types: Vec<Type>,                          // the source of truth
+    decls: Vec<DeclInfo>,                      // the declaration behind every Ref
+    interned: FxHashMap<u64, TypeId>,          // digest of an anonymous composite -> its id
+    collided: FxHashMap<u64, Vec<TypeId>>,     // types that share a digest with an earlier one
     interned_unions: FxHashMap<u64, TypeId>,
+    builtin_slots: FxHashMap<&'static str, DeclSlot>,   // Promise, Record
+    generation: u64,
+    // and three memos: parameter scan, structural equality, empty intersections
 }
 ```
 
 A `TypeId` is an index into `types`. Everything else on the struct is an index or a side
 table that answers a question about ids. `types` is always the authority: if a side
-table and `types` ever disagree, `types` wins.
+table and `types` ever disagree, `types` wins. An earlier version also held a display-name
+table and a table of `Record` value types; both are gone, and section 2.4 says why.
 
 ### 2.2 Shallow types
 
 `Type` is an enum (primitives, `Function`, `Object`, `Array`, `Union`, three literal
-kinds, `GenericParameter`, `Never`, `Void`, `Any`, `Unknown`, `Error`). A composite
+kinds, `GenericParameter`, `Never`, `Void`, `Any`, `Unknown`, `Error`, and the four that
+carry identity or names: `Ref`, `Named`, `App` and `Intersection`). A composite
 stores the `TypeId`s of its parts, never the parts themselves. `Hash` and `Eq` on `Type`
 therefore compare ids, not structure, and never walk the arena.
 
@@ -66,10 +71,12 @@ walks both graphs recursively and caches nothing. The subtype cache, keyed on
 `(TypeId, TypeId)`, could never hit for two identical shapes built separately.
 
 We did this in the arena, and did it early, for a reason beyond speed. Module resolution
-needs a type reached through two import paths to be the same type, and the arena is
-meant to be shared per project rather than per file. Doing deduplication in the arena
-while it was still small was cheaper than doing it after cross-file code depended on ids
-being unique.
+needs a type reached through two import paths to be the same type. The design that
+followed keeps one arena per unit of work and moves declarations between arenas as
+portable data (see [cross-file-types](cross-file-types.md)); an importer rebuilds a
+declaration through the arena's own constructors, so interning applies to what it brings
+in as well. Doing deduplication in the arena while it was still small was cheaper than
+doing it after cross-file code depended on ids being unique.
 
 What is interned:
 
@@ -79,9 +86,40 @@ What is interned:
 | String, Number, Boolean literal | yes | Number literals compare by bit pattern, so `Eq` and `Hash` agree |
 | GenericParameter | yes | Its key includes its declaration identity, so a `T` from one declaration never merges with another |
 | Named, App | yes | An alias or enum name, and a generic applied to arguments; see section 2.4 |
+| Intersection | yes | Only after its canonical form is settled; see [intersections](intersections.md) |
 | Union | yes, own table | Needs flattening and dedup first, see section 2.6 |
 | The ten primitives | no | Fixed slots 0 to 9, allocated once in `new()` |
 | Ref (a declaration) | no | One per declaration, never shared; see section 2.5 |
+
+#### 2.3.1 When two different types share a digest
+
+**Planned.** Phase 5 (section 5) keyed the intern tables on a 64-bit digest and treated a
+digest match as a hint, confirmed against the slot before reuse. If two different types
+ever shared a digest, the second was left out of the table and got a slot of its own on
+every allocation. That cost one missed reuse and could never merge two types that differ,
+so it was judged safe.
+
+**Issue found.** It was safe for equality and wrong for identity. Narrowing compares
+literals by `TypeId`, so it relies on every literal being interned. `FxHasher` is weak on
+short strings that differ in a couple of characters, and `"variant19"` and `"variant92"`
+collide. The second one got a new id on every use, `value.kind === "variant92"` matched no
+member of the union, and the union narrowed to `never`. The checker then reported
+`Property 'payloadNN' does not exist on type 'never'`, which tsc does not. The scale
+benchmark showed it as five diagnostics where one was expected.
+
+**Changed.** The first type to claim a digest stays in `interned`. A later type with the
+same digest goes into `collided`, and a lookup that lands on a collided digest compares
+against each slot under it. Every distinct content has exactly one id again.
+
+**Gained.** The benchmark drops from 5 to 1 diagnostics (the four false `payloadNN`
+errors), and a three-variant regression fixture and arena unit tests hold it. It also
+closed the open question left by intersections (see [intersections](intersections.md)):
+adding the `Intersection` variant had changed an unrelated diagnostic count because the
+variants moved, which exposed this collision. Nothing depends on the order of the `Type`
+variants any more.
+
+**Cost.** A lookup that hits a collided digest scans a handful of ids. Nothing on the path
+of a type that has its digest to itself changed.
 
 ### 2.4 Names live on nodes, not on ids
 
@@ -216,12 +254,17 @@ The instantiation memo in `TypeNamespace` reuses finished generic instantiations
 |---|---|---|
 | 2026-09-16 | Split the checker into feature files | Room to grow |
 | 2026-09-21 | Sorted object types, structural equality | An enum declared out of order failed a structural assignment, and unions kept redundant members |
-| 2026-09-26 | Display-name side table | Diagnostics should print a name, not a shape |
-| 2026-09-26 | Placeholders for recursive types | `interface Node { next: Node }` used to fail with a circular error |
+| 2026-09-26 | Display-name side table | Diagnostics should print a name, not a shape. Replaced on 2026-10-05 |
+| 2026-09-26 | Placeholders for recursive types | `interface Node { next: Node }` used to fail with a circular error. Replaced on 2026-10-05 |
 | 2026-09-27 | `Record<K, V>` resolution | Stopped blocking the containing type |
 | 2026-09-28 | Hash-consing of anonymous composites | One identity per shape, base for cross-file resolution |
 | 2026-09-28 | Fix structural equality on recursive types | Stack overflow on `A \| B` of identical recursive interfaces |
 | 2026-09-28 | Performance phases 1 to 5 | Section 5 |
+| 2026-10-05 | Declarations become `Ref` slots, names move onto `Named` and `App` nodes | Overwriting an empty object in place forced every cache to be emptied, and naming a shared id safely needed `make_unique` and `duplicate_named` |
+| 2026-10-06 | Canonical form of intersections settled before the node exists | A decision that read a body while a declaration was unresolved would bake a wrong answer into the intern table |
+| 2026-10-09 | `Type::Intersection` | See [intersections](intersections.md) |
+| 2026-10-10 | Colliding digests are interned once | The same literal got a new id on every use and narrowing went to `never` (section 2.3.1) |
+| 2026-10-11 | Stable keys and portable declarations | Ids are run-local, and a declaration has to move between arenas to be imported ([cross-file-types](cross-file-types.md)) |
 
 ## 5. Case study: five performance phases
 
@@ -453,6 +496,8 @@ These are the rules the design depends on. Break one and the failure is usually 
    there safe, it just has not been needed. A growth policy for the intern tables is still
    open.
 6. Fast paths in front of a cache must use the same rule as the real check.
+7. Every distinct content has exactly one id. A digest collision goes to `collided`, never
+   to a second slot for the same content (section 2.3.1).
 
 ## 10. Reproducing the measurements
 
@@ -478,8 +523,9 @@ be seen by the next one.
 
 **`clear()` returns to the primitive baseline.** It truncates the type vector to the ten
 fixed primitive slots, so `number()` and the rest return the same ids as in a fresh arena,
-and keeps the vector's allocation. Every side table is cleared with it: display names,
-record value types, both intern tables, the parameter-scan memo and the equality cache.
+and keeps the vector's allocation. Every side table is cleared with it: the
+declaration table, the built-in slots, both intern tables and the collided table, the
+parameter-scan memo, the equality cache and the intersection answers.
 A table that survived would let the next file see a stale name or a stale intern entry,
 which fails silently.
 
