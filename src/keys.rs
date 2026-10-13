@@ -39,26 +39,20 @@ macro_rules! key128 {
 }
 
 key128!(
-    /// Identity of a module, by the rule in LLD 3.1.1. Survives moving the project, because it
-    /// is never built from a `FileId` (a run-local index that changes when a file is added)
-    /// or from the absolute root.
+    /// Identity of a module, by the rule in LLD 3.1.1. Survives moving the project.
     ModuleKey
 );
 key128!(
-    /// Identity of one declaration: its module, local name and merge-group position. A
-    /// reference from one declaration to another carries this key and nothing else (HLD
-    /// ADR-5), so a change to one declaration's shape never reaches another's hash.
+    /// Identity of one declaration: its module, local name and merge-group position.
     DeclKey
 );
 key128!(
     /// Hash of a declaration's own public shape (LLD 3.3). Other declarations appear
-    /// in it by `DeclKey` only, so a body-only edit leaves it unchanged. That is what lets a
-    /// dependent stop re-checking when only a body changed (early cutoff, LLD 6.3).
+    /// in it by `DeclKey` only, so a body-only edit leaves it unchanged.
     SigHash
 );
 key128!(
-    /// Merkle hash of one type node (LLD 3.2). A node's children contribute their own hashes,
-    /// so a shared child is hashed once however many parents hold it.
+    /// Merkle hash of one type node (LLD 3.2).
     NodeHash
 );
 
@@ -107,6 +101,7 @@ const KIND_PROJECT: u8 = 0x01;
 const KIND_PACKAGE: u8 = 0x02;
 const KIND_EXTERNAL: u8 = 0x03;
 const KIND_BUILTIN: u8 = 0x04;
+const KIND_AMBIENT: u8 = 0x05;
 
 impl ModuleKey {
     /// `path` is relative to the project root, with `/` separators.
@@ -129,6 +124,14 @@ impl ModuleKey {
     pub fn external(path: &str) -> Self {
         let mut w = StreamWriter::new();
         w.u8(KIND_EXTERNAL).str(path);
+        Self(w.finish())
+    }
+
+    /// A module that exists only as a `declare module "specifier" { ... }` block: it is
+    /// named by the specifier it answers, wherever the block was written.
+    pub fn ambient(specifier: &str) -> Self {
+        let mut w = StreamWriter::new();
+        w.u8(KIND_AMBIENT).str(specifier);
         Self(w.finish())
     }
 

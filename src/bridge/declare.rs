@@ -30,6 +30,13 @@ pub(super) enum TopLevelItem<'a> {
     Variable(&'a VariableDeclaration<'a>),
     Function(&'a Function<'a>),
     Namespace(&'a TSNamespaceDeclaration<'a>),
+    // `declare module "x" { ... }`: its members are declared in a scope named for `x`.
+    ExternalModule(&'a oxc_ast::ast::TSExternalModuleDeclaration<'a>),
+}
+
+// The scope name of `declare module "x"`: quoted, so no identifier can collide with it.
+pub(super) fn module_scope(specifier: &str) -> String {
+    format!("\"{specifier}\"")
 }
 
 // The block of a `namespace N { ... }` this checker reads: a plain name with a block body.
@@ -57,6 +64,9 @@ pub(super) fn items_in<'a>(statements: &'a [Statement<'a>]) -> Vec<(TopLevelItem
             Statement::VariableDeclaration(d) => items.push((TopLevelItem::Variable(d), false)),
             Statement::FunctionDeclaration(d) => items.push((TopLevelItem::Function(d), false)),
             Statement::TSNamespaceDeclaration(d) => items.push((TopLevelItem::Namespace(d), false)),
+            Statement::TSExternalModuleDeclaration(d) => {
+                items.push((TopLevelItem::ExternalModule(d), false))
+            }
             Statement::ExportDeclaration(export) => match &export.declaration {
                 Declaration::TSTypeAliasDeclaration(d) => {
                     items.push((TopLevelItem::Alias(d), true))
@@ -143,6 +153,13 @@ fn declare_types<'ast>(items: &[(TopLevelItem<'ast>, bool)], ctx: &mut CheckCont
                     ctx.namespace.pop_scope();
                 }
             }
+            TopLevelItem::ExternalModule(module) => {
+                if let Some(body) = &module.body {
+                    ctx.namespace.push_scope(&module_scope(&module.id.value));
+                    declare_types(&items_in(&body.body), ctx);
+                    ctx.namespace.pop_scope();
+                }
+            }
             _ => {}
         }
     }
@@ -178,6 +195,13 @@ fn declare_values<'ast>(
             }
             TopLevelItem::Function(func) => declare_function(func, ctx),
             TopLevelItem::Class(class) => declare_class_constructor(class, ctx),
+            TopLevelItem::ExternalModule(module) => {
+                if let Some(body) = &module.body {
+                    ctx.namespace.push_scope(&module_scope(&module.id.value));
+                    declare_values(&items_in(&body.body), ctx, true);
+                    ctx.namespace.pop_scope();
+                }
+            }
             TopLevelItem::Namespace(ns) => {
                 let Some(block) = namespace_block(ns) else {
                     continue;
@@ -223,7 +247,9 @@ fn declares_value_named(item: &TopLevelItem<'_>, name: &str) -> bool {
             .declarations
             .iter()
             .any(|d| matches!(&d.id, BindingPattern::BindingIdentifier(id) if id.name == name)),
-        TopLevelItem::Alias(_) | TopLevelItem::Interface(_) => false,
+        TopLevelItem::Alias(_) | TopLevelItem::Interface(_) | TopLevelItem::ExternalModule(_) => {
+            false
+        }
     }
 }
 
@@ -271,7 +297,9 @@ fn namespace_value(
                     add(&id.name, id.symbol_id.get())?;
                 }
             }
-            TopLevelItem::Alias(_) | TopLevelItem::Interface(_) => {}
+            TopLevelItem::Alias(_)
+            | TopLevelItem::Interface(_)
+            | TopLevelItem::ExternalModule(_) => {}
         }
     }
     properties.sort_by(|a, b| a.name.cmp(&b.name));

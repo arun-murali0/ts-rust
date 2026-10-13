@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rust::{Diagnostic, FileOutcome, ModuleGraph, ModuleResolver, Severity, check_project};
 
-// An import that cannot be bound says so. A relative specifier no file answers
+// Step 7a: an import that cannot be bound says so. A relative specifier no file answers
 // is TS2307, a name a complete module does not export is TS2305, and a default import of
 // a module with no default is TS1192. Against a module whose export list left something
 // out (a class, `export *`) a missing name may be one we dropped, so nothing is said.
@@ -70,13 +70,81 @@ fn a_relative_import_of_a_missing_file_is_ts2307_at_the_specifier() {
     );
 }
 
+// Whether something above the test directory could answer a package specifier for
+// TypeScript (an `@types` directory, or a config with `paths`), which makes the checker
+// leave package specifiers alone. Tests that expect a report only assert it without one.
+fn something_above_may_answer_package_specifiers(project: &Path) -> bool {
+    project.ancestors().any(|dir| {
+        dir.join("node_modules").join("@types").is_dir()
+            || ["tsconfig.json", "jsconfig.json"].iter().any(|name| {
+                fs::read_to_string(dir.join(name)).is_ok_and(|text| {
+                    [
+                        "\"paths\"",
+                        "\"baseUrl\"",
+                        "\"rootDirs\"",
+                        "\"extends\"",
+                        "\"typeRoots\"",
+                    ]
+                    .iter()
+                    .any(|key| text.contains(key))
+                })
+            })
+    })
+}
+
 #[test]
-fn a_bare_specifier_nothing_resolves_is_not_reported_yet() {
+fn a_package_specifier_nothing_answers_is_ts2307_when_nothing_could_hide_it() {
     let project = run(
         "bare",
         &[("b.ts", "import { X } from 'left-pad'; let y = 1;")],
     );
-    assert!(project.errors("b.ts").is_empty());
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("import-diagnostics-bare");
+    if something_above_may_answer_package_specifiers(&root) {
+        return;
+    }
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2307)], "{:?}", project.errors("b.ts"));
+}
+
+#[test]
+fn a_package_specifier_is_left_alone_when_the_config_has_paths() {
+    // `paths` can map `left-pad` to a file the checker does not read, so it is not called
+    // missing.
+    let project = run(
+        "bare-paths",
+        &[
+            (
+                "tsconfig.json",
+                r#"{ "compilerOptions": { "paths": { "left-pad": ["./x"] } } }"#,
+            ),
+            ("b.ts", "import { X } from 'left-pad'; let y = 1;"),
+        ],
+    );
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_node_builtin_is_never_called_a_missing_module() {
+    let project = run(
+        "builtin",
+        &[(
+            "b.ts",
+            "import { readFileSync } from 'fs'; import 'node:path';",
+        )],
+    );
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
 }
 
 #[test]

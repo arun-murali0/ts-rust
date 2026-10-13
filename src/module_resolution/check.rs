@@ -78,7 +78,25 @@ pub fn check_project(graph: &ModuleGraph) -> ProjectReport {
     let mut exports = ProjectExports::default();
     let in_cycle: std::collections::HashSet<FileId> =
         graph.cycles().into_iter().flatten().collect();
+    // A file that only declares ambient modules is imported by nobody, so no edge puts it
+    // ahead of the files that use what it declares. Those files are checked first.
+    let providers = ambient_providers(graph);
+    if !providers.is_empty() {
+        for (report, unit_exports) in check_files(graph, &exports, &providers) {
+            if let Some(unit_exports) = unit_exports {
+                exports.add(report.file_id, unit_exports);
+            }
+            if !graph.is_dependency_declaration(report.file_id) {
+                files.push(report);
+            }
+        }
+    }
+    exports.bare_reportable = bare_specifiers_are_reportable(graph, &exports);
     for layer in graph.layers() {
+        let layer: Vec<FileId> = layer
+            .into_iter()
+            .filter(|id| !providers.contains(id))
+            .collect();
         let mut done = check_files(graph, &exports, &layer);
         let members: Vec<FileId> = layer
             .iter()
@@ -100,6 +118,133 @@ pub fn check_project(graph: &ModuleGraph) -> ProjectReport {
     }
     files.sort_by_key(|report| report.file_id);
     ProjectReport { files }
+}
+
+// Whether a package specifier that no file answers (`import x from \"react\"`) can be called
+// a missing module. TypeScript also finds one through `paths`, `baseUrl`, `rootDirs` or an
+// `extends`ed config (none of which are read here), through a `declare module` pattern
+// (`\"*.css\"`), and through any `@types` package, whose declarations are global and are
+// not files this project imports. A project with none of those has nothing else to
+// answer it, so the specifier really is missing; with any of them it is left alone.
+fn bare_specifiers_are_reportable(graph: &ModuleGraph, exports: &ProjectExports) -> bool {
+    let Some(root) = graph.root() else {
+        return false;
+    };
+    if exports
+        .ambient
+        .keys()
+        .any(|specifier| specifier.contains('*'))
+    {
+        return false;
+    }
+    for directory in root.ancestors() {
+        if directory.join("node_modules").join("@types").is_dir() {
+            return false;
+        }
+        for name in ["tsconfig.json", "jsconfig.json"] {
+            if let Ok(text) = fs::read_to_string(directory.join(name)) {
+                if [
+                    "\"paths\"",
+                    "\"baseUrl\"",
+                    "\"rootDirs\"",
+                    "\"extends\"",
+                    "\"typeRoots\"",
+                ]
+                .iter()
+                .any(|key| text.contains(key))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+// A specifier that is not a package name to look up: a Node built-in (`fs`, `node:path`),
+// anything with a scheme or an absolute path, and a `#` import of the package's own map.
+fn is_special_specifier(specifier: &str) -> bool {
+    const BUILTINS: &[&str] = &[
+        "assert",
+        "buffer",
+        "child_process",
+        "cluster",
+        "console",
+        "constants",
+        "crypto",
+        "dgram",
+        "dns",
+        "domain",
+        "events",
+        "fs",
+        "http",
+        "http2",
+        "https",
+        "inspector",
+        "module",
+        "net",
+        "os",
+        "path",
+        "perf_hooks",
+        "process",
+        "punycode",
+        "querystring",
+        "readline",
+        "repl",
+        "stream",
+        "string_decoder",
+        "sys",
+        "timers",
+        "tls",
+        "trace_events",
+        "tty",
+        "url",
+        "util",
+        "v8",
+        "vm",
+        "wasi",
+        "worker_threads",
+        "zlib",
+    ];
+    if specifier.contains(':') || specifier.starts_with('/') || specifier.starts_with('#') {
+        return true;
+    }
+    let first = specifier.split('/').next().unwrap_or(specifier);
+    BUILTINS.contains(&first)
+}
+
+// Declaration files that declare ambient modules and nothing else: a `.d.ts` that mentions
+// `declare module "` and has no import or export at the start of a line (the members of a
+// block are indented, so those are not counted). A module file that augments something
+// is not one, since it depends on what it imports.
+fn ambient_providers(graph: &ModuleGraph) -> Vec<FileId> {
+    let mut found = Vec::new();
+    for id in graph.layers().into_iter().flatten() {
+        if !(graph.is_checkable(id) || graph.is_dependency_declaration(id)) {
+            continue;
+        }
+        let Some(path) = graph.files().path(id) else {
+            continue;
+        };
+        let is_declaration = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".d.ts"));
+        if !is_declaration {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(path) else {
+            continue;
+        };
+        let declares = text.contains("declare module \"") || text.contains("declare module '");
+        let is_module = text
+            .lines()
+            .any(|line| line.starts_with("import ") || line.starts_with("export "));
+        if declares && !is_module {
+            found.push(id);
+        }
+    }
+    found
 }
 
 // The most times the members of a cycle are checked again after the first pass.
@@ -189,6 +334,8 @@ struct UnitExports {
     decls: Vec<PortableDecl>,
     // Whether `names` is the module's whole export list (see UnitOutput).
     complete: bool,
+    // The modules the file declares with `declare module "x"`.
+    ambient: Vec<crate::unit::AmbientExports>,
 }
 
 // Everything the checked files export so far: which names each module exports, and the
@@ -199,6 +346,13 @@ struct ProjectExports {
     names: FxHashMap<FileId, Vec<(String, DeclKey)>>,
     complete: FxHashMap<FileId, bool>,
     decls: FxHashMap<DeclKey, Arc<PortableDecl>>,
+    // The modules some file declared with `declare module "x"`, by specifier: their export
+    // names, and whether those are the whole list. A specifier several blocks declare is
+    // their union.
+    ambient: FxHashMap<String, (Vec<(String, DeclKey)>, bool)>,
+    // Whether a package specifier no file answers is certainly a missing module (see
+    // `bare_specifiers_are_reportable`).
+    bare_reportable: bool,
 }
 
 impl ProjectExports {
@@ -207,6 +361,19 @@ impl ProjectExports {
         self.complete.insert(id, unit.complete);
         for decl in unit.decls {
             self.decls.insert(decl.key, Arc::new(decl));
+        }
+        for module in unit.ambient {
+            for decl in module.exports {
+                self.decls.insert(decl.key, Arc::new(decl));
+            }
+            let entry = self
+                .ambient
+                .entry(module.specifier)
+                .or_insert_with(|| (Vec::new(), true));
+            entry.0.extend(module.export_names);
+            entry.0.sort();
+            entry.0.dedup();
+            entry.1 &= module.complete;
         }
     }
 }
@@ -242,12 +409,16 @@ impl DeclProvider for ImportsOf<'_> {
     }
 }
 
-// An import is answered through the edge the graph already resolved for this file and
-// specifier, so a specifier means the same file here as when the graph was built and
-// nothing is resolved during a check. A star re-export never carries `default`, as in the
-// language.
 impl ImportSource for ImportsOf<'_> {
     fn export_all(&self, specifier: &str) -> Vec<(String, DeclKey)> {
+        // A `declare module "x"` answers `x` before any file does, as it does in TypeScript.
+        if let Some((names, _)) = self.exports.ambient.get(specifier) {
+            return names
+                .iter()
+                .filter(|(name, _)| name != "default")
+                .cloned()
+                .collect();
+        }
         let Some(target) = self
             .graph
             .edges(self.from)
@@ -268,6 +439,11 @@ impl ImportSource for ImportsOf<'_> {
     }
 
     fn module_exports(&self, specifier: &str) -> ModuleExports {
+        if let Some((_, complete)) = self.exports.ambient.get(specifier) {
+            return ModuleExports::Known {
+                complete: *complete,
+            };
+        }
         let Some(edge) = self
             .graph
             .edges(self.from)
@@ -277,7 +453,15 @@ impl ImportSource for ImportsOf<'_> {
             return ModuleExports::Unknown;
         };
         let Some(target) = edge.target else {
-            return ModuleExports::Unresolved;
+            // A relative specifier no file answers is missing. A package specifier is only
+            // known to be missing when the project's configuration cannot be hiding it.
+            let relative = specifier.starts_with('.');
+            return if relative || (self.exports.bare_reportable && !is_special_specifier(specifier))
+            {
+                ModuleExports::Unresolved
+            } else {
+                ModuleExports::Unknown
+            };
         };
         match self.exports.complete.get(&target) {
             Some(complete) => ModuleExports::Known {
@@ -288,6 +472,13 @@ impl ImportSource for ImportsOf<'_> {
     }
 
     fn export_keys(&self, specifier: &str, name: &str) -> Vec<DeclKey> {
+        if let Some((names, _)) = self.exports.ambient.get(specifier) {
+            return names
+                .iter()
+                .filter(|(exported, _)| exported == name)
+                .map(|(_, key)| *key)
+                .collect();
+        }
         let Some(target) = self
             .graph
             .edges(self.from)
@@ -343,6 +534,7 @@ fn check_file(
                             names: output.export_names,
                             decls: output.exports,
                             complete: output.exports_complete,
+                            ambient: output.ambient,
                         });
                         FileOutcome::Checked(output.diagnostics)
                     }
