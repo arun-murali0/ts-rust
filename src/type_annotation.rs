@@ -96,8 +96,12 @@ pub fn resolve_ts_type(
         TSType::TSLiteralType(literal) => resolve_literal_type(&literal.literal, arena),
 
         TSType::TSTypeReference(reference) => {
-            let TSTypeName::IdentifierReference(id) = &reference.type_name else {
-                return None;
+            // `N.I` is looked up under its dotted name, which is how a declaration inside
+            // `namespace N` is registered. Anything deeper than a plain dotted path of
+            // identifiers (`this.x`) is not a type name this resolves.
+            let dotted = dotted_type_name(&reference.type_name)?;
+            let id = DottedName {
+                name: dotted.as_str(),
             };
 
             // A handful of TypeScript's own built-in generics aren't declared
@@ -105,15 +109,14 @@ pub fn resolve_ts_type(
             // Only consulted when the namespace doesn't already claim the name,
             // so an unusual user-defined `interface Array { ... }` is never
             // shadowed by this.
-            if !namespace.contains(&id.name) {
-                if let Some(builtin) =
-                    resolve_builtin_generic(&id.name, reference, namespace, arena)
+            if !namespace.contains(id.name) {
+                if let Some(builtin) = resolve_builtin_generic(id.name, reference, namespace, arena)
                 {
                     return Some(builtin);
                 }
             }
 
-            let base = match namespace.resolve(&id.name, arena) {
+            let base = match namespace.resolve(id.name, arena) {
                 Resolution::Resolved(type_id) => type_id,
                 Resolution::Circular | Resolution::NotFound => return None,
             };
@@ -127,10 +130,10 @@ pub fn resolve_ts_type(
                 .type_arguments
                 .as_ref()
                 .map_or(0, |arguments| arguments.params.len());
-            let arity = namespace.declared_type_param_arity(&id.name);
+            let arity = namespace.declared_type_param_arity(id.name);
             if let Some((required, total)) = arity {
                 if given < required || given > total {
-                    namespace.note_type_argument_issue(&id.name, required, total, reference.span);
+                    namespace.note_type_argument_issue(id.name, required, total, reference.span);
                 }
             }
 
@@ -139,8 +142,8 @@ pub fn resolve_ts_type(
             // A generic imported from another file has no AST: its parameters come
             // from the import record instead (see TypeNamespace::insert_imported), and
             // everything after the bindings is shared with a local declaration.
-            let imported = namespace.imported_generic(&id.name);
-            let decl = namespace.declared_type_param_decl(&id.name);
+            let imported = namespace.imported_generic(id.name);
+            let decl = namespace.declared_type_param_decl(id.name);
             if imported.is_none() && decl.is_none() {
                 return Some(base);
             }
@@ -265,7 +268,7 @@ pub fn resolve_ts_type(
                 // Each argument prints in its own current spelling when the
                 // application is displayed, so `Box<Dog>` says `Box<Dog>` whether Dog
                 // had its name yet when this was built or not.
-                let slot = arena.alloc_name(id.name.as_str());
+                let slot = arena.alloc_name(id.name);
                 let arguments = bindings.iter().map(|&(_, bound)| bound).collect();
                 let application = arena.alloc_app(slot, arguments, result);
 
@@ -319,7 +322,7 @@ fn check_type_argument_constraint(
 }
 
 // TypeScript's own built-in generics that this checker gives at least a
-// partial, honest representation rather than leaving totally unresolvable,
+// partial, honest representation rather than leaving totally unresolvable --
 // which, before Void got the same treatment, could take an entire enclosing
 // interface or function down with it through a single `?`.
 //
@@ -328,14 +331,14 @@ fn check_type_argument_constraint(
 // their own argument the same way `T[]` does. tsc actually requires the
 // argument here (TS2314) rather than defaulting a bare `Array` to
 // `Array<any>`, so a missing argument is treated the same as an unresolvable
-// one; this checker doesn't raise its own arity diagnostic for a built-in
+// one -- this checker doesn't raise its own arity diagnostic for a built-in
 // (only for a user's own generic), but it won't silently invent `any` either.
 //
 // `Promise<T>` has no await/`.then()` modeling at all yet, so it resolves to
 // an opaque, empty, named object: honest about what isn't checked (member
 // access on it correctly reports "does not exist") without blocking
 // everything around it. Unlike Array, a bad argument doesn't fail the whole
-// type here; nothing structurally depends on it being right, since nothing
+// type here -- nothing structurally depends on it being right, since nothing
 // looks inside a Promise anyway, so it's treated the same lenient way an
 // unresolvable explicit argument is treated for a user-defined generic
 // elsewhere in this file.
@@ -343,8 +346,8 @@ fn check_type_argument_constraint(
 // `Record<K, V>` gets the same opaque-object treatment as Promise, plus one
 // more thing Promise doesn't need: its value type V is recorded on the
 // application (see TypeArena::record_value_type) so a later property access
-// can return V instead of "does not exist". This does not model K at all:
-// any key is accepted, not just ones K would allow, so it under-checks
+// can return V instead of "does not exist". This does not model K at all --
+// any key is accepted, not just ones K would allow -- so it under-checks
 // rather than risking a false positive on a key it can't classify. `Partial`
 // and other mapped types need real mapped-type support this checker doesn't
 // have yet, and are deliberately left alone; a plain `Partial<T>` still
@@ -408,8 +411,6 @@ fn resolve_builtin_generic(
     }
 }
 
-// None for a literal type this checker does not model (a bigint, a template literal), which
-// leaves the annotation unresolved, so the declaration is not declared with a guessed type.
 fn resolve_literal_type(
     literal: &oxc_ast::ast::TSLiteral,
     arena: &mut TypeArena,
@@ -424,8 +425,6 @@ fn resolve_literal_type(
     }
 }
 
-// None as soon as one parameter has no annotation or does not resolve, so the whole
-// signature is unresolvable and a caller never holds one that is partly invented.
 pub fn resolve_function_params(
     params: &FormalParameters,
     namespace: &mut TypeNamespace,
@@ -488,7 +487,7 @@ fn optional_flags(params: &FormalParameters) -> Vec<bool> {
     flags
 }
 
-// None for a destructured pattern, which has no single name, treated as
+// None for a destructured pattern, which has no single name -- treated as
 // unnamed rather than guessed.
 pub(crate) fn binding_name(pattern: &BindingPattern) -> Option<std::rc::Rc<str>> {
     match pattern {
@@ -498,9 +497,6 @@ pub(crate) fn binding_name(pattern: &BindingPattern) -> Option<std::rc::Rc<str>>
     }
 }
 
-// The lenient form, for a function whose body is going to be checked: a parameter with no
-// annotation, or one that does not resolve, is `any` (a rest parameter `any[]`), so the
-// body is still checked instead of the whole function being given up on.
 pub fn resolve_params_with_any_fallback(
     params: &FormalParameters,
     namespace: &mut TypeNamespace,
@@ -647,4 +643,21 @@ fn resolve_method_signature(
         optional: method.optional,
         is_method: true,
     })
+}
+
+struct DottedName<'n> {
+    name: &'n str,
+}
+
+// `A.B.C` as one string, or None for a name that is not a plain dotted path.
+fn dotted_type_name(name: &TSTypeName) -> Option<String> {
+    match name {
+        TSTypeName::IdentifierReference(id) => Some(id.name.to_string()),
+        TSTypeName::QualifiedName(qualified) => Some(format!(
+            "{}.{}",
+            dotted_type_name(&qualified.left)?,
+            qualified.right.name
+        )),
+        _ => None,
+    }
 }

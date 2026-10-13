@@ -1,4 +1,4 @@
-// Binding the names an `import` declaration brings in.
+// Step 6b: binding the names an `import` declaration brings in.
 //
 // Runs at the start of the declare pass, before the file's own declarations, so every
 // later phase sees an imported name as it sees a local one: a type name resolves in the
@@ -186,13 +186,27 @@ fn bind_namespace_object<'ast>(
     specifier: &str,
     local: &oxc_ast::ast::BindingIdentifier<'_>,
 ) {
+    let provider: &dyn DeclProvider = source;
+    // The types the module exports are named `ns.Type`. A type that is there is right
+    // whether or not the list is whole, so this does not wait for the module to be complete.
+    for (name, key) in source.export_all(specifier) {
+        let Some(decl) = provider.decl(key) else {
+            continue;
+        };
+        if matches!(
+            decl.kind,
+            DeclKind::Interface | DeclKind::Class | DeclKind::Alias | DeclKind::Enum
+        ) {
+            let qualified = format!("{}.{name}", local.name);
+            bind_key_as(ctx, source, key, &qualified, None, false);
+        }
+    }
     if source.module_exports(specifier) != (ModuleExports::Known { complete: true }) {
         return;
     }
     let Some(symbol_id) = local.symbol_id.get() else {
         return;
     };
-    let provider: &dyn DeclProvider = source;
     let mut properties: Vec<PropertyEntry> = Vec::new();
     for (name, key) in source.export_all(specifier) {
         let Some(decl) = provider.decl(key) else {
@@ -239,6 +253,14 @@ fn bind_name<'ast>(
     for key in source.export_keys(specifier, imported) {
         bind_key(ctx, source, key, local, type_only);
     }
+    // `import { N }` also brings the types written inside `namespace N`, so `N.I` resolves.
+    let prefix = format!("{imported}.");
+    for (name, key) in source.export_all(specifier) {
+        if let Some(rest) = name.strip_prefix(&prefix) {
+            let qualified = format!("{}.{rest}", local.name);
+            bind_key_as(ctx, source, key, &qualified, None, type_only);
+        }
+    }
 }
 
 fn bind_key<'ast>(
@@ -246,6 +268,26 @@ fn bind_key<'ast>(
     source: &dyn ImportSource,
     key: DeclKey,
     local: &oxc_ast::ast::BindingIdentifier<'_>,
+    type_only: bool,
+) {
+    bind_key_as(
+        ctx,
+        source,
+        key,
+        &local.name,
+        local.symbol_id.get(),
+        type_only,
+    );
+}
+
+// Binds the declaration under `key` to `name`, with `symbol` as the value's symbol when it
+// has one (a qualified name like `ns.User` has a type and no symbol).
+fn bind_key_as<'ast>(
+    ctx: &mut CheckContext<'ast, '_>,
+    source: &dyn ImportSource,
+    key: DeclKey,
+    name: &str,
+    symbol: Option<oxc_semantic::SymbolId>,
     type_only: bool,
 ) {
     let provider: &dyn DeclProvider = source;
@@ -256,7 +298,7 @@ fn bind_key<'ast>(
     // (`import { X } from "./a"; export { X }`) still finds the declaration.
     if !(type_only && matches!(decl.kind, DeclKind::Function | DeclKind::Var)) {
         ctx.imported_names
-            .entry(local.name.to_string())
+            .entry(name.to_string())
             .or_default()
             .push(key);
     }
@@ -271,14 +313,14 @@ fn bind_key<'ast>(
                 .importer
                 .generic_params(&mut ctx.arena, provider, key)
                 .unwrap_or_default();
-            ctx.namespace.insert_imported(&local.name, type_id, params);
+            ctx.namespace.insert_imported(name, type_id, params);
         }
         // `import type { f }` brings in no value, only the right to name types.
         DeclKind::Function | DeclKind::Var if !type_only => {
             let Some(type_id) = ctx.importer.import_decl(&mut ctx.arena, provider, key) else {
                 return;
             };
-            if let Some(symbol_id) = local.symbol_id.get() {
+            if let Some(symbol_id) = symbol {
                 ctx.symbols.declare(symbol_id, type_id);
             }
         }
@@ -290,9 +332,9 @@ fn bind_key<'ast>(
                 return;
             };
             ctx.namespace
-                .insert_imported(&local.name, type_position, Vec::new());
+                .insert_imported(name, type_position, Vec::new());
             if !type_only {
-                if let Some(symbol_id) = local.symbol_id.get() {
+                if let Some(symbol_id) = symbol {
                     ctx.symbols.declare(symbol_id, value_type);
                 }
             }

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use ts_rust::{Diagnostic, FileOutcome, ModuleGraph, ModuleResolver, Severity, check_project};
 
-// check_project passes what each file exports to the files that import it.
+// Step 6c: check_project passes what each file exports to the files that import it.
 // Every test writes a small project into its own directory under the target tree, builds
 // the graph with a root (so files get stable keys) and checks it, which is the path the
 // command line takes.
@@ -361,7 +361,7 @@ fn a_file_with_a_syntax_error_does_not_stop_its_importers() {
     ));
 }
 
-// An exported declaration may name one that is not exported. The hidden one
+// Step 7b: an exported declaration may name one that is not exported. The hidden one
 // leaves the file under its own key, so the exporter is complete and its signature
 // crosses files with the hidden type intact.
 #[test]
@@ -423,7 +423,7 @@ fn a_hidden_declaration_cannot_be_imported_by_name() {
     assert_eq!(errors[0].code.tsc_code(), Some(2305));
 }
 
-// Across files: an inferred export is used as if it had been annotated.
+// Step 7c across files: an inferred export is used as if it had been annotated.
 #[test]
 fn an_inferred_export_crosses_files() {
     let project = run(
@@ -465,7 +465,7 @@ fn a_correct_use_of_an_inferred_export_is_clean() {
     assert!(project.errors("b.ts").is_empty());
 }
 
-// `export * from` re-exports what the other module exports, under the
+// Step 7 (export *): `export * from` re-exports what the other module exports, under the
 // keys it already has, except `default`.
 #[test]
 fn a_star_re_export_carries_the_other_modules_exports() {
@@ -587,7 +587,7 @@ fn a_star_re_export_of_a_missing_file_is_ts2307() {
     assert_eq!(codes, vec![Some(2307)]);
 }
 
-// The members of a cycle see what each other exports.
+// Step 7e: the members of a cycle see what each other exports.
 #[test]
 fn members_of_a_cycle_use_each_others_exports() {
     let project = run(
@@ -659,7 +659,7 @@ fn a_file_that_imports_a_cycle_sees_the_settled_exports() {
     assert_eq!(project.errors("c.ts").len(), 1);
 }
 
-// The report says which declarations of other files a file's check read, which
+// Step 7g: the report says which declarations of other files a file's check read, which
 // is what an incremental run needs to know a file does not depend on a change.
 fn reads_of(project: &Checked, file: &str) -> Vec<ts_rust::DeclKey> {
     for report in &project.report.files {
@@ -1313,6 +1313,249 @@ fn an_export_equals_module_still_never_reports_a_missing_name() {
     );
     assert!(
         project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+// Namespaces across files: the value is an object of the exported members, and the types
+// written inside it are named `N.I` in the file that imports `N`.
+#[test]
+fn a_namespace_crosses_files_as_a_value_and_as_types() {
+    let project = run(
+        "namespace-basic",
+        &[
+            (
+                "a.ts",
+                "export namespace N {\n  export interface P { x: number }\n  export function make(): P { return { x: 1 } }\n  export const label: string = 'n';\n}",
+            ),
+            (
+                "b.ts",
+                "import { N } from './a';\nconst ok: N.P = N.make();\nconst bad: N.P = { x: 'a' };\nconst s: number = N.label;",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Some(2322), Some(2322)],
+        "{:?}",
+        project.errors("b.ts")
+    );
+    assert!(
+        project.errors("a.ts").is_empty(),
+        "{:?}",
+        project.errors("a.ts")
+    );
+}
+
+#[test]
+fn an_aliased_import_of_a_namespace_renames_its_types_too() {
+    let project = run(
+        "namespace-alias",
+        &[
+            (
+                "a.ts",
+                "export namespace N { export interface P { x: number } }",
+            ),
+            (
+                "b.ts",
+                "import { N as M } from './a';\nconst bad: M.P = { x: 'a' };",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_namespace_is_re_exported_with_its_types() {
+    let project = run(
+        "namespace-barrel",
+        &[
+            (
+                "a.ts",
+                "export namespace N { export interface P { x: number } export const k: number = 1; }",
+            ),
+            ("one.ts", "export { N } from './a';"),
+            ("two.ts", "export * from './one';"),
+            (
+                "b.ts",
+                "import { N } from './two';\nconst bad: N.P = { x: 'a' };\nconst s: string = N.k;",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        2,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn an_imported_namespace_passed_on_by_the_importing_file_keeps_its_types() {
+    let project = run(
+        "namespace-pass-on",
+        &[
+            (
+                "a.ts",
+                "export namespace N { export interface P { x: number } }",
+            ),
+            ("one.ts", "import { N } from './a';\nexport { N };"),
+            (
+                "b.ts",
+                "import { N } from './one';\nconst bad: N.P = { x: 'a' };",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_namespace_import_names_the_modules_types_with_the_namespace_prefix() {
+    let project = run(
+        "star-as-types",
+        &[
+            (
+                "a.ts",
+                "export interface User { name: string }\nexport function f(): number { return 1 }",
+            ),
+            (
+                "b.ts",
+                "import * as ns from './a';\nconst ok: ns.User = { name: 'a' };\nconst bad: ns.User = { name: 1 };",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_namespace_import_of_a_partial_module_still_names_its_types() {
+    // The module has a namespace the checker cannot finish (an unannotated member), so its
+    // value object is not built, but a type it does export is still `ns.User`.
+    let project = run(
+        "star-as-types-partial",
+        &[
+            (
+                "a.ts",
+                "export interface User { name: string }\nexport namespace N { export const x = 1; }",
+            ),
+            (
+                "b.ts",
+                "import * as ns from './a';\nconst bad: ns.User = { name: 1 };\nns.anything;",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2322)], "{:?}", project.errors("b.ts"));
+}
+
+#[test]
+fn a_nested_namespace_is_named_with_the_whole_path() {
+    let project = run(
+        "namespace-nested",
+        &[
+            (
+                "a.ts",
+                "export namespace A { export namespace B { export interface T { n: number } } }",
+            ),
+            (
+                "b.ts",
+                "import { A } from './a';\nconst bad: A.B.T = { n: 'x' };",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn an_exported_function_can_name_a_type_inside_an_unexported_namespace() {
+    let project = run(
+        "namespace-hidden",
+        &[
+            (
+                "a.ts",
+                "namespace Hidden { export interface P { x: number } }\nexport function f(p: Hidden.P): number { return p.x }",
+            ),
+            ("b.ts", "import { f } from './a';\nf({ x: 'a' });"),
+        ],
+    );
+    assert!(
+        project.errors("a.ts").is_empty(),
+        "{:?}",
+        project.errors("a.ts")
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        1,
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_namespace_does_not_make_the_exporter_partial() {
+    let project = run(
+        "namespace-complete",
+        &[
+            ("a.ts", "export namespace N { export const k: number = 1; }"),
+            ("b.ts", "import { Nope } from './a';"),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2305)], "{:?}", project.errors("b.ts"));
+}
+
+#[test]
+fn a_local_namespace_exported_under_another_name_takes_its_types_with_it() {
+    let project = run(
+        "namespace-braces",
+        &[
+            (
+                "a.ts",
+                "namespace Geo { export interface Point { x: number } export const k: number = 1; }\nexport { Geo as Maps };",
+            ),
+            (
+                "b.ts",
+                "import { Maps } from './a';\nconst bad: Maps.Point = { x: 'a' };\nconst s: string = Maps.k;",
+            ),
+        ],
+    );
+    assert_eq!(
+        project.errors("b.ts").len(),
+        2,
         "{:?}",
         project.errors("b.ts")
     );

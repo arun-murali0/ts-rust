@@ -265,3 +265,63 @@ fn a_package_that_uses_export_equals_binds_nothing_and_reports_nothing() {
         project.errors("b.ts")
     );
 }
+
+#[test]
+fn a_declare_namespace_in_a_package_types_its_members() {
+    let project = run(
+        "dts-namespace",
+        &[
+            ("node_modules/left-pad/package.json", MANIFEST),
+            (
+                "node_modules/left-pad/index.d.ts",
+                "export declare namespace Pad {\n  function left(s: string, n: number): string;\n  interface Options { width: number }\n  const VERSION: string;\n}",
+            ),
+            (
+                "b.ts",
+                "import { Pad } from 'left-pad';\nconst a: number = Pad.left('x', 1);\nconst o: Pad.Options = { width: 'x' };\nconst ok: string = Pad.VERSION;",
+            ),
+        ],
+        &["b.ts"],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Some(2322), Some(2322)],
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+#[test]
+fn a_declared_namespace_in_a_package_types_its_values_and_its_types() {
+    let project = run(
+        "dts-namespace",
+        &[
+            ("node_modules/left-pad/package.json", MANIFEST),
+            (
+                "node_modules/left-pad/index.d.ts",
+                "export declare namespace Lib {\n  function parse(s: string): number;\n  const VERSION: string;\n  interface Opts { strict: boolean }\n}",
+            ),
+            (
+                "b.ts",
+                "import { Lib } from 'left-pad';\nconst n: string = Lib.parse('1');\nconst o: Lib.Opts = { strict: 1 };\nconst ok: number = Lib.parse('2');",
+            ),
+        ],
+        &["b.ts"],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Some(2322), Some(2322)],
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
