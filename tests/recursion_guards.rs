@@ -133,3 +133,40 @@ fn very_long_operator_chain_does_not_overflow_a_worker_stack() {
         "the run must finish normally, got {status:?}"
     );
 }
+
+// Problem: asking whether a type mentions a type parameter walked every path through
+// classes that refer to each other, and a node cut short by a cycle was never
+// remembered, so the work grew with the number of paths: 2^n and worse. TypeScript's
+// resolvingClassDeclarationWhenInBaseTypeResolution (about 50 generic classes across
+// namespaces) never finished. Inference over the same types had the same shape: it
+// forgot a pair as soon as its match finished, so each route to it matched it again.
+// Here 24 plain classes each point at the next 5, and one call uses the first. See
+// scan_for_type_param and SeenPairs in semantic/generics.rs; both have to be fixed
+// for this to finish. The check runs on its own thread so a regression fails this
+// test after a timeout instead of freezing the whole suite.
+#[test]
+fn classes_that_refer_to_each_other_do_not_blow_up_the_parameter_scan() {
+    const CLASSES: usize = 24;
+    let mut source = String::new();
+    for i in 0..CLASSES {
+        source.push_str(&format!("class C{i} {{\n"));
+        for step in 1..=5 {
+            source.push_str(&format!("  p{step}!: C{};\n", (i + step) % CLASSES));
+        }
+        source.push_str("}\n");
+    }
+    source.push_str("declare function use(c: C0): void;\ndeclare const c0: C0;\nuse(c0);\n");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let diagnostics = check(&source, "mutually_referring_classes.ts");
+        let _ = sender.send(diagnostics);
+    });
+    let diagnostics = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the parameter scan did not finish: its cost is growing with the number of paths");
+    assert!(
+        diagnostics.is_empty(),
+        "valid code must not gain errors: {diagnostics:?}"
+    );
+}
