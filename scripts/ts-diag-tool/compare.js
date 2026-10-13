@@ -63,7 +63,17 @@
 // threads (RAYON_NUM_THREADS); tsc is single-threaded, so --threads 1 is the like-for-like
 // figure and the default (every core) is what a user gets.
 //
-// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache] [--module] [--runs N] [--threads N]
+// --flat runs ts-rust with its own --flat option: every file is checked on its own, with no
+// module graph, which is how tsc's test suite works (each case is its own Program, and
+// hundreds of cases declare the same global names). Without it ts-rust builds the module
+// graph over the whole directory, and on a directory of thousands of unrelated scripts that
+// run can take far longer than the same files in chunks. Use --flat for the TypeScript
+// repo's tests/cases and leave it off for projects whose files import each other.
+//
+// --timeout S stops a ts-rust or tsc child that has run for S seconds and reports it, so
+// one hang names itself instead of freezing the whole comparison. The default is no limit.
+//
+// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache] [--module] [--flat] [--runs N] [--threads N] [--timeout S]
 
 const fs = require("fs");
 const os = require("os");
@@ -80,7 +90,7 @@ const Table = require("cli-table3");
 
 const args = process.argv.slice(2);
 // Flags that take a value: the value follows the flag and is not a target or a binary.
-const VALUE_FLAGS = ["--runs", "--threads"];
+const VALUE_FLAGS = ["--runs", "--threads", "--timeout"];
 const positional = args.filter(
   (a, i) => !a.startsWith("--") && !VALUE_FLAGS.includes(args[i - 1]),
 );
@@ -105,11 +115,15 @@ const noCache = args.includes("--no-cache");
 const moduleMode = args.includes("--module");
 const runs = intFlag("--runs") ?? (moduleMode ? 5 : 1);
 const threads = intFlag("--threads");
+// ts-rust checks each file alone, with no module graph (see the doc comment above).
+const flatMode = args.includes("--flat");
+// Seconds before a child process is stopped; null means no limit.
+const timeoutSeconds = intFlag("--timeout");
 
 const [target, tsRustBin] = positional;
 if (!target || !tsRustBin) {
   console.error(
-    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache] [--module] [--runs N] [--threads N]",
+    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache] [--module] [--flat] [--runs N] [--threads N] [--timeout S]",
   );
   process.exit(2);
 }
@@ -227,6 +241,8 @@ function spawnMeasured(cmd, wrapper, env) {
     encoding: "utf8",
     maxBuffer: 1 << 30,
     env: { ...process.env, ...env },
+    // spawnSync kills the child with SIGTERM when this passes; undefined means no limit.
+    timeout: timeoutSeconds ? timeoutSeconds * 1000 : undefined,
   });
   res.outerMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
   return res;
@@ -265,9 +281,26 @@ function runMeasured(cmd, { measure, label, env }) {
     res = spawnMeasured(cmd, null, env);
     wallMs = res.outerMs;
   }
+  // A hang or a crash is told apart from "no output" so the report says what happened
+  // instead of "exited with status null". The measuring wrapper, when there is one, is the
+  // process that was stopped, which takes the program down with it.
+  if (res.error && res.error.code === "ETIMEDOUT") {
+    console.error(
+      `error: ${label} did not finish within ${timeoutSeconds} s and was stopped. ` +
+        `A hang like this usually comes from one file or from the files being checked together; ` +
+        `try a smaller directory, or --flat to check each file on its own.`,
+    );
+    process.exit(2);
+  }
   if (res.error) {
     console.error(
       `error: failed to run ${label} (${cmd[0]}): ${res.error.message}`,
+    );
+    process.exit(2);
+  }
+  if (res.signal) {
+    console.error(
+      `error: ${label} was killed by ${res.signal} (a stack overflow or an abort looks like this)`,
     );
     process.exit(2);
   }
@@ -283,12 +316,16 @@ function runMeasured(cmd, { measure, label, env }) {
 }
 
 function runTsRust(extraArgs, { measure }) {
-  return runMeasured([tsRustBin, "--project", tsconfigPath, ...extraArgs], {
-    measure,
-    label: "the ts-rust binary",
-    // rayon reads this; without it ts-rust uses every core.
-    env: threads ? { RAYON_NUM_THREADS: String(threads) } : undefined,
-  });
+  const flatArgs = flatMode ? ["--flat"] : [];
+  return runMeasured(
+    [tsRustBin, "--project", tsconfigPath, ...flatArgs, ...extraArgs],
+    {
+      measure,
+      label: "the ts-rust binary",
+      // rayon reads this; without it ts-rust uses every core.
+      env: threads ? { RAYON_NUM_THREADS: String(threads) } : undefined,
+    },
+  );
 }
 
 // Same run twice, because ts-rust prints one code per diagnostic: its own TSR#### by default,
@@ -830,8 +867,7 @@ const performance = {
 
 function printPerformance() {
   const p = performance;
-  const rustMem =
-    p.tsRust.maxRssKb !== null ? fmtKb(p.tsRust.maxRssKb) : "n/a";
+  const rustMem = p.tsRust.maxRssKb !== null ? fmtKb(p.tsRust.maxRssKb) : "n/a";
   const tscMem =
     p.tsc.maxRssKb !== null
       ? fmtKb(p.tsc.maxRssKb) + (p.tsc.memoryMeasuredThisRun ? "" : " *")
@@ -856,7 +892,9 @@ function printPerformance() {
   if (p.timesFaster && tscTime !== "n/a")
     log(
       `  ts-rust is ~${p.timesFaster.toLocaleString("en-US")}x faster` +
-        (p.timesLessMemory ? ` and uses ~${p.timesLessMemory}x less memory` : "") +
+        (p.timesLessMemory
+          ? ` and uses ~${p.timesLessMemory}x less memory`
+          : "") +
         " than tsc",
     );
   log(
@@ -963,7 +1001,8 @@ log(
 log(
   `  ${v["FALSE POSITIVE"]} FALSE POSITIVE  (ts-rust reports an error tsc does not)`,
 );
-if (v.MIXED > 0) log(`  ${v.MIXED} MIXED           (both of the above in one file)`);
+if (v.MIXED > 0)
+  log(`  ${v.MIXED} MIXED           (both of the above in one file)`);
 log(
   `${totalAgree} of ${files.length} file(s) agree with tsc on which lines have errors (errors-only, ${totalDiffer} differ); ` +
     `${exactLines} of ${comparedLines} line(s) are exact`,
