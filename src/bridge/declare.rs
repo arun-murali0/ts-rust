@@ -1,7 +1,8 @@
 use oxc_ast::ast::{
     BinaryOperator, BindingPattern, Class, Declaration, ExportDefaultDeclarationKind, Expression,
-    Function, Program, Statement, TSEnumDeclaration, TSInterfaceDeclaration,
-    TSTypeAliasDeclaration, UnaryOperator, VariableDeclaration,
+    Function, Program, Statement, TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock,
+    TSNamespaceDeclaration, TSNamespaceDeclarationBody, TSTypeAliasDeclaration, UnaryOperator,
+    VariableDeclaration,
 };
 
 use crate::type_annotation::{resolve_function_params, resolve_type_annotation};
@@ -21,48 +22,70 @@ use super::context::CheckContext;
 // Cost: a list of references is built per pass; `export { a, b }` and
 // `export * from` declare nothing and are skipped, which is correct for one file.
 #[derive(Clone, Copy)]
-enum TopLevelItem<'a> {
+pub(super) enum TopLevelItem<'a> {
     Alias(&'a TSTypeAliasDeclaration<'a>),
     Interface(&'a TSInterfaceDeclaration<'a>),
     Class(&'a Class<'a>),
     Enum(&'a TSEnumDeclaration<'a>),
     Variable(&'a VariableDeclaration<'a>),
     Function(&'a Function<'a>),
+    Namespace(&'a TSNamespaceDeclaration<'a>),
 }
 
-// The declarations the declare pass registers, in source order. `export` and
-// `export default` wrap the same declaration, so they are looked through here and the
-// rest of the pass sees an exported declaration as it sees a local one; what a file
-// exports is read back out later, in exports.rs. Anything else at the top level (an
-// expression as the default export, `export { a }`) declares nothing.
-fn top_level_items<'a>(program: &'a Program<'a>) -> Vec<TopLevelItem<'a>> {
+// The block of a `namespace N { ... }` this checker reads: a plain name with a block body.
+// `namespace A.B { ... }` (a dotted name) is not one, and neither is `declare module "x"`
+// or `declare global`, so those stay what they were: unchecked and silent.
+pub(super) fn namespace_block<'a>(
+    ns: &'a TSNamespaceDeclaration<'a>,
+) -> Option<&'a TSModuleBlock<'a>> {
+    match &ns.body {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => Some(block),
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => None,
+    }
+}
+
+// Every declaration in a statement list, each with whether it is exported. A namespace's
+// members are read through the same list, so it means the same inside and outside one.
+pub(super) fn items_in<'a>(statements: &'a [Statement<'a>]) -> Vec<(TopLevelItem<'a>, bool)> {
     let mut items = Vec::new();
-    for stmt in &program.body {
+    for stmt in statements {
         match stmt {
-            Statement::TSTypeAliasDeclaration(d) => items.push(TopLevelItem::Alias(d)),
-            Statement::TSInterfaceDeclaration(d) => items.push(TopLevelItem::Interface(d)),
-            Statement::ClassDeclaration(d) => items.push(TopLevelItem::Class(d)),
-            Statement::TSEnumDeclaration(d) => items.push(TopLevelItem::Enum(d)),
-            Statement::VariableDeclaration(d) => items.push(TopLevelItem::Variable(d)),
-            Statement::FunctionDeclaration(d) => items.push(TopLevelItem::Function(d)),
+            Statement::TSTypeAliasDeclaration(d) => items.push((TopLevelItem::Alias(d), false)),
+            Statement::TSInterfaceDeclaration(d) => items.push((TopLevelItem::Interface(d), false)),
+            Statement::ClassDeclaration(d) => items.push((TopLevelItem::Class(d), false)),
+            Statement::TSEnumDeclaration(d) => items.push((TopLevelItem::Enum(d), false)),
+            Statement::VariableDeclaration(d) => items.push((TopLevelItem::Variable(d), false)),
+            Statement::FunctionDeclaration(d) => items.push((TopLevelItem::Function(d), false)),
+            Statement::TSNamespaceDeclaration(d) => items.push((TopLevelItem::Namespace(d), false)),
             Statement::ExportDeclaration(export) => match &export.declaration {
-                Declaration::TSTypeAliasDeclaration(d) => items.push(TopLevelItem::Alias(d)),
-                Declaration::TSInterfaceDeclaration(d) => items.push(TopLevelItem::Interface(d)),
-                Declaration::ClassDeclaration(d) => items.push(TopLevelItem::Class(d)),
-                Declaration::TSEnumDeclaration(d) => items.push(TopLevelItem::Enum(d)),
-                Declaration::VariableDeclaration(d) => items.push(TopLevelItem::Variable(d)),
-                Declaration::FunctionDeclaration(d) => items.push(TopLevelItem::Function(d)),
+                Declaration::TSTypeAliasDeclaration(d) => {
+                    items.push((TopLevelItem::Alias(d), true))
+                }
+                Declaration::TSInterfaceDeclaration(d) => {
+                    items.push((TopLevelItem::Interface(d), true))
+                }
+                Declaration::ClassDeclaration(d) => items.push((TopLevelItem::Class(d), true)),
+                Declaration::TSEnumDeclaration(d) => items.push((TopLevelItem::Enum(d), true)),
+                Declaration::VariableDeclaration(d) => {
+                    items.push((TopLevelItem::Variable(d), true))
+                }
+                Declaration::FunctionDeclaration(d) => {
+                    items.push((TopLevelItem::Function(d), true))
+                }
+                Declaration::TSNamespaceDeclaration(d) => {
+                    items.push((TopLevelItem::Namespace(d), true))
+                }
                 _ => {}
             },
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(d) => {
-                    items.push(TopLevelItem::Function(d))
+                    items.push((TopLevelItem::Function(d), true))
                 }
                 ExportDefaultDeclarationKind::ClassDeclaration(d) => {
-                    items.push(TopLevelItem::Class(d))
+                    items.push((TopLevelItem::Class(d), true))
                 }
                 ExportDefaultDeclarationKind::TSInterfaceDeclaration(d) => {
-                    items.push(TopLevelItem::Interface(d))
+                    items.push((TopLevelItem::Interface(d), true))
                 }
                 _ => {}
             },
@@ -78,8 +101,23 @@ fn top_level_items<'a>(program: &'a Program<'a>) -> Vec<TopLevelItem<'a>> {
 // second pass resolves function and variable signatures, which can look up
 // any of those names regardless of source order.
 pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckContext<'ast, '_>) {
-    let items = top_level_items(program);
-    for item in items.iter().copied() {
+    let items = items_in(&program.body);
+    declare_types(&items, ctx);
+    for (name, span, involves_enum) in ctx.namespace.take_declaration_collisions() {
+        let message = if involves_enum {
+            crate::diagnostic_messages::messages::enum_declaration_merge()
+        } else {
+            crate::diagnostic_messages::messages::duplicate_type_declaration(&name)
+        };
+        ctx.error(message, span);
+    }
+    declare_values(&items, ctx, program.source_type.is_typescript_definition());
+}
+
+// First pass over a statement list: every named type, so the rest can refer to it.
+// A namespace's members are registered the same way, under its name.
+fn declare_types<'ast>(items: &[(TopLevelItem<'ast>, bool)], ctx: &mut CheckContext<'ast, '_>) {
+    for (item, _) in items.iter().copied() {
         match item {
             TopLevelItem::Alias(decl) => {
                 ctx.namespace.insert_type_alias(
@@ -98,18 +136,27 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
                 }
             }
             TopLevelItem::Enum(decl) => declare_enum(decl, ctx),
+            TopLevelItem::Namespace(ns) => {
+                if let Some(block) = namespace_block(ns) {
+                    ctx.namespace.push_scope(&ns.id.name);
+                    declare_types(&items_in(&block.body), ctx);
+                    ctx.namespace.pop_scope();
+                }
+            }
             _ => {}
         }
     }
-    for (name, span, involves_enum) in ctx.namespace.take_declaration_collisions() {
-        let message = if involves_enum {
-            crate::diagnostic_messages::messages::enum_declaration_merge()
-        } else {
-            crate::diagnostic_messages::messages::duplicate_type_declaration(&name)
-        };
-        ctx.error(message, span);
-    }
-    for item in items.iter().copied() {
+}
+
+// Second pass: signatures, which can name any type regardless of source order. A
+// namespace is declared as a value (an object of its exported members) after its own
+// members are, and only when that object is certain to be whole.
+fn declare_values<'ast>(
+    items: &[(TopLevelItem<'ast>, bool)],
+    ctx: &mut CheckContext<'ast, '_>,
+    ambient: bool,
+) {
+    for (item, _) in items.iter().copied() {
         match item {
             TopLevelItem::Variable(decl) => {
                 for declarator in &decl.declarations {
@@ -131,9 +178,108 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
             }
             TopLevelItem::Function(func) => declare_function(func, ctx),
             TopLevelItem::Class(class) => declare_class_constructor(class, ctx),
+            TopLevelItem::Namespace(ns) => {
+                let Some(block) = namespace_block(ns) else {
+                    continue;
+                };
+                let members = items_in(&block.body);
+                let inside = ambient || ns.declare;
+                ctx.namespace.push_scope(&ns.id.name);
+                declare_values(&members, ctx, inside);
+                ctx.namespace.pop_scope();
+                // Merged with another declaration of the same name (a second block, a
+                // function, a class, an enum, a variable), the object would hide the
+                // other half, so nothing is declared and the name stays unknown.
+                let name = ns.id.name.as_str();
+                if items
+                    .iter()
+                    .filter(|(other, _)| declares_value_named(other, name))
+                    .count()
+                    > 1
+                {
+                    continue;
+                }
+                if let (Some(symbol_id), Some(object)) = (
+                    ns.id.symbol_id.get(),
+                    namespace_value(&members, inside, ctx),
+                ) {
+                    ctx.symbols.declare(symbol_id, object);
+                }
+            }
             _ => {}
         }
     }
+}
+
+// Whether `item` introduces a value called `name`, which a namespace of that name would
+// merge with.
+fn declares_value_named(item: &TopLevelItem<'_>, name: &str) -> bool {
+    match item {
+        TopLevelItem::Namespace(ns) => ns.id.name == name,
+        TopLevelItem::Function(f) => f.id.as_ref().is_some_and(|id| id.name == name),
+        TopLevelItem::Class(c) => c.id.as_ref().is_some_and(|id| id.name == name),
+        TopLevelItem::Enum(e) => e.id.name == name,
+        TopLevelItem::Variable(v) => v
+            .declarations
+            .iter()
+            .any(|d| matches!(&d.id, BindingPattern::BindingIdentifier(id) if id.name == name)),
+        TopLevelItem::Alias(_) | TopLevelItem::Interface(_) => false,
+    }
+}
+
+// The object a namespace is as a value: one property per exported value member. None when
+// any of them has no type yet (an unannotated variable is typed from its initializer
+// later), because an object missing a member would report a property that exists as
+// missing. In an ambient namespace every member is exported unless some is marked.
+fn namespace_value(
+    members: &[(TopLevelItem<'_>, bool)],
+    ambient: bool,
+    ctx: &mut CheckContext<'_, '_>,
+) -> Option<crate::arena::TypeId> {
+    let any_marked = members.iter().any(|(_, exported)| *exported);
+    let mut properties: Vec<crate::types::PropertyEntry> = Vec::new();
+    for (item, exported) in members.iter().copied() {
+        if !(exported || (ambient && !any_marked)) {
+            continue;
+        }
+        let mut add = |name: &str, symbol: Option<oxc_semantic::SymbolId>| -> Option<()> {
+            let type_id = ctx.symbols.get(symbol?)?;
+            properties.push(crate::types::PropertyEntry {
+                name: name.into(),
+                type_id,
+                optional: false,
+                is_method: false,
+            });
+            Some(())
+        };
+        match item {
+            TopLevelItem::Function(f) => {
+                let id = f.id.as_ref()?;
+                add(&id.name, id.symbol_id.get())?;
+            }
+            TopLevelItem::Class(c) => {
+                let id = c.id.as_ref()?;
+                add(&id.name, id.symbol_id.get())?;
+            }
+            TopLevelItem::Enum(e) => add(&e.id.name, e.id.symbol_id.get())?,
+            TopLevelItem::Namespace(n) => add(&n.id.name, n.id.symbol_id.get())?,
+            TopLevelItem::Variable(v) => {
+                for d in &v.declarations {
+                    let BindingPattern::BindingIdentifier(id) = &d.id else {
+                        return None;
+                    };
+                    add(&id.name, id.symbol_id.get())?;
+                }
+            }
+            TopLevelItem::Alias(_) | TopLevelItem::Interface(_) => {}
+        }
+    }
+    properties.sort_by(|a, b| a.name.cmp(&b.name));
+    properties.dedup_by(|a, b| a.name == b.name);
+    Some(
+        ctx.arena
+            .alloc(Type::Object(crate::types::ObjectType::new(properties))),
+    )
 }
 
 // Registers a function's signature under its symbol. Shared by the top-level pass
@@ -210,7 +356,7 @@ fn declare_class_constructor(class: &Class<'_>, ctx: &mut CheckContext<'_, '_>) 
             // A generic class's own type parameters need to be in
             // scope while its constructor's parameters are
             // resolved, the same as a generic function's are just
-            // above, otherwise `T` in `constructor(value: T)`
+            // above -- otherwise `T` in `constructor(value: T)`
             // fails to resolve, the whole signature falls back to
             // "untyped, can't check arity", and `new Box(1)` never
             // gets the inference-and-substitution treatment a

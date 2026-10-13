@@ -81,6 +81,8 @@ enum Node<'ast> {
     Class,
     // The constructor, the class name used as a value.
     ClassValue { symbol: Option<SymbolId> },
+    // A namespace as a value: the object its exported members make.
+    NamespaceValue { symbol: Option<SymbolId> },
 }
 
 // One export waiting for the resolver to be complete: every exported declaration has to
@@ -251,8 +253,12 @@ fn push_declaration<'ast>(
                 *incomplete = true;
             }
         }
-        // A namespace or a module block has a value side the portable form does not carry
-        // yet. Not exported, they are nothing to us.
+        Declaration::TSNamespaceDeclaration(ns) => {
+            if !push_namespace(items, seen, ns, named(&ns.id.name), false) {
+                *incomplete = true;
+            }
+        }
+        // A module block has a value side the portable form does not carry yet. Not exported, they are nothing to us.
         _ => {
             if exported {
                 *incomplete = true;
@@ -261,16 +267,6 @@ fn push_declaration<'ast>(
     }
 }
 
-// In order: list the file's top-level declarations with the names each is exported
-// under, then attach `export { a as b }` specifiers (to them, or to what the file
-// imported) and the re-exports from other modules. Every interface and alias is
-// registered before any is written out, exported or not, so a body may name one that is
-// not exported and the bodies may name each other in any order. Everything built is then
-// written against the finished key table, and only the exported ones, with the
-// declarations they reach, leave the unit. `export *` is merged last, since a name the
-// file exports itself wins over a star's. Whatever cannot be exported cleanly sets
-// `incomplete` instead of being guessed, so a dependent sees fewer names, never a wrong
-// one.
 pub(crate) fn collect_exports<'ast>(
     program: &'ast Program<'ast>,
     ctx: &mut CheckContext<'ast, '_>,
@@ -400,6 +396,17 @@ pub(crate) fn collect_exports<'ast>(
             }
             // `export = x` and `export as namespace X` change what the module exports in a
             // way this pass does not read, so the list cannot be called complete.
+            Statement::TSNamespaceDeclaration(ns) => {
+                // Not exported by itself, but `export { N }` or an exported declaration
+                // may still reach it, so it is registered with no names.
+                push_namespace(
+                    &mut items,
+                    &mut seen,
+                    ns,
+                    Vec::new(),
+                    program.source_type.is_typescript_definition(),
+                );
+            }
             // `export = name` hands the module's whole value to one declaration. It is
             // listed under the name `export=`, which no source can write, so an
             // `import x = require()` or a default import can find it. The module stays
@@ -464,9 +471,15 @@ pub(crate) fn collect_exports<'ast>(
     // that name, so a type and a value both go out), or something this file imported.
     for spec in specifiers {
         let mut found = false;
-        for item in items.iter_mut().filter(|item| item.name == spec.local) {
-            item.exported_as.push(spec.exported.clone());
-            found = true;
+        let qualified = format!("{}.", spec.local);
+        for item in items.iter_mut() {
+            if item.name == spec.local {
+                item.exported_as.push(spec.exported.clone());
+                found = true;
+            } else if let Some(rest) = item.name.strip_prefix(&qualified) {
+                // The types inside a namespace go out under the namespace's new name.
+                item.exported_as.push(format!("{}.{rest}", spec.exported));
+            }
         }
         if found {
             continue;
@@ -475,6 +488,21 @@ pub(crate) fn collect_exports<'ast>(
             Some(keys) if !keys.is_empty() => {
                 for key in keys {
                     table.names.push((spec.exported.clone(), *key));
+                }
+                let qualified = format!("{}.", spec.local);
+                let mut inner: Vec<(&String, &Vec<DeclKey>)> = ctx
+                    .imported_names
+                    .iter()
+                    .filter(|(name, _)| name.starts_with(&qualified))
+                    .collect();
+                inner.sort_by(|a, b| a.0.cmp(b.0));
+                for (name, keys) in inner {
+                    for key in keys {
+                        table.names.push((
+                            format!("{}.{}", spec.exported, &name[qualified.len()..]),
+                            *key,
+                        ));
+                    }
                 }
             }
             // An unknown local name is an error tsc reports; there is nothing to export.
@@ -493,6 +521,17 @@ pub(crate) fn collect_exports<'ast>(
             }
             for key in keys {
                 table.names.push((spec.exported.clone(), key));
+            }
+            // `export { N } from` also carries the types written inside N.
+            let qualified = format!("{}.", spec.local);
+            for (name, key) in ctx
+                .imports
+                .map(|imports| imports.export_all(&source))
+                .unwrap_or_default()
+            {
+                if let Some(rest) = name.strip_prefix(&qualified) {
+                    table.names.push((format!("{}.{rest}", spec.exported), key));
+                }
             }
         }
     }
@@ -531,6 +570,7 @@ pub(crate) fn collect_exports<'ast>(
             Node::Enum { symbol } => enumeration(ctx, module, *symbol, item),
             Node::Class => interface_or_alias(ctx, module, item),
             Node::ClassValue { symbol } => variable(ctx, module, *symbol, item),
+            Node::NamespaceValue { symbol } => variable(ctx, module, *symbol, item),
         };
         match built.and_then(|p| register(&mut keys, ctx, p)) {
             Some(p) => pending.push(p),
@@ -708,6 +748,102 @@ fn enumeration(
     }
     let body = ctx.symbols.get(symbol?)?;
     Some(pending_of(module, item, body))
+}
+
+// A namespace is its value (an object of its exported members, exported under its own
+// name) plus the types written inside it, each exported under its dotted name (`N.I`) so
+// that `N.I` resolves in a file that imports `N`. Only members visible from outside go:
+// the marked ones, or all of them in an ambient namespace where none is marked. A
+// namespace this checker does not read (a dotted name) is reported as not pushed.
+fn push_namespace<'ast>(
+    items: &mut Vec<Item<'ast>>,
+    seen: &mut FxHashMap<(String, u8), u32>,
+    ns: &'ast oxc_ast::ast::TSNamespaceDeclaration<'ast>,
+    names: Vec<String>,
+    ambient: bool,
+) -> bool {
+    if super::declare::namespace_block(ns).is_none() {
+        return false;
+    }
+    let node = Node::NamespaceValue {
+        symbol: ns.id.symbol_id.get(),
+    };
+    push_item(items, seen, &ns.id.name, DeclKind::Var, node, names.clone());
+    push_namespace_types(items, seen, ns, &ns.id.name, &names, ambient || ns.declare);
+    true
+}
+
+fn push_namespace_types<'ast>(
+    items: &mut Vec<Item<'ast>>,
+    seen: &mut FxHashMap<(String, u8), u32>,
+    ns: &'ast oxc_ast::ast::TSNamespaceDeclaration<'ast>,
+    prefix: &str,
+    outer_names: &[String],
+    ambient: bool,
+) {
+    use super::declare::TopLevelItem;
+    let Some(block) = super::declare::namespace_block(ns) else {
+        return;
+    };
+    let members = super::declare::items_in(&block.body);
+    let any_marked = members.iter().any(|(_, marked)| *marked);
+    for (item, marked) in members {
+        if !(marked || (ambient && !any_marked)) {
+            continue;
+        }
+        // Each type goes out under `prefix.Name`, once per name the namespace goes out
+        // under, so `export { N as M }` is handled by the specifier pass instead.
+        let dotted = |name: &str| format!("{prefix}.{name}");
+        let names = |qualified: &str| -> Vec<String> {
+            outer_names
+                .iter()
+                .map(|_| qualified.to_string())
+                .take(1)
+                .collect()
+        };
+        match item {
+            TopLevelItem::Interface(d) => {
+                let q = dotted(&d.id.name);
+                push_item(
+                    items,
+                    seen,
+                    &q,
+                    DeclKind::Interface,
+                    Node::Interface,
+                    names(&q),
+                );
+            }
+            TopLevelItem::Alias(d) => {
+                let q = dotted(&d.id.name);
+                push_item(items, seen, &q, DeclKind::Alias, Node::Alias, names(&q));
+            }
+            TopLevelItem::Class(c) => {
+                if let Some(id) = &c.id {
+                    let q = dotted(&id.name);
+                    push_item(items, seen, &q, DeclKind::Class, Node::Class, names(&q));
+                }
+            }
+            TopLevelItem::Enum(e) => {
+                let q = dotted(&e.id.name);
+                let node = Node::Enum {
+                    symbol: e.id.symbol_id.get(),
+                };
+                push_item(items, seen, &q, DeclKind::Enum, node, names(&q));
+            }
+            TopLevelItem::Namespace(inner) => {
+                let q = dotted(&inner.id.name);
+                push_namespace_types(
+                    items,
+                    seen,
+                    inner,
+                    &q,
+                    outer_names,
+                    ambient || inner.declare,
+                );
+            }
+            TopLevelItem::Function(_) | TopLevelItem::Variable(_) => {}
+        }
+    }
 }
 
 // A class is two declarations that share its name: the instance type, which another type

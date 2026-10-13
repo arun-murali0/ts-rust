@@ -99,6 +99,7 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
         Statement::TSTypeAliasDeclaration(_)
         | Statement::TSInterfaceDeclaration(_)
         | Statement::TSEnumDeclaration(_) => {}
+        Statement::TSNamespaceDeclaration(ns) => check_namespace(ns, scoping, ctx),
         // Neither has a type of its own to check, but each one carries the narrowing in
         // force where it happens to the loop, switch or label it jumps to, so the code
         // after that construct (or the next pass of the loop) can join it in. A labelled
@@ -118,7 +119,7 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
             // Deliberately no save/restore of ctx.narrow here, despite variable
             // declarations genuinely being block-scoped: TypeScript's narrowing
             // is not. It follows control flow, not lexical scope, and a bare
-            // `{ ... }` has no effect on control flow at all; it's not a
+            // `{ ... }` has no effect on control flow at all -- it's not a
             // branch, a loop, or an exit. A guard clause's narrowing does
             // survive past a bare block's closing brace in real TypeScript
             // (verified against tsc; see
@@ -179,6 +180,28 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
     }
 }
 
+// `namespace N { ... }`: its statements are checked with `N` as the enclosing scope, so a
+// sibling named without the prefix is found. A dotted name (`namespace A.B`) is not read
+// yet and is reported as unchecked, as every namespace was before.
+fn check_namespace(
+    ns: &oxc_ast::ast::TSNamespaceDeclaration,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) {
+    let Some(block) = super::declare::namespace_block(ns) else {
+        ctx.warning(
+            crate::diagnostic_messages::messages::unimplemented_statement_kind("Other"),
+            ns.span,
+        );
+        return;
+    };
+    ctx.namespace.push_scope(&ns.id.name);
+    for statement in &block.body {
+        check_statement(statement, scoping, ctx);
+    }
+    ctx.namespace.pop_scope();
+}
+
 // The declaration behind an `export`. Type-only kinds did their work in the declare
 // pass, the same as when they are not exported.
 fn check_declaration(declaration: &Declaration, scoping: &Scoping, ctx: &mut CheckContext<'_, '_>) {
@@ -189,6 +212,7 @@ fn check_declaration(declaration: &Declaration, scoping: &Scoping, ctx: &mut Che
         Declaration::TSTypeAliasDeclaration(_)
         | Declaration::TSInterfaceDeclaration(_)
         | Declaration::TSEnumDeclaration(_) => {}
+        Declaration::TSNamespaceDeclaration(ns) => check_namespace(ns, scoping, ctx),
         other => ctx.warning(
             crate::diagnostic_messages::messages::unimplemented_statement_kind("Other"),
             other.span(),
