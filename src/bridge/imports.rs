@@ -11,8 +11,9 @@
 // A name missing from a module whose export list is complete is TS2305 (TS1192 for a
 // default). Against a list that left something out (a class, `export *`, an inferred
 // value) the name may be one we dropped, so nothing is reported.
-// Cost: a bare specifier ("react") is never reported as missing until packages are read,
-// and a name missing from a partial module is still silent.
+// A package specifier ("react") is reported only when the source says it is certainly
+// missing (the project driver does, when no configuration could be hiding it), and a name
+// missing from a partial module is still silent.
 
 use oxc_span::{GetSpan, Span};
 
@@ -96,7 +97,7 @@ fn report_missing_module<'ast>(
     span: Span,
     ctx: &mut CheckContext<'ast, '_>,
 ) {
-    if specifier.starts_with('.') && source.module_exports(specifier) == ModuleExports::Unresolved {
+    if source.module_exports(specifier) == ModuleExports::Unresolved {
         ctx.error(messages::module_not_found(specifier), span);
     }
 }

@@ -13,10 +13,10 @@ Each semantic milestone has:
 For example:
 
 ```text
-Generics (one doc, several test suites -- see docs/generics.md for why)
+Generics (one doc, several test suites -- see docs/architecture/generics.md for why)
 ├── tests/generics_tier1.rs, generics_tier2.rs, generic_classes.rs, recursive_types.rs, builtin_generics.rs
 ├── tests/fixtures/generics-tier1/, generics-tier2/, generic-classes/, recursive-types/, builtin-generics/
-└── docs/generics.md
+└── docs/architecture/generics.md
 ```
 
 The Rust test defines the executable contract. The fixture demonstrates the TypeScript behavior. The documentation explains the semantic and architectural reason.

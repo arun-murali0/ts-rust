@@ -57,6 +57,8 @@ pub(crate) struct ExportTable {
     /// True when the collector ran at all (the unit had a module key). A table that
     /// was never collected is not a complete list of nothing.
     pub collected: bool,
+    /// The modules a script file declares with `declare module "x"`, by specifier.
+    pub ambient: Vec<(String, ExportTable)>,
 }
 
 // A top-level declaration the exports may be built from, and the names it is exported
@@ -183,6 +185,9 @@ fn push_declaration<'ast>(
     seen: &mut FxHashMap<(String, u8), u32>,
     declaration: &'ast Declaration<'ast>,
     exported: bool,
+    // The declaration is in an ambient context (a declaration file, or a `declare module`
+    // block), where the members of a namespace are exported unless some are marked.
+    ambient: bool,
     incomplete: &mut bool,
 ) {
     let named = |name: &str| {
@@ -254,7 +259,7 @@ fn push_declaration<'ast>(
             }
         }
         Declaration::TSNamespaceDeclaration(ns) => {
-            if !push_namespace(items, seen, ns, named(&ns.id.name), false) {
+            if !push_namespace(items, seen, ns, named(&ns.id.name), ambient) {
                 *incomplete = true;
             }
         }
@@ -272,6 +277,93 @@ pub(crate) fn collect_exports<'ast>(
     ctx: &mut CheckContext<'ast, '_>,
     module: ModuleKey,
 ) -> ExportTable {
+    let definition = program.source_type.is_typescript_definition();
+    let mut table = collect_in(&program.body, definition, false, ctx, module);
+    table.ambient = collect_ambient(program, ctx);
+    table
+}
+
+// The modules a script file declares with `declare module "x" { ... }`: each is a module
+// answering the specifier `x` for every file of the project, with the exports its block
+// makes. In a file that is itself a module (it has an import or an export) the same
+// syntax augments a module that exists elsewhere, which this does not read.
+fn collect_ambient<'ast>(
+    program: &'ast Program<'ast>,
+    ctx: &mut CheckContext<'ast, '_>,
+) -> Vec<(String, ExportTable)> {
+    let is_module = program.body.iter().any(|stmt| {
+        matches!(
+            stmt,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
+                | Statement::TSExportAssignment(_)
+                | Statement::TSNamespaceExportDeclaration(_)
+                | Statement::TSImportEqualsDeclaration(_)
+        )
+    });
+    if is_module {
+        return Vec::new();
+    }
+    let mut found = Vec::new();
+    for stmt in &program.body {
+        let Statement::TSExternalModuleDeclaration(module) = stmt else {
+            continue;
+        };
+        let specifier = module.id.value.to_string();
+        // `declare module "x";` with no block says only that `x` exists, and that
+        // everything imported from it is `any`. It answers the specifier, so the import is
+        // not a missing module, and it lists no names, so no name is called missing.
+        let Some(body) = &module.body else {
+            found.push((
+                specifier,
+                ExportTable {
+                    collected: true,
+                    incomplete: true,
+                    ..ExportTable::default()
+                },
+            ));
+            continue;
+        };
+        // The block's declarations were registered inside this scope, so resolving a
+        // name in it is what finds them.
+        ctx.namespace
+            .push_scope(&super::declare::module_scope(&specifier));
+        // With no explicit `export` anywhere in the block, every member is exported.
+        let marked = body.body.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Statement::ExportDeclaration(_)
+                    | Statement::ExportDefaultDeclaration(_)
+                    | Statement::ExportAllDeclaration(_)
+                    | Statement::ExportFromDeclaration(_)
+                    | Statement::TSExportAssignment(_)
+            )
+        });
+        let table = collect_in(
+            &body.body,
+            true,
+            !marked,
+            ctx,
+            ModuleKey::ambient(&specifier),
+        );
+        ctx.namespace.pop_scope();
+        found.push((specifier, table));
+    }
+    found
+}
+
+fn collect_in<'ast>(
+    statements: &'ast [Statement<'ast>],
+    definition: bool,
+    // Every top-level declaration is exported, as in an ambient module block that marks
+    // none of its members.
+    export_all: bool,
+    ctx: &mut CheckContext<'ast, '_>,
+    module: ModuleKey,
+) -> ExportTable {
     let mut table = ExportTable {
         collected: true,
         ..ExportTable::default()
@@ -284,13 +376,14 @@ pub(crate) fn collect_exports<'ast>(
     // `export * from "./a"`: the source as written.
     let mut stars: Vec<String> = Vec::new();
 
-    for stmt in &program.body {
+    for stmt in statements {
         match stmt {
             Statement::ExportDeclaration(export) => push_declaration(
                 &mut items,
                 &mut seen,
                 &export.declaration,
                 true,
+                definition,
                 &mut table.incomplete,
             ),
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
@@ -399,13 +492,7 @@ pub(crate) fn collect_exports<'ast>(
             Statement::TSNamespaceDeclaration(ns) => {
                 // Not exported by itself, but `export { N }` or an exported declaration
                 // may still reach it, so it is registered with no names.
-                push_namespace(
-                    &mut items,
-                    &mut seen,
-                    ns,
-                    Vec::new(),
-                    program.source_type.is_typescript_definition(),
-                );
+                push_namespace(&mut items, &mut seen, ns, Vec::new(), definition);
             }
             // `export = name` hands the module's whole value to one declaration. It is
             // listed under the name `export=`, which no source can write, so an
@@ -538,13 +625,19 @@ pub(crate) fn collect_exports<'ast>(
 
     let mut keys = UnitKeys::default();
     let mut pending: Vec<Pending> = Vec::new();
+    if export_all {
+        for item in items.iter_mut() {
+            if item.exported_as.is_empty() {
+                item.exported_as.push(item.name.clone());
+            }
+        }
+    }
+
     // In a declaration file a top-level declaration with no `export` is exported anyway
     // unless the file says otherwise (`export {}`), and which of the two it is cannot be
     // told here. So such a file's list is partial: what it names explicitly still crosses,
     // and a name missing from it is never reported.
-    if program.source_type.is_typescript_definition()
-        && items.iter().any(|item| item.exported_as.is_empty())
-    {
+    if definition && items.iter().any(|item| item.exported_as.is_empty()) {
         table.incomplete = true;
     }
 
@@ -841,7 +934,9 @@ fn push_namespace_types<'ast>(
                     ambient || inner.declare,
                 );
             }
-            TopLevelItem::Function(_) | TopLevelItem::Variable(_) => {}
+            TopLevelItem::Function(_)
+            | TopLevelItem::Variable(_)
+            | TopLevelItem::ExternalModule(_) => {}
         }
     }
 }

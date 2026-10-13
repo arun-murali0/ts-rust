@@ -2,9 +2,10 @@
 
 This is the document to read when a design choice looks odd and the question is "why not
 the simpler thing?". Each section is one decision: the problem, the options, what was
-chosen, and how it was checked. The per-topic documents (`arena-architecture.md`,
-`control-flow-narrowing.md`, `generics-tier.md`) hold the detail; this one holds the
-reasoning that connects them.
+chosen, and how it was checked. The per-topic documents in `docs/architecture/` (arena, narrowing, generics,
+intersections, module resolution, cross-file types, foundation dependencies) hold the
+detail and tell each one as plan, issue, change and gain; this one holds the reasoning that
+connects them.
 
 ## 0. What the project optimises for
 
@@ -31,12 +32,13 @@ copies shared structure.
 **Choice.** One `Vec<Type>`, with `TypeId` an index. Types are shallow: they hold ids of
 their parts. Anonymous composites are interned, so two identical `{ a: number }` share an
 id and equality is an integer compare. Named types stay unique so each keeps its own name
-in messages. Recursive types are allocated as placeholders first and filled in with
-`set()`.
+in messages. A declaration that can refer to itself is a `Ref` to a slot, handed out before
+its members are resolved and given its body afterwards (section 15). It began as an empty
+placeholder object overwritten in place with `set()`.
 
 **Consequence.** Everything that remembers something about an id (the relation cache, the
-parameter-scan memo) must be told when an id changes meaning. That is the cost of
-placeholders, and section 4 is how it is paid.
+parameter-scan memo) must be told when an id changes meaning. That was the cost of
+placeholders. Section 4 is how it was paid, and section 15 is how most of it was removed.
 
 ## 2. Structural subtyping with a "currently comparing" stack
 
@@ -84,7 +86,7 @@ id's meaning changes and the cached answer is wrong. The first design was a rule
 declarations before checking bodies, and never query while a placeholder is empty". It held
 because nothing broke it yet.
 
-**Choice.** The arena counts changes of meaning (`set`, `clear`). The cache records the
+**Choice.** The arena counts changes of meaning (`set` then, `resolve_ref` and `clear` now). The cache records the
 generation it was filled under and drops its entries if the arena's has moved. No caller
 has to remember anything.
 
@@ -187,10 +189,10 @@ checks each file there alone, where every import would be an error.
 - **A second resolver.** Resolving a specifier is `oxc_resolver`'s job and it does it
   well, so `ModuleResolver` only chooses options and converts errors. Section 8 has the
   rest.
-- **tsconfig `paths` and cross-file name lookup.** The graph is built and checked in a
-  safe order, but an imported name is not yet looked up in the file it comes from, and
-  the resolver is built without a tsconfig. Both are the next stage, not gaps hidden
-  behind the graph.
+- **tsconfig `paths` and packages.** The resolver is built without a tsconfig, and an
+  import of a file under `node_modules` binds nothing. Cross-file name lookup itself is
+  done (section 17); these two are the part of it that is not, not gaps hidden behind the
+  graph.
 - **Baseline-first benchmarking.** No speed figures are claimed for the reuse work. The
   counters make a regression observable; the numbers belong to a measured run.
 
@@ -208,17 +210,6 @@ checks each file there alone, where every import would be an error.
   files in a row, because a recursive cycle search passes every smaller test.
 - **Counters over opinions.** Hit and miss counts and arena sizes are exposed so a claim
   such as "the memo answers repeats" is a test assertion.
-
-## 11. Rules of thumb that fell out of this
-
-1. If a wrong answer is silent, write the test that makes it loud.
-2. Prefer the data structure that cannot be misused to the rule that must be remembered.
-3. Dropping information is safe; inventing it is not. Joins, narrowing and inference all
-   resolve doubt toward the wider type.
-4. Report an error only when sure the other checker would too.
-5. Keep a deliberate non-decision written down, with the reason, so it is not reopened by
-   accident.
-6. A fact that could not be resolved is data. Keep it where a later phase can report it.
 
 ## 11. Unreachable code: cover the container, not the construct
 
@@ -345,5 +336,32 @@ its name.
 
 **Checked against the real compiler.** The rules were written down only after a probe over tsc 5.9.3, and every fixture was run through it. That caught two things a reading of the docs would not: `void & A` stays an intersection while `null & A` is `never`, and `string & {}` stays while `A & {}` is `A`.
 
-**One thing it found by accident.** Adding the variant to the type enum changed an unrelated test from 5 diagnostics to 1. The four that vanished are false positives that tsc does not report, so something depends on the order of the variants. It is not found; the variant goes last and the question is open.
+**One thing it found by accident.** Adding the variant to the type enum changed an unrelated test from 5 diagnostics to 1. The four that vanished are false positives that tsc does not report, so something depended on the order of the variants. It was found three days later and was not the order: two literals whose digests collided got a new id on every use, so narrowing, which compares literals by id, narrowed a union to `never`. The intern table now keeps every distinct content at one id (`91454fa`), the test reports 1 whichever place the variant sits in, and the variant still goes last because nothing was gained by moving it.
 
+## 17. Crossing files: keys, portable declarations, units
+**Problem.** Every file is checked in its own arena, and a `TypeId` means nothing in another one. An import has to rebuild a type that was built elsewhere, and a typo in an import used to bind nothing and report nothing.
+
+**Choice.** An identity that does not depend on a run (`ModuleKey`, `DeclKey`, and a `SigHash` of the declaration's own shape), a declaration carried as arena-free data and rebuilt by the importer, and a unit of work with an owned input and output. A layer's exports are collected before the next layer starts, and every file of a layer reads the same snapshot, so the report does not depend on thread timing. Whatever the portable form cannot carry sets `incomplete`, and a missing export is reported only against a complete list.
+
+**Where the code differs from the plan.** The LLD makes a cycle one unit in one arena; the code checks its members again, each round reading the previous snapshot, at most four times.
+
+**Cost.** Classes, enums and overloads are not exported yet, and packages are not read. A dependent sees less, never something different. The full story, with the commits, is [cross-file-types](architecture/cross-file-types.md).
+
+## 18. A literal property is typed against its declared type
+**Problem.** `const e: Ev = { tag: 'x', n: 1 }` against `interface Ev { tag: 'x'; n: number }` was reported as `Type 'string' is not assignable to type '"x"'`. An object literal widened every property the moment it was read, so `tag: 'x'` became `tag: string` before it was compared with the declared type. tsc gives no error, and discriminated unions and event types are written this way all the time, so this was a false positive in single-file mode as well as across files.
+
+**Choice.** The object literal is read with the declared type it is checked against. `CheckContext` gets `contextual`, which a caller that has a declared type sets just before inferring the expression and `infer_expression_type` takes on entry, so it can never reach a deeper expression by accident. When the declared type of a property holds a literal (a literal, or a union containing one), the property keeps its literal; otherwise it widens as before. The declared property type is handed down, so nested objects and array elements are read the same way, and a union of objects offers one declaration per member that has the property, which keeps each member's tag of a discriminated union.
+
+**Not covered.** Generic parameters (a generic parameter declares no literal), tuples, and spreads. Commit `2910ce5`, with `tests/contextual_literals.rs`.
+
+## 19. Rules of thumb that fell out of this
+
+1. If a wrong answer is silent, write the test that makes it loud.
+2. Prefer the data structure that cannot be misused to the rule that must be remembered.
+3. Dropping information is safe; inventing it is not. Joins, narrowing and inference all
+   resolve doubt toward the wider type.
+4. Report an error only when sure the other checker would too.
+5. Keep a deliberate non-decision written down, with the reason, so it is not reopened by
+   accident.
+6. A fact that could not be resolved is data. Keep it where a later phase can report it.
+7. A fact that cannot be carried across a boundary is recorded as left out, so the other side reports less and never something different.

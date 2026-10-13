@@ -100,6 +100,18 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
         | Statement::TSInterfaceDeclaration(_)
         | Statement::TSEnumDeclaration(_) => {}
         Statement::TSNamespaceDeclaration(ns) => check_namespace(ns, scoping, ctx),
+        // `declare module "x" { ... }`: the block is checked with `x` as its scope, so a
+        // name written in it is found. A shorthand `declare module "x";` has no body.
+        Statement::TSExternalModuleDeclaration(module) => {
+            if let Some(body) = &module.body {
+                ctx.namespace
+                    .push_scope(&super::declare::module_scope(&module.id.value));
+                for statement in &body.body {
+                    check_statement(statement, scoping, ctx);
+                }
+                ctx.namespace.pop_scope();
+            }
+        }
         // Neither has a type of its own to check, but each one carries the narrowing in
         // force where it happens to the loop, switch or label it jumps to, so the code
         // after that construct (or the next pass of the loop) can join it in. A labelled

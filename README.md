@@ -6,7 +6,7 @@
 
 **ts-rust is experimental software. Do not use it as a production TypeScript compiler**
 
-The project is actively evolving. TypeScript compatibility is incomplete, generic inference is still under development, and the compatibility harness is an experimental comparison tool rather than a correctness proof.
+The project is actively evolving. TypeScript compatibility is incomplete (there are no tuples, `keyof`, mapped or conditional types, and classes, enums and overloads do not yet cross files), and the compatibility harness is an experimental comparison tool rather than a correctness proof.
 
 ## What is ts-rust?
 
@@ -33,6 +33,8 @@ ts-rust owns the part that is the reason this project exists:
 - parameter and binding semantics
 - diagnostics
 - generic inference and substitution, with advanced type-level semantics planned
+- intersection types
+- stable keys and portable declarations, so a type written in one file is used in another
 
 The design goal is a clean boundary:
 
@@ -81,7 +83,7 @@ The project is also an architecture study. The implementation is intentionally b
 
 ## Current implementation
 
-The project records progress using **semantic milestone names**, not opaque version labels. The current baseline is **Generics** — substantially complete across functions, interfaces, type aliases, and classes (see [docs/generics.md](docs/generics.md)) — with `checklist.md` at the repository root tracking the full TypeScript type-system surface item by item, and `BUILD.md` tracking the current build order beyond it.
+The project records progress using **semantic milestone names**, not opaque version labels. The current baseline is **Cross-File Types**: a type written in one file is used in another, imports are diagnosed, and import cycles settle (see [docs/architecture/cross-file-types.md](docs/architecture/cross-file-types.md)), on top of generics that are substantially complete across functions, interfaces, type aliases and classes (see [docs/architecture/generics.md](docs/architecture/generics.md)). `checklist.md` at the repository root tracks the full TypeScript type-system surface item by item, and `BUILD.md` tracks the current build order beyond it.
 
 ```text
 Foundation
@@ -91,7 +93,13 @@ Control-Flow Narrowing
 Classes and Inheritance
 Expression and Program Checking
 Parameters and Destructuring
-Generics                         <- current baseline
+Generics
+Narrowing completion, sessions and file identity
+Module Resolution
+Architecture Foundation
+Declaration Slots and Named Nodes
+Intersection Types
+Cross-File Types                 <- current baseline
 ```
 
 These names are deliberately descriptive so a contributor can infer the purpose of a test suite or document without first learning an arbitrary version history.
@@ -106,6 +114,14 @@ src/
 ├── namespace.rs
 ├── symbol_map.rs
 ├── type_annotation.rs
+├── type_display.rs
+├── explain.rs             # the chain of reasons under a not-assignable error
+├── lib_global_types.rs    # generated list of tsc's global type names
+├── keys.rs                # ModuleKey, DeclKey, SigHash, NodeHash
+├── stable_hash.rs         # canonical node encoding and Merkle hash
+├── stable_walk.rs         # the arena walk that feeds stable_hash
+├── portable.rs            # declarations as arena-free data, the importer, ImportSource
+├── unit.rs                # a file as a unit of work: UnitContext, UnitOutput, Worker
 ├── diagnostics.rs
 ├── diagnostic_codes.rs
 ├── diagnostic_messages.rs
@@ -126,13 +142,19 @@ src/
 └── bridge/
     ├── context.rs
     ├── declare.rs
+    ├── imports.rs
+    ├── exports.rs
     ├── narrow.rs
     ├── parse.rs
+    ├── unresolved_names.rs
+    ├── unreachable_code.rs
     ├── expressions/
     │   ├── mod.rs
     │   ├── core.rs
+    │   ├── assignment.rs
     │   ├── binary.rs
     │   ├── calls.rs
+    │   ├── elaborate.rs
     │   ├── excess.rs
     │   ├── functions.rs
     │   ├── logical.rs
@@ -147,7 +169,7 @@ src/
         ├── patterns.rs
         └── support.rs
 
-tests/
+tests/                     # one integration test per milestone or feature (42 files)
 ├── foundation.rs
 ├── structural_types.rs
 ├── literal_widening.rs
@@ -156,6 +178,9 @@ tests/
 ├── expression_program_checking.rs
 ├── parameters_destructuring.rs
 ├── generics_tier1.rs
+├── intersection_types.rs
+├── unit_exports.rs, unit_imports.rs, project_imports.rs, import_diagnostics.rs
+├── ...
 └── module_resolution.rs   # needs --features module-resolution
 
 tests/fixtures/
@@ -179,7 +204,11 @@ tests/module-resolution-fixtures/   # small projects on disk, not checked by the
 docs/
 ├── README.md
 ├── architecture.md
-├── generics.md
+├── architecture/          # one case study per subsystem: arena, narrowing, generics,
+│                          # intersections, module-resolution, cross-file-types,
+│                          # foundation-dependencies
+├── case-study.md
+├── decisions.md
 ├── roadmap.md
 ├── testing.md
 ├── purpose-and-overdesign.md
@@ -266,14 +295,15 @@ Start with the [documentation index](docs/README.md), then inspect the relevant 
 | Foundation | `tests/foundation.rs` | `tests/fixtures/foundation/` | [Foundation](docs/foundation.md) |
 | Structural Types | `tests/structural_types.rs` | `tests/fixtures/structural-types/` | [Structural Types](docs/structural-types.md) |
 | Literal Widening | `tests/literal_widening.rs` | `tests/fixtures/literal-widening/` | [Literal Widening](docs/literal-widening.md) |
-| Control-Flow Narrowing | `tests/control_flow_narrowing.rs` | `tests/fixtures/control-flow-narrowing/` | [Control-Flow Narrowing](docs/control-flow-narrowing.md) |
+| Control-Flow Narrowing | `tests/control_flow_narrowing.rs` | `tests/fixtures/control-flow-narrowing/` | [Control-Flow Narrowing](docs/architecture/narrowing.md) |
 | Classes and Inheritance | `tests/classes_inheritance.rs` | `tests/fixtures/classes-inheritance/` | [Classes and Inheritance](docs/classes-inheritance.md) |
 | Expression and Program Checking | `tests/expression_program_checking.rs` | `tests/fixtures/expression-program-checking/` | [Expression and Program Checking](docs/expression-program-checking.md) |
 | Parameters and Destructuring | `tests/parameters_destructuring.rs` | `tests/fixtures/parameters-destructuring/` | [Parameters and Destructuring](docs/parameters-destructuring.md) |
-| Module Resolution | `tests/module_resolution.rs` (feature `module-resolution`) | `tests/module-resolution-fixtures/` | [Module Resolution](docs/module-resolution.md) |
-| Intersection Types | `tests/intersection_types.rs` | `tests/fixtures/intersection-types/` | [Intersection Types](docs/intersection-types.md) |
-| Architecture Foundation | unit tests in `src/topology.rs`, `src/incremental.rs`, `src/scratchpad.rs` | none | [Architecture Foundation](docs/architecture-foundation.md) |
-| Generics | `tests/generics_tier1.rs`, `tests/generics_tier2.rs`, `tests/generic_classes.rs`, `tests/recursive_types.rs`, `tests/builtin_generics.rs`, `tests/interface_methods.rs` | `tests/fixtures/generics-tier1/`, `generics-tier2/`, `generic-classes/`, `recursive-types/`, `builtin-generics/`, `interface-methods/` | [Generics](docs/generics.md) |
+| Module Resolution | `tests/module_resolution.rs` (feature `module-resolution`) | `tests/module-resolution-fixtures/` | [Module Resolution](docs/architecture/module-resolution.md) |
+| Intersection Types | `tests/intersection_types.rs`, `tests/intersection_overloads.rs` | `tests/fixtures/intersection-types/`, `intersection-calls/`, `intersection-edges/` | [Intersection Types](docs/architecture/intersections.md) |
+| Cross-File Types | `tests/unit_exports.rs`, `tests/unit_imports.rs`, `tests/project_imports.rs`, `tests/import_diagnostics.rs` | sources inline in the tests | [Cross-File Types](docs/architecture/cross-file-types.md) |
+| Architecture Foundation | unit tests in `src/topology.rs`, `src/incremental.rs`, `src/scratchpad.rs` | none | [Architecture Foundation](docs/architecture/foundation-dependencies.md) |
+| Generics | `tests/generics_tier1.rs`, `tests/generics_tier2.rs`, `tests/generic_classes.rs`, `tests/recursive_types.rs`, `tests/builtin_generics.rs`, `tests/interface_methods.rs` | `tests/fixtures/generics-tier1/`, `generics-tier2/`, `generic-classes/`, `recursive-types/`, `builtin-generics/`, `interface-methods/` | [Generics](docs/architecture/generics.md) |
 
 
 ## Documentation
@@ -282,9 +312,12 @@ Start with [docs/README.md](docs/README.md) for the milestone map and architectu
 
 - [Architecture](docs/architecture.md): ownership, dependencies, semantic boundaries, and future scaling.
 - [Roadmap](docs/roadmap.md): the next semantic capabilities and their intended order.
-- [Module Resolution](docs/module-resolution.md): the opt-in project layer (resolver, module graph, cycles, layers, parallel project check).
+- [Module Resolution](docs/architecture/module-resolution.md): the opt-in project layer (resolver, module graph, cycles, layers, parallel project check).
+- [Cross-File Types](docs/architecture/cross-file-types.md): stable keys, portable declarations, units, imports and exports, and where the code differs from the plan.
+- [Arena](docs/architecture/arena.md): ids, interning, `Ref` slots, named nodes and the performance phases.
+- [Case study](docs/case-study.md): why the checker is built the way it is, one decision per section.
 - [Decisions](docs/decisions.md): the choices that closed the open questions in `HLD.md`, with what would reopen each.
-- [Architecture Foundation](docs/architecture-foundation.md): the optional dependencies from the design documents (petgraph, Salsa, Bumpalo, mimalloc), each behind its own feature and not yet used by the checker.
+- [Architecture Foundation](docs/architecture/foundation-dependencies.md): the optional dependencies from the design documents (petgraph, Salsa, Bumpalo, mimalloc), each behind its own feature and not yet used by the checker.
 - [Testing](docs/testing.md): fixture conventions, regression policy, benchmarks, and compatibility harness.
 - [Purpose and boundaries](docs/purpose-and-overdesign.md): why the project exists and what it deliberately does not rebuild.
 
@@ -346,7 +379,7 @@ It can be run on demand from GitHub Actions instead: go to **Actions → Compati
 # tsgo needs its own scratch install -- see "Fixture-level diagnostic
 # comparison" below: the plain `typescript` package now resolves to v7+,
 # which drops the classic JS compiler API entirely, so it can't share the
-# typescript@5.9.3 install pinned in scripts/ts-diag-tool/
+# typescript@6.0.3 install pinned in scripts/ts-diag-tool/
 mkdir -p /tmp/tsgo-scratch && cd /tmp/tsgo-scratch && npm init -y && npm install typescript@7
 
 cd /path/to/ts-rust
@@ -377,7 +410,7 @@ cd scripts/ts-diag-tool
 npm install
 ```
 
-This pins `typescript@5.9.3` deliberately: the plain `typescript` package now resolves to v7+, which ships the native/Go-ported compiler (`tsgo`) instead of the classic JS one, and that package no longer exposes `ts.createProgram`/`ts.Diagnostics` at all.
+This pins `typescript@6.0.3` deliberately: the plain `typescript` package now resolves to v7+, which ships the native/Go-ported compiler (`tsgo`) instead of the classic JS one, and that package no longer exposes `ts.createProgram`/`ts.Diagnostics` at all.
 
 ### Running it locally
 

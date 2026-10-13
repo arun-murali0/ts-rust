@@ -35,11 +35,9 @@ impl CancelToken {
     }
 }
 
-// What one unit of work reads and never changes. A unit is one file. The members of an
-// import cycle are still separate units: check_project checks them again, each pass
-// reading what the previous one exported, until the exports stop changing (settle_cycle in
-// module_resolution/check.rs). Checking a whole cycle as one unit in one arena (LLD 4.3) is
-// not what is done today. What the file imports reaches it through `imports`.
+// What one unit of work reads and never changes. A unit is one file for now; it becomes
+// one strongly connected component of the module graph when the graph driver lands
+// (LLD 4.3), and the graph and the dependency outputs join this struct then.
 pub struct UnitContext<'a> {
     pub file_id: FileId,
     pub file_name: &'a str,
@@ -104,6 +102,18 @@ pub struct UnitOutput {
     // missing name only against a complete list; against a partial one the name may be
     // an export that was left out.
     pub exports_complete: bool,
+    // The modules this unit declares with `declare module "x" { ... }`, which answer the
+    // specifier `x` for every file of the project.
+    pub ambient: Vec<AmbientExports>,
+}
+
+/// The exports of one `declare module "x"` block (see `UnitOutput`).
+#[derive(Clone, Debug)]
+pub struct AmbientExports {
+    pub specifier: String,
+    pub exports: Vec<PortableDecl>,
+    pub export_names: Vec<(String, DeclKey)>,
+    pub complete: bool,
 }
 
 const _: fn() = || {
@@ -181,6 +191,16 @@ impl Worker {
                 exports: table.decls,
                 export_names: table.names,
                 exports_complete: table.collected && !table.incomplete,
+                ambient: table
+                    .ambient
+                    .into_iter()
+                    .map(|(specifier, ambient)| AmbientExports {
+                        specifier,
+                        complete: ambient.collected && !ambient.incomplete,
+                        exports: ambient.decls,
+                        export_names: ambient.names,
+                    })
+                    .collect(),
             }),
             Ok(Ok(None)) => Err(UnitError::Cancelled),
             Ok(Err(error)) => Err(error.into()),
@@ -198,10 +218,6 @@ impl Default for Worker {
     }
 }
 
-// What a unit that panicked reports: one internal-error diagnostic at offset 0, and an
-// output marked incomplete, with no exports and an export list that is not complete. A
-// dependent then reads the file's exports as missing, not as empty, so it reports nothing
-// against them.
 fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
     let message = messages::internal_checker_error();
     UnitOutput {
@@ -217,6 +233,7 @@ fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
         exports: Vec::new(),
         export_names: Vec::new(),
         exports_complete: false,
+        ambient: Vec::new(),
     }
 }
 

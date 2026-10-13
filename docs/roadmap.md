@@ -4,7 +4,7 @@ This roadmap describes the semantic capabilities the project is building toward.
 
 ## Current baseline
 
-**Generics Tier 1** is the current semantic frontier.
+**Cross-File Types** is the current semantic frontier: a type written in one file is used in another, imports are diagnosed, and the members of an import cycle settle (see [cross-file-types](architecture/cross-file-types.md)).
 
 The completed foundation includes:
 
@@ -17,34 +17,29 @@ The completed foundation includes:
 - classes, inheritance, constructors, methods, and `this`;
 - expression and statement checking;
 - parameters and destructuring;
-- first-tier generic function inference and substitution.
+- generics on functions, interfaces, aliases and classes, with inference, constraints, defaults and recursive shapes;
+- narrowing that follows control flow, including discriminated unions, loops and joins;
+- intersection types and calls through an intersection of functions;
+- declarations as `Ref` slots with names on their own nodes;
+- stable keys, portable declarations and a project check that passes each layer's exports to the next.
 
-## Next: Generic Semantic Core
-
-The next work should strengthen the existing generic implementation without another repository-wide rewrite.
-
+## Next: closing the cross-file gaps
+The generic core that this section used to describe is done. The next work finishes what crossing files started, without another repository-wide rewrite.
 Targets:
+1. export classes, enums and overloads, which today set `incomplete` and are left out;
+2. `export * as ns`, default classes, default expressions and anonymous defaults;
+3. read packages, so an import from `node_modules` binds something and a bare specifier can be diagnosed;
+4. tsconfig `paths` and `baseUrl`;
+5. re-check only the changed files and their dependents, through the Salsa layer that exists and is not yet used;
+6. decide on purpose between one unit per cycle and the current iteration of its members (decision 4 in [decisions](decisions.md)).
+The cross-file algorithms belong beside the portable declarations. AST traversal belongs in `bridge/`.
 
-1. type-parameter constraints;
-2. explicit type arguments;
-3. reusable substitution and instantiation;
-4. inference from nested arrays and object properties;
-5. multiple inference candidates;
-6. generic methods and classes;
-7. constraint validation;
-8. recursive inference protection;
-9. regression coverage for every semantic rule.
-
-The generic algorithms belong in the semantic layer. AST traversal belongs in `bridge/`.
-
-## After generic foundations
+## After the cross-file foundation
 
 The preferred order is:
 
 ```text
-Generics Tier 1
-    ↓
-constraints + stronger inference
+Cross-File Types
     ↓
 keyof + indexed access
     ↓
@@ -108,7 +103,7 @@ immutable project index
   └── file C → CheckContext
 ```
 
-The graph, layering and parallel project check are in place behind the `module-resolution` feature (see [module-resolution.md](module-resolution.md)). What remains is the part that makes the graph matter to the checker: an export table per checked file and import sites that look into it.
+The graph, layering and parallel project check are in place behind the `module-resolution` feature (see [module-resolution.md](architecture/module-resolution.md)). The part that makes the graph matter to the checker is in place too: each checked file exports an owned table, and import sites look into the file they name. What remains is packages, `paths` and re-checking only what changed (see the list above).
 
 Parallelism belongs at the file/program/session boundary. The current checker should not gain locks merely in anticipation of this future.
 

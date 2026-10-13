@@ -104,6 +104,16 @@ This separation makes semantic algorithms reusable by future tooling and typed-I
 | `bridge/narrow.rs` | Maintain TypeScript-aware flow narrowing |
 | `semantic/queries.rs` | Stable read-only semantic relation boundary |
 | `semantic/generics.rs` | Generic inference, substitution, and related semantic helpers |
+| `explain.rs` | The chain of reasons tsc prints under a not-assignable error |
+| `type_display.rs` | Print a type the way tsc does in a message |
+| `lib_global_types.rs` | Generated list of the global type names tsc knows, so a library name is not reported as unknown |
+| `keys.rs` | Stable `ModuleKey`, `DeclKey`, `SigHash` and `NodeHash` |
+| `stable_hash.rs`, `stable_walk.rs` | The canonical node encoding and its Merkle hash, and the arena walk that feeds it |
+| `portable.rs` | Declarations as arena-free data, the importer, and the `ImportSource` a unit reads its imports through |
+| `unit.rs` | A file as a unit of work: `UnitContext`, `UnitOutput` and `Worker` |
+| `bridge/declare.rs` | The declare pass: register a file's top-level declarations |
+| `bridge/imports.rs`, `bridge/exports.rs` | Bind the names a file imports; collect what it exports as portable declarations |
+| `bridge/unresolved_names.rs`, `bridge/unreachable_code.rs` | One pass for unknown type names, one for unreachable code |
 | `diagnostics.rs` | The public `Diagnostic`/`Severity` representation consumers see |
 | `diagnostic_codes.rs` | Stable `TSR####` identifiers, ts-rust's own namespace |
 | `diagnostic_messages.rs` | Pairs a code with its message text, one constructor per diagnostic kind |
@@ -114,7 +124,7 @@ This separation makes semantic algorithms reusable by future tooling and typed-I
 | `topology.rs` | Opt-in petgraph view of the module graph: component order and cycles, with `NodeIndex` kept private |
 | `incremental.rs` | Opt-in Salsa input (`SourceFile`) and first query; unchanged saves start no revision |
 | `scratchpad.rs` | Opt-in bump scratch for one worker; accepts only `Copy` values |
-| `module_resolution/` | Opt-in project layer: resolver wrapper, import discovery, module graph with cycles and layers, parallel project check, change detection |
+| `module_resolution/` | Opt-in project layer: resolver wrapper, import discovery, module graph with cycles and layers, parallel project check that passes each layer's exports to the next, change detection |
 | `wasm.rs` | WASM-facing adaptation |
 
 ## Feature modules
@@ -125,9 +135,11 @@ Expressions:
 
 ```text
 expressions/
+├── assignment.rs
 ├── binary.rs
 ├── calls.rs
 ├── core.rs
+├── elaborate.rs
 ├── excess.rs
 ├── functions.rs
 ├── logical.rs
@@ -335,7 +347,7 @@ Worker-local state should include diagnostics, narrowing, current function/class
 
 Shared project information should become immutable or snapshot-based after indexing.
 
-The first part of this exists behind the `module-resolution` feature: `ModuleGraph` is built synchronously (it assigns `FileId`s and edges), and `check_project` then checks each dependency layer in parallel, one `CheckSession` per file, sorting the report by `FileId`. The graph is not yet shared with the checker, so files are still checked independently. See [module-resolution.md](module-resolution.md).
+Most of this exists behind the `module-resolution` feature: `ModuleGraph` is built synchronously (it assigns `FileId`s and edges), and `check_project` checks each dependency layer in parallel, each file as a unit with its module key and an `ImportSource`, one `Worker` per thread, sorting the report by `FileId`. What a layer exports is collected before the next layer starts, so an import is looked up in the file it names, and the members of a cycle are checked again until their exports settle. See [module-resolution](architecture/module-resolution.md) for the graph and [cross-file-types](architecture/cross-file-types.md) for what crosses files.
 
 The eventual parallel boundary is the file/program/session, not individual AST nodes. Do not add locks to the semantic hot path merely to prepare for multithreading.
 

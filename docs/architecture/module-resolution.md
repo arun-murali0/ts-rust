@@ -6,9 +6,9 @@
 
 Every earlier milestone checks one source string. A real project is a set of files that import each other, and before any name can be looked up across a file boundary, three smaller questions need an answer: which file does an import mean, in what order can the files be checked, and which files changed since they were last read.
 
-Module Resolution answers those three and nothing else. It does not bind an imported name to its declaration in another file; that is the next consumer of what this milestone builds, and the document says so in section 10 so the gap is not read as a claim.
+Module Resolution answers those three and nothing else. It does not bind an imported name to its declaration in another file. That is the next consumer of what this milestone builds, and it is told in [cross-file-types](cross-file-types.md): this document stops at handing the checker its files in a safe order.
 
-There are 26 integration tests in `tests/module_resolution.rs` (3 of them cover the petgraph view added later, see [architecture-foundation](architecture-foundation.md)), 10 unit tests next to the code, and 7 small projects under `tests/module-resolution-fixtures/`.
+There are 26 integration tests in `tests/module_resolution.rs` (3 of them cover the petgraph view added later, see [architecture-foundation](foundation-dependencies.md)), 10 unit tests next to the code, and 7 small projects under `tests/module-resolution-fixtures/`.
 
 ## 2. An opt-in feature, not a default dependency
 
@@ -98,7 +98,7 @@ sort the report by FileId
 - **Only checkable files.** TypeScript source outside `node_modules`. Declaration files of dependencies are in the graph because their imports matter, but checking someone else's package is not the project's job. `dependency_declarations_are_in_the_graph_but_are_not_checked` protects that.
 - **No file is left out.** A file that cannot be read is `ReadFailed` and one the checker rejects is `CheckFailed`. A report that silently omits files reads as all clear for exactly the files nobody looked at, which is the same rule that keeps an unresolved import in the graph. `ProjectReport::failure_count` separates files that were not checked from files that were checked and found wrong.
 
-Each file is still checked on its own, and that is deliberate. An import statement currently gets the same unimplemented-statement warning it gets in single-file mode. The layering is in place so that once an import is looked up in the file it names, that file has already been checked.
+**What this section describes, and what replaced part of it.** When this milestone landed each file was checked on its own, deliberately, and an import statement got the same unimplemented-statement warning it gets in single-file mode. The layering was in place so that once an import was looked up in the file it names, that file would already have been checked. That is now what happens: each file runs as a unit with its module key and an `ImportSource`, a layer's exports are collected before the next layer starts, and the members of a cycle are checked again until their exports settle. The checker side is in [cross-file-types](cross-file-types.md). The graph, the layers and the one-session-per-file rule above are unchanged.
 
 ## 8. Change detection in two steps
 
@@ -129,11 +129,10 @@ The tsc comparison harness checks every `.ts` file under `tests/fixtures/` on it
 
 ## 10. What is still not done
 
-- **Cross-file binding.** An imported name is not yet looked up in the file it comes from. That needs an export table per checked file, which is the next stage in `BUILD.md`.
 - **tsconfig-aware resolution.** The resolver is built without a tsconfig, so `paths` and `baseUrl` are not applied.
 - **Ambient modules and augmentation.** `declare module` is not modeled.
 - **Using the change report.** `changed_files` says what differs; nothing re-checks only those files and their dependents yet.
-- **`import type` as a checker distinction.** The graph records the flag; the checker does not read it.
+- **Packages.** An import of a file under `node_modules` is in the graph, but its declarations are not read, so it binds nothing ([cross-file-types](cross-file-types.md)).
 
 ## 11. What Module Resolution completed
 

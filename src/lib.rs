@@ -51,7 +51,7 @@ pub use portable::{
     PortableType,
 };
 pub use stable_hash::Prim;
-pub use unit::{CancelToken, UnitContext, UnitError, UnitOutput, Worker};
+pub use unit::{AmbientExports, CancelToken, UnitContext, UnitError, UnitOutput, Worker};
 
 #[cfg(feature = "incremental")]
 pub use incremental::{
