@@ -82,18 +82,7 @@ pub(super) fn infer_call_expression_type(
                 ident.name.to_string(),
             )
         }
-        Expression::StaticMemberExpression(member) => {
-            let object_type = infer_expression_type(&member.object, scoping, ctx);
-            let (object_type, _) = super::members::strip_nullish_object(
-                &member.object,
-                object_type,
-                member.optional,
-                ctx,
-            );
-            let property_type =
-                infer_member_access_type(object_type, &member.property.name, member.span(), ctx);
-            (property_type, member.property.name.to_string())
-        }
+        Expression::StaticMemberExpression(member) => member_callee(member, scoping, ctx),
         _ => {
             ctx.warning(
                 crate::diagnostic_messages::messages::unimplemented_call_expression_kind(),
@@ -120,23 +109,54 @@ pub(super) fn infer_call_expression_type(
     )
 }
 
-// Only `new Name(...)` is handled. A name there is a class declaration, so it is marked as
-// a declaration like a function's name: `new Box(x)` inside `Box` infers `T` again
-// instead of reusing the one being checked.
+// The type and the name of an `a.b` callee: the member's type read off the object's, with
+// a nullish object reported once, as any other member access is.
+fn member_callee(
+    member: &oxc_ast::ast::StaticMemberExpression,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> (TypeId, String) {
+    let object_type = infer_expression_type(&member.object, scoping, ctx);
+    let (object_type, _) =
+        super::members::strip_nullish_object(&member.object, object_type, member.optional, ctx);
+    let property_type =
+        infer_member_access_type(object_type, &member.property.name, member.span(), ctx);
+    (property_type, member.property.name.to_string())
+}
+
+// `new Name(...)` and `new a.b(...)` (`new N.K()`, `new A.B.K()`). Either names a class
+// declaration, so the callee is marked as one like a function's name is: `new Box(x)`
+// inside `Box` infers `T` again instead of reusing the one being checked, and
+// `new N.Box(x)` is read the same way. Any other callee (a call's result, a computed
+// access, a parenthesized expression) gets the not-yet-checked warning and the error type,
+// which is compatible with everything, so a `new` this checker cannot read adds no second
+// error.
+//
+// Problem: only `new Name(...)` was read, so `new N.K()` on a class inside a namespace was
+// skipped with a warning, and its result was the error type, which hid every mistake made
+// with the instance and every wrong argument to its constructor.
+// Picked: take the member's type the way a call on `a.b` does (member_callee) and run the
+// same check as for a plain name. The namespace's value already holds the class's
+// constructor as a property, so there is nothing new to look up.
 pub(super) fn infer_new_expression_type(
     new_expr: &oxc_ast::ast::NewExpression,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
-    let Expression::Identifier(callee_ident) = &new_expr.callee else {
-        ctx.warning(
-            crate::diagnostic_messages::messages::unimplemented_new_expression_target(),
-            new_expr.span(),
-        );
-        return ctx.arena.error();
+    let (callee_type, callee_name) = match &new_expr.callee {
+        Expression::Identifier(callee_ident) => (
+            resolve_identifier_type(callee_ident, scoping, ctx),
+            callee_ident.name.to_string(),
+        ),
+        Expression::StaticMemberExpression(member) => member_callee(member, scoping, ctx),
+        _ => {
+            ctx.warning(
+                crate::diagnostic_messages::messages::unimplemented_new_expression_target(),
+                new_expr.span(),
+            );
+            return ctx.arena.error();
+        }
     };
-
-    let callee_type = resolve_identifier_type(callee_ident, scoping, ctx);
     let explicit_type_args =
         resolve_explicit_type_arguments(new_expr.type_arguments.as_deref(), ctx);
 
@@ -145,7 +165,7 @@ pub(super) fn infer_new_expression_type(
         CallSite {
             arguments: &new_expr.arguments,
             span: new_expr.span(),
-            callee_name: &callee_ident.name,
+            callee_name: &callee_name,
             is_new: true,
             callee_is_declaration: true,
             explicit_type_args: &explicit_type_args,

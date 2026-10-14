@@ -1,4 +1,6 @@
-use oxc_ast::ast::{IdentifierReference, Program, TSTypeName, TSTypeReference};
+use oxc_ast::ast::{
+    IdentifierReference, Program, TSNamespaceDeclaration, TSTypeName, TSTypeReference,
+};
 use oxc_ast_visit::{Visit, walk};
 use oxc_semantic::Scoping;
 
@@ -50,6 +52,21 @@ struct Walker<'s, 'c, 'ast, 'src> {
 }
 
 impl<'a> Visit<'a> for Walker<'_, '_, '_, '_> {
+    // Problem: a second block of a namespace (`namespace A { export interface I {} }`
+    // then `namespace A { function f(i: I) {} }`) reported `I` as missing. oxc keeps one
+    // scope per block, so the name is not lexically in reach of the second block, and
+    // the top-level lookup below finds only `A.I`, never `I`.
+    // Picked: enter the namespace's scope in the type namespace while its body is walked,
+    // the way the declare and check passes do. A name is then looked up as `A.I` first,
+    // which finds what any block of `A` declared, and a dotted `namespace A.B` enters A
+    // and then B.
+    // Cost: none beyond a push and a pop per namespace.
+    fn visit_ts_namespace_declaration(&mut self, it: &TSNamespaceDeclaration<'a>) {
+        self.ctx.namespace.push_scope(&it.id.name);
+        walk::walk_ts_namespace_declaration(self, it);
+        self.ctx.namespace.pop_scope();
+    }
+
     fn visit_ts_type_reference(&mut self, it: &TSTypeReference<'a>) {
         if let TSTypeName::IdentifierReference(id) = &it.type_name
             && is_unresolved_type_name(id, self.scoping, &self.ctx.namespace)

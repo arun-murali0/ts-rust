@@ -259,9 +259,7 @@ fn push_declaration<'ast>(
             }
         }
         Declaration::TSNamespaceDeclaration(ns) => {
-            if !push_namespace(items, seen, ns, named(&ns.id.name), ambient) {
-                *incomplete = true;
-            }
+            push_namespace(items, seen, ns, named(&ns.id.name), ambient)
         }
         // A module block has a value side the portable form does not carry yet. Not exported, they are nothing to us.
         _ => {
@@ -854,16 +852,12 @@ fn push_namespace<'ast>(
     ns: &'ast oxc_ast::ast::TSNamespaceDeclaration<'ast>,
     names: Vec<String>,
     ambient: bool,
-) -> bool {
-    if super::declare::namespace_block(ns).is_none() {
-        return false;
-    }
+) {
     let node = Node::NamespaceValue {
         symbol: ns.id.symbol_id.get(),
     };
     push_item(items, seen, &ns.id.name, DeclKind::Var, node, names.clone());
     push_namespace_types(items, seen, ns, &ns.id.name, &names, ambient || ns.declare);
-    true
 }
 
 fn push_namespace_types<'ast>(
@@ -875,10 +869,7 @@ fn push_namespace_types<'ast>(
     ambient: bool,
 ) {
     use super::declare::TopLevelItem;
-    let Some(block) = super::declare::namespace_block(ns) else {
-        return;
-    };
-    let members = super::declare::items_in(&block.body);
+    let members = super::declare::namespace_members(ns);
     let any_marked = members.iter().any(|(_, marked)| *marked);
     for (item, marked) in members {
         if !(marked || (ambient && !any_marked)) {
