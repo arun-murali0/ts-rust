@@ -60,6 +60,8 @@ pub enum NodeIn<'a> {
         /// An untyped function accepts any call; it is part of the type's identity.
         is_untyped: bool,
         tparams: &'a [TypeParamKey],
+        bounds: &'a [Option<NodeHash>],
+        defaults: &'a [Option<NodeHash>],
     },
     Intersection(&'a [NodeHash]),
     DeclRef(DeclKey),
@@ -112,6 +114,8 @@ pub fn hash_node(node: &NodeIn<'_>) -> NodeHash {
             ret,
             is_untyped,
             tparams,
+            bounds,
+            defaults,
         } => {
             w.u8(0x23).u8(*is_untyped as u8).u32(params.len() as u32);
             for p in *params {
@@ -126,6 +130,20 @@ pub fn hash_node(node: &NodeIn<'_>) -> NodeHash {
             w.raw128(ret.as_u128()).u32(tparams.len() as u32);
             for t in *tparams {
                 w.raw128(t.owner.as_u128()).u32(t.index);
+            }
+            w.u32(bounds.len() as u32);
+            for bound in *bounds {
+                match bound {
+                    Some(hash) => w.u8(1).raw128(hash.as_u128()),
+                    None => w.u8(0),
+                };
+            }
+            w.u32(defaults.len() as u32);
+            for default in *defaults {
+                match default {
+                    Some(hash) => w.u8(1).raw128(hash.as_u128()),
+                    None => w.u8(0),
+                };
             }
         }
         NodeIn::Intersection(members) => {
@@ -248,6 +266,8 @@ mod tests {
                 ret: st(),
                 is_untyped: untyped,
                 tparams: &[],
+                bounds: &[],
+                defaults: &[],
             })
         };
         let base = f(false, false, false);
@@ -269,6 +289,8 @@ mod tests {
                 ret: st(),
                 is_untyped: false,
                 tparams: &[],
+                bounds: &[],
+                defaults: &[],
             })
         };
         assert_eq!(f(None), f(None));
@@ -390,19 +412,19 @@ mod tests {
             (
                 "module",
                 m.as_u128(),
-                0x07cd6aa4402504698f349614b12eac36_u128,
+                0x3697c3e48be71a530544ed739d96180f_u128,
             ),
-            ("decl", d.as_u128(), 0xc76c2596bcbb9302c8d9ecc595cacf3b),
+            ("decl", d.as_u128(), 0x989b8ba5d89b3a99f453e2557c3315d7),
             (
                 "number",
                 num().as_u128(),
-                0xe47f10c79243838966e9c4aa7c53ef78,
+                0x471b3ceeb93f25c3e065b0bfdf57b3d5,
             ),
-            ("object", obj.as_u128(), 0xbbc1c3fe66e12c9a5b9117c510663148),
+            ("object", obj.as_u128(), 0x6563f85e333b2dc4979eb9f44bf6fbe1),
             (
                 "app",
                 hash_node(&NodeIn::App(d, &[st()])).as_u128(),
-                0xd9ec850244ab12fb54b4b38ed7fc6aa6,
+                0x54404ace929646097cb0488a9bda57f7,
             ),
         ];
         for (n, v, want) in got {

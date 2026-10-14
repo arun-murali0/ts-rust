@@ -516,7 +516,7 @@ impl<'a> TypeNamespace<'a> {
     pub fn resolve_type_param_default(
         &mut self,
         arena: &mut TypeArena,
-        decl: &'a oxc_ast::ast::TSTypeParameterDeclaration<'a>,
+        decl: &oxc_ast::ast::TSTypeParameterDeclaration<'_>,
         index: usize,
     ) -> Option<TypeId> {
         let param = decl.params.get(index)?;
@@ -1144,20 +1144,31 @@ impl<'a> TypeNamespace<'a> {
                     let PropertyKey::StaticIdentifier(key) = &method.key else {
                         return None;
                     };
+                    let method_scope = self.push_type_params(arena, &method.value);
                     let return_type = method
                         .value
                         .return_type
                         .as_ref()
-                        .and_then(|rt| resolve_type_annotation(rt, self, arena))?;
+                        .and_then(|rt| resolve_type_annotation(rt, self, arena));
 
                     let (params, is_untyped) =
                         match resolve_function_params(&method.value.params, self, arena) {
                             Some(params) => (params, false),
                             None => (Vec::new(), true),
                         };
+                    let type_params = crate::type_annotation::resolve_function_type_params(
+                        method.value.type_parameters.as_deref(),
+                        self,
+                        arena,
+                    );
+                    self.pop_type_params(method_scope);
+                    let Some(return_type) = return_type else {
+                        return None;
+                    };
                     let method_type = arena.alloc(Type::Function(crate::types::FunctionType {
                         params,
                         return_type,
+                        type_params,
                         is_untyped,
                     }));
                     upsert_property(

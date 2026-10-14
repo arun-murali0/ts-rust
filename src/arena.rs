@@ -1010,6 +1010,7 @@ impl TypeArena {
 
             (Type::Function(f), Type::Function(g)) => {
                 f.is_untyped == g.is_untyped
+                    && f.type_params == g.type_params
                     && f.params.len() == g.params.len()
                     && f.params.iter().zip(&g.params).all(|(p, q)| {
                         p.optional == q.optional
@@ -1526,6 +1527,7 @@ mod tests {
                     name: None,
                 }],
                 return_type: ret,
+                type_params: Vec::new(),
                 is_untyped: false,
             }))
         };
@@ -1606,6 +1608,7 @@ mod tests {
             arena.alloc(Type::Function(FunctionType {
                 params: vec![Param::required(number)],
                 return_type: string,
+                type_params: Vec::new(),
                 is_untyped: false,
             }))
         };
@@ -1707,6 +1710,7 @@ mod tests {
                     name: Some(name.into()),
                 }],
                 return_type: string,
+                type_params: Vec::new(),
                 is_untyped: false,
             }))
         };
@@ -2087,6 +2091,7 @@ mod tests {
         let function = arena.alloc(Type::Function(FunctionType {
             params: vec![],
             return_type: void,
+            type_params: Vec::new(),
             is_untyped: false,
         }));
         let entry = |is_method: bool| PropertyEntry {
@@ -2368,6 +2373,7 @@ mod intersection_tests {
         let function = arena.alloc(Type::Function(crate::types::FunctionType {
             params: Vec::new(),
             return_type: number,
+            type_params: Vec::new(),
             is_untyped: false,
         }));
         let t = parameter(&mut arena, "T", 1);

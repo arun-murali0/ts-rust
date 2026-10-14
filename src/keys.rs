@@ -10,7 +10,7 @@ use std::path::{Component, Path};
 
 use xxhash_rust::xxh3::Xxh3;
 
-pub const ENC_VERSION: u8 = 2;
+pub const ENC_VERSION: u8 = 3;
 
 macro_rules! key128 {
     ($(#[$meta:meta])* $name:ident) => {
@@ -209,6 +209,17 @@ impl DeclKey {
     pub fn child(self, ordinal: u32) -> Self {
         let mut w = StreamWriter::new();
         w.u8(0xDC).raw128(self.as_u128()).u32(ordinal);
+        Self(w.finish())
+    }
+
+    /// Stable owner for a generic signature nested inside a module declaration. The
+    /// signature's first type-parameter source position distinguishes it from sibling
+    /// signatures, while the module key keeps equal offsets in different files apart.
+    pub(crate) fn nested_type_signature(module: ModuleKey, first_parameter_start: u32) -> Self {
+        let mut w = StreamWriter::new();
+        w.u8(0xDD)
+            .raw128(module.as_u128())
+            .u32(first_parameter_start);
         Self(w.finish())
     }
 }

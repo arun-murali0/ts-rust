@@ -15,7 +15,7 @@ else
 fi
 
 # --locked: a stale Cargo.lock fails instead of being rewritten quietly.
-echo "==> cargo test"
+echo "==> cargo test --features module-resolution"
 cargo test --locked --all-features
 
 echo "==> CI PASSED"

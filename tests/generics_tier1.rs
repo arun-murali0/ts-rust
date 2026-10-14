@@ -317,3 +317,29 @@ fn explicit_type_argument_is_checked_against_its_constraint() {
         "got: {diagnostics:?}"
     );
 }
+
+#[test]
+fn generic_function_default_is_used_when_argument_inference_has_no_candidate() {
+    // The generic parameter occurs in the return type, but no argument can infer it.
+    // The declared default must survive signature construction and be applied at the call.
+    let diagnostics = check(
+        "declare function make<T = string>(): T; const text: string = make();",
+        "generic_function_default_is_used_when_argument_inference_has_no_candidate.ts",
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "expected T's string default to be used, got: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn generic_function_type_default_is_used_for_a_nested_signature() {
+    let diagnostics = check(
+        "type Factory = <T = string>() => T; declare const make: Factory; const text: string = make();",
+        "generic_function_type_default_is_used_for_a_nested_signature.ts",
+    );
+    assert!(
+        diagnostics.is_empty(),
+        "expected nested generic signature metadata to preserve its default, got: {diagnostics:?}"
+    );
+}

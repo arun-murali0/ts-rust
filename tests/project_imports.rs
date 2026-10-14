@@ -1473,6 +1473,86 @@ fn a_namespace_import_of_a_partial_module_still_names_its_types() {
     assert_eq!(codes, vec![Some(2322)], "{:?}", project.errors("b.ts"));
 }
 
+// Dotted and merged namespaces, and `new` on a member, across files.
+#[test]
+fn a_dotted_namespace_crosses_files_as_a_nested_one() {
+    let project = run(
+        "namespace-dotted",
+        &[
+            (
+                "a.ts",
+                "export namespace A.B {\n  export interface T { n: number }\n  export const x: number = 1;\n}",
+            ),
+            (
+                "b.ts",
+                "import { A } from './a';\nconst ok: number = A.B.x;\nconst t: A.B.T = { n: 1 };\nconst bad: A.B.T = { n: 's' };\nconst wrong: string = A.B.x;",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(
+        codes,
+        vec![Some(2322), Some(2322)],
+        "{:?}",
+        project.errors("b.ts")
+    );
+    assert!(
+        project.errors("a.ts").is_empty(),
+        "{:?}",
+        project.errors("a.ts")
+    );
+}
+
+#[test]
+fn a_function_merged_with_a_namespace_crosses_files_with_both_parts() {
+    let project = run(
+        "namespace-merged-function",
+        &[
+            (
+                "a.ts",
+                "export function f(): number { return 1 }\nexport namespace f { export const extra: string = 'e'; }",
+            ),
+            (
+                "b.ts",
+                "import { f } from './a';\nconst a: number = f();\nconst b: string = f.extra;\nconst wrong: number = f.extra;",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2322)], "{:?}", project.errors("b.ts"));
+}
+
+#[test]
+fn new_on_an_imported_namespace_member_is_checked() {
+    let project = run(
+        "namespace-new-member",
+        &[
+            (
+                "a.ts",
+                "export namespace N { export class K { constructor(public v: number) {} } }",
+            ),
+            (
+                "b.ts",
+                "import { N } from './a';\nconst ok: N.K = new N.K(1);\nconst bad = new N.K('a');",
+            ),
+        ],
+    );
+    let codes: Vec<_> = project
+        .errors("b.ts")
+        .iter()
+        .map(|d| d.code.tsc_code())
+        .collect();
+    assert_eq!(codes, vec![Some(2345)], "{:?}", project.errors("b.ts"));
+}
+
 #[test]
 fn a_nested_namespace_is_named_with_the_whole_path() {
     let project = run(

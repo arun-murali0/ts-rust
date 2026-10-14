@@ -3,17 +3,13 @@ use oxc_semantic::Scoping;
 use oxc_span::{GetSpan, Span};
 
 use crate::arena::TypeId;
+use crate::semantic::{GenericInferenceSession, GenericSolver};
 use crate::types::{FunctionType, Type};
 
 use super::super::context::CheckContext;
 use super::super::narrow::resolve_symbol_id;
 use super::infer_expression_type;
-use super::{
-    check_excess_properties, collect_generic_param_constraints, contains_type_param,
-    expected_param_type, infer_member_access_type, infer_type_param_bindings,
-    ordered_generic_param_ids, resolve_identifier_type, substitute_bound_type_params,
-    substitute_type_params,
-};
+use super::{check_excess_properties, infer_member_access_type, resolve_identifier_type};
 
 // Resolves an explicit call-site type argument list, e.g. the <string> in
 // identity<string>(x), into concrete TypeIds. Returns an empty vec for a call
@@ -82,18 +78,7 @@ pub(super) fn infer_call_expression_type(
                 ident.name.to_string(),
             )
         }
-        Expression::StaticMemberExpression(member) => {
-            let object_type = infer_expression_type(&member.object, scoping, ctx);
-            let (object_type, _) = super::members::strip_nullish_object(
-                &member.object,
-                object_type,
-                member.optional,
-                ctx,
-            );
-            let property_type =
-                infer_member_access_type(object_type, &member.property.name, member.span(), ctx);
-            (property_type, member.property.name.to_string())
-        }
+        Expression::StaticMemberExpression(member) => member_callee(member, scoping, ctx),
         _ => {
             ctx.warning(
                 crate::diagnostic_messages::messages::unimplemented_call_expression_kind(),
@@ -120,23 +105,54 @@ pub(super) fn infer_call_expression_type(
     )
 }
 
-// Only `new Name(...)` is handled. A name there is a class declaration, so it is marked as
-// a declaration like a function's name: `new Box(x)` inside `Box` infers `T` again
-// instead of reusing the one being checked.
+// The type and the name of an `a.b` callee: the member's type read off the object's, with
+// a nullish object reported once, as any other member access is.
+fn member_callee(
+    member: &oxc_ast::ast::StaticMemberExpression,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) -> (TypeId, String) {
+    let object_type = infer_expression_type(&member.object, scoping, ctx);
+    let (object_type, _) =
+        super::members::strip_nullish_object(&member.object, object_type, member.optional, ctx);
+    let property_type =
+        infer_member_access_type(object_type, &member.property.name, member.span(), ctx);
+    (property_type, member.property.name.to_string())
+}
+
+// `new Name(...)` and `new a.b(...)` (`new N.K()`, `new A.B.K()`). Either names a class
+// declaration, so the callee is marked as one like a function's name is: `new Box(x)`
+// inside `Box` infers `T` again instead of reusing the one being checked, and
+// `new N.Box(x)` is read the same way. Any other callee (a call's result, a computed
+// access, a parenthesized expression) gets the not-yet-checked warning and the error type,
+// which is compatible with everything, so a `new` this checker cannot read adds no second
+// error.
+//
+// Problem: only `new Name(...)` was read, so `new N.K()` on a class inside a namespace was
+// skipped with a warning, and its result was the error type, which hid every mistake made
+// with the instance and every wrong argument to its constructor.
+// Picked: take the member's type the way a call on `a.b` does (member_callee) and run the
+// same check as for a plain name. The namespace's value already holds the class's
+// constructor as a property, so there is nothing new to look up.
 pub(super) fn infer_new_expression_type(
     new_expr: &oxc_ast::ast::NewExpression,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
-    let Expression::Identifier(callee_ident) = &new_expr.callee else {
-        ctx.warning(
-            crate::diagnostic_messages::messages::unimplemented_new_expression_target(),
-            new_expr.span(),
-        );
-        return ctx.arena.error();
+    let (callee_type, callee_name) = match &new_expr.callee {
+        Expression::Identifier(callee_ident) => (
+            resolve_identifier_type(callee_ident, scoping, ctx),
+            callee_ident.name.to_string(),
+        ),
+        Expression::StaticMemberExpression(member) => member_callee(member, scoping, ctx),
+        _ => {
+            ctx.warning(
+                crate::diagnostic_messages::messages::unimplemented_new_expression_target(),
+                new_expr.span(),
+            );
+            return ctx.arena.error();
+        }
     };
-
-    let callee_type = resolve_identifier_type(callee_ident, scoping, ctx);
     let explicit_type_args =
         resolve_explicit_type_arguments(new_expr.type_arguments.as_deref(), ctx);
 
@@ -145,7 +161,7 @@ pub(super) fn infer_new_expression_type(
         CallSite {
             arguments: &new_expr.arguments,
             span: new_expr.span(),
-            callee_name: &callee_ident.name,
+            callee_name: &callee_name,
             is_new: true,
             callee_is_declaration: true,
             explicit_type_args: &explicit_type_args,
@@ -388,7 +404,7 @@ fn fit_of(
                 None => continue,
             },
         };
-        let judged = crate::semantic::contains_type_param(arena, parameter)
+        let judged = GenericSolver::contains_type_param(arena, parameter)
             || crate::subtyping::is_subtype(arena, argument, parameter);
         if !judged {
             return Fit::WrongArgument { index, parameter };
@@ -607,10 +623,24 @@ fn check_callable(
     // matching this checker's general "leave the rest to be inferred/left
     // unresolved" stance rather than treating it as an arity error.
     let mut declared_param_ids = Vec::new();
-    for param in &function_type.params {
-        ordered_generic_param_ids(&ctx.arena, param.type_id, &mut declared_param_ids);
+    // Signature metadata preserves declaration order and parameters that do not occur
+    // structurally (for example `<T = string>() => T` or `<T>() => void`).
+    for type_param in &function_type.type_params {
+        if !declared_param_ids.contains(&type_param.id) {
+            declared_param_ids.push(type_param.id);
+        }
     }
-    ordered_generic_param_ids(
+    // Retain the graph walk for enclosing generic parameters, e.g. a method using the
+    // containing class's T. The walker intentionally does not pull in a nested callback's
+    // own type-parameter list as if it belonged to this call.
+    for param in &function_type.params {
+        GenericSolver::ordered_generic_param_ids(
+            &ctx.arena,
+            param.type_id,
+            &mut declared_param_ids,
+        );
+    }
+    GenericSolver::ordered_generic_param_ids(
         &ctx.arena,
         function_type.return_type,
         &mut declared_param_ids,
@@ -648,32 +678,62 @@ fn check_callable(
         }
     }
 
+    let mut inference = GenericInferenceSession::new(bindings, locked);
     for (index, arg_type) in arg_types.iter().enumerate() {
         let Some(arg_type) = arg_type else { continue };
-        if let Some(param_type) = expected_param_type(&ctx.arena, &function_type.params, index) {
-            infer_type_param_bindings(
+        if let Some(param_type) =
+            GenericSolver::expected_param_type(&ctx.arena, &function_type.params, index)
+        {
+            inference.infer_argument(
                 &mut ctx.arena,
                 param_type,
                 *arg_type,
-                &mut bindings,
-                &locked,
                 &mut ctx.relation_cache,
             );
         }
     }
+    let mut bindings = inference.finish(&mut ctx.arena, &mut ctx.relation_cache);
 
-    // Checked once per call, after every argument has had its chance to inform a
-    // binding, and before the per-argument assignability loop below: a type
-    // parameter with an `extends` bound (function f<T extends { length: number
-    // }>(...)) must have its final, fully-inferred binding satisfy that bound.
-    // A parameter nothing ever bound (bindings has no entry for it) is skipped
-    // here entirely, matching the same graceful "left unresolved" treatment an
-    // uninferred parameter already gets everywhere else.
-    let mut constraints = Vec::new();
-    for param in &function_type.params {
-        collect_generic_param_constraints(&ctx.arena, param.type_id, &mut constraints);
+    // Defaults are consulted only after argument inference: an inferred candidate wins,
+    // an explicit argument is already locked, and a parameter with no candidate receives
+    // its default. Processing in declaration order lets `<T, U = T>` substitute T before
+    // U is added. Unspecified parameters without defaults retain the existing unknown
+    // recovery behavior at final substitution.
+    for parameter in &function_type.type_params {
+        if ambient_ids.contains(&parameter.id) || bindings.iter().any(|(id, _)| *id == parameter.id)
+        {
+            continue;
+        }
+        if let Some(default) = parameter.default {
+            let default =
+                GenericSolver::substitute_bound_type_params(&mut ctx.arena, default, &bindings);
+            bindings.push((parameter.id, default));
+        }
     }
-    collect_generic_param_constraints(&ctx.arena, function_type.return_type, &mut constraints);
+
+    // Checked once per call, after every argument candidate has been resolved and
+    // defaults applied, before the per-argument assignability loop: every declared
+    // generic parameter's constraint is checked, including an unused `<T extends X>`.
+    let mut constraints = Vec::new();
+    for parameter in &function_type.type_params {
+        if let Some(constraint) = parameter.constraint
+            && !constraints.iter().any(|(id, _, _)| *id == parameter.id)
+        {
+            constraints.push((parameter.id, parameter.name.clone(), constraint));
+        }
+    }
+    for param in &function_type.params {
+        GenericSolver::collect_generic_param_constraints(
+            &ctx.arena,
+            param.type_id,
+            &mut constraints,
+        );
+    }
+    GenericSolver::collect_generic_param_constraints(
+        &ctx.arena,
+        function_type.return_type,
+        &mut constraints,
+    );
 
     for (id, _, constraint) in &constraints {
         if ambient_ids.contains(id) {
@@ -690,8 +750,9 @@ fn check_callable(
         // binding are kept as they are, and a bound that still mentions one has
         // nothing concrete to compare against, so it is left alone (the same
         // "uninferred is not an error" stance as the skip above).
-        let constraint = substitute_bound_type_params(&mut ctx.arena, *constraint, &bindings);
-        if contains_type_param(&ctx.arena, constraint) {
+        let constraint =
+            GenericSolver::substitute_bound_type_params(&mut ctx.arena, *constraint, &bindings);
+        if GenericSolver::contains_type_param(&ctx.arena, constraint) {
             continue;
         }
         if !ctx.semantic().is_assignable(bound, constraint) {
@@ -722,10 +783,12 @@ fn check_callable(
         let Some(arg_type) = arg_types[index] else {
             continue;
         };
-        let Some(param_type) = expected_param_type(&ctx.arena, &function_type.params, index) else {
+        let Some(param_type) =
+            GenericSolver::expected_param_type(&ctx.arena, &function_type.params, index)
+        else {
             continue;
         };
-        let expected = substitute_type_params(&mut ctx.arena, param_type, &bindings);
+        let expected = GenericSolver::substitute_type_params(&mut ctx.arena, param_type, &bindings);
         if !ctx.semantic().is_assignable(arg_type, expected) {
             // tsc reports a bad property of an object literal argument on the property
             // itself, as a plain assignability error; only an argument it cannot take
@@ -743,7 +806,7 @@ fn check_callable(
         }
     }
 
-    substitute_type_params(&mut ctx.arena, function_type.return_type, &bindings)
+    GenericSolver::substitute_type_params(&mut ctx.arena, function_type.return_type, &bindings)
 }
 
 fn is_array_literal(expr: &Expression) -> bool {

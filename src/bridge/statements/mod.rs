@@ -193,23 +193,24 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
 }
 
 // `namespace N { ... }`: its statements are checked with `N` as the enclosing scope, so a
-// sibling named without the prefix is found. A dotted name (`namespace A.B`) is not read
-// yet and is reported as unchecked, as every namespace was before.
+// sibling named without the prefix is found. `namespace A.B { ... }` is A with B inside it,
+// so B's statements are checked with both as enclosing scopes, B innermost.
 fn check_namespace(
     ns: &oxc_ast::ast::TSNamespaceDeclaration,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) {
-    let Some(block) = super::declare::namespace_block(ns) else {
-        ctx.warning(
-            crate::diagnostic_messages::messages::unimplemented_statement_kind("Other"),
-            ns.span,
-        );
-        return;
-    };
+    use oxc_ast::ast::TSNamespaceDeclarationBody;
     ctx.namespace.push_scope(&ns.id.name);
-    for statement in &block.body {
-        check_statement(statement, scoping, ctx);
+    match &ns.body {
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => {
+            for statement in &block.body {
+                check_statement(statement, scoping, ctx);
+            }
+        }
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
+            check_namespace(inner, scoping, ctx)
+        }
     }
     ctx.namespace.pop_scope();
 }

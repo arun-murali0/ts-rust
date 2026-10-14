@@ -1,11 +1,13 @@
 use oxc_ast::ast::{
     BinaryOperator, BindingPattern, Class, Declaration, ExportDefaultDeclarationKind, Expression,
-    Function, Program, Statement, TSEnumDeclaration, TSInterfaceDeclaration, TSModuleBlock,
+    Function, Program, Statement, TSEnumDeclaration, TSInterfaceDeclaration,
     TSNamespaceDeclaration, TSNamespaceDeclarationBody, TSTypeAliasDeclaration, UnaryOperator,
     VariableDeclaration,
 };
 
-use crate::type_annotation::{resolve_function_params, resolve_type_annotation};
+use crate::type_annotation::{
+    resolve_function_params, resolve_function_type_params, resolve_type_annotation,
+};
 use crate::types::Type;
 
 use super::context::CheckContext;
@@ -39,15 +41,24 @@ pub(super) fn module_scope(specifier: &str) -> String {
     format!("\"{specifier}\"")
 }
 
-// The block of a `namespace N { ... }` this checker reads: a plain name with a block body.
-// `namespace A.B { ... }` (a dotted name) is not one, and neither is `declare module "x"`
-// or `declare global`, so those stay what they were: unchecked and silent.
-pub(super) fn namespace_block<'a>(
+// What a `namespace N { ... }` holds, as the same flat list any statement list gives.
+//
+// Problem: `namespace A.B { ... }` has no block of its own. Its body is another namespace
+// declaration, so a function that wanted a block found none, and the whole declaration was
+// reported as not checked.
+// Picked: read it as what it means, `namespace A { export namespace B { ... } }`: the
+// members of A are one exported namespace, B, and every pass that walks a namespace walks
+// that nesting by recursing into B like into any other member. `A.B.x` and `A.B.T` then
+// need nothing the nested form does not already have.
+// Cost: the exported mark on B is made up here, since the dotted form has none to read.
+pub(super) fn namespace_members<'a>(
     ns: &'a TSNamespaceDeclaration<'a>,
-) -> Option<&'a TSModuleBlock<'a>> {
+) -> Vec<(TopLevelItem<'a>, bool)> {
     match &ns.body {
-        TSNamespaceDeclarationBody::TSModuleBlock(block) => Some(block),
-        TSNamespaceDeclarationBody::TSNamespaceDeclaration(_) => None,
+        TSNamespaceDeclarationBody::TSModuleBlock(block) => items_in(&block.body),
+        TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
+            vec![(TopLevelItem::Namespace(inner), true)]
+        }
     }
 }
 
@@ -147,11 +158,9 @@ fn declare_types<'ast>(items: &[(TopLevelItem<'ast>, bool)], ctx: &mut CheckCont
             }
             TopLevelItem::Enum(decl) => declare_enum(decl, ctx),
             TopLevelItem::Namespace(ns) => {
-                if let Some(block) = namespace_block(ns) {
-                    ctx.namespace.push_scope(&ns.id.name);
-                    declare_types(&items_in(&block.body), ctx);
-                    ctx.namespace.pop_scope();
-                }
+                ctx.namespace.push_scope(&ns.id.name);
+                declare_types(&namespace_members(ns), ctx);
+                ctx.namespace.pop_scope();
             }
             TopLevelItem::ExternalModule(module) => {
                 if let Some(body) = &module.body {
@@ -202,35 +211,131 @@ fn declare_values<'ast>(
                     ctx.namespace.pop_scope();
                 }
             }
-            TopLevelItem::Namespace(ns) => {
-                let Some(block) = namespace_block(ns) else {
-                    continue;
-                };
-                let members = items_in(&block.body);
-                let inside = ambient || ns.declare;
-                ctx.namespace.push_scope(&ns.id.name);
-                declare_values(&members, ctx, inside);
-                ctx.namespace.pop_scope();
-                // Merged with another declaration of the same name (a second block, a
-                // function, a class, an enum, a variable), the object would hide the
-                // other half, so nothing is declared and the name stays unknown.
-                let name = ns.id.name.as_str();
-                if items
-                    .iter()
-                    .filter(|(other, _)| declares_value_named(other, name))
-                    .count()
-                    > 1
-                {
-                    continue;
-                }
-                if let (Some(symbol_id), Some(object)) = (
-                    ns.id.symbol_id.get(),
-                    namespace_value(&members, inside, ctx),
-                ) {
-                    ctx.symbols.declare(symbol_id, object);
+            // A namespace is declared below, once every other declaration of its name has
+            // been, so that all of its blocks are read together.
+            TopLevelItem::Namespace(_) => {}
+            _ => {}
+        }
+    }
+    declare_namespace_values(items, ctx, ambient);
+}
+
+// The value of each namespace in `items`, one per name however many blocks wrote it.
+//
+// Problem: a namespace was declared as an object only when nothing else shared its name.
+// `function f() {}` with `namespace f { export const extra = 1 }` (the way older code
+// hangs properties on a function) left `f` as the bare function, so `f.extra` was
+// reported as missing; a second block of the same namespace left the name unknown.
+// Picked: the blocks of one name are one object, and when a function, a class or an
+// enum has that name too, the value is the intersection of its own type and that object:
+// `f()` still calls, `new C()` still constructs, and `f.extra` reads the member. The
+// intersection is built after every other declaration of the name, so the order they are
+// written in does not matter.
+// Cost: a name shared with a variable is invalid TypeScript and is left as it was. If
+// any member of any block has no type yet, nothing is declared and the name keeps what the
+// other declaration gave it, since an object missing a member would report one that exists.
+fn declare_namespace_values<'ast>(
+    items: &[(TopLevelItem<'ast>, bool)],
+    ctx: &mut CheckContext<'ast, '_>,
+    ambient: bool,
+) {
+    let mut done: Vec<&str> = Vec::new();
+    for (item, _) in items.iter().copied() {
+        let TopLevelItem::Namespace(first) = item else {
+            continue;
+        };
+        let name = first.id.name.as_str();
+        if done.contains(&name) {
+            continue;
+        }
+        done.push(name);
+
+        // Every block of this name, and everything written in them as one list, so a
+        // namespace nested in two blocks (`A.B` in one, `namespace B` inside `A` in the
+        // other) is met as two blocks of B and merged the same way.
+        let blocks: Vec<&TSNamespaceDeclaration<'ast>> = items
+            .iter()
+            .filter_map(|(other, _)| match other {
+                TopLevelItem::Namespace(block) if block.id.name == name => Some(*block),
+                _ => None,
+            })
+            .collect();
+        let all_members: Vec<(TopLevelItem<'ast>, bool)> =
+            blocks.iter().flat_map(|b| namespace_members(b)).collect();
+        ctx.namespace.push_scope(name);
+        declare_values(
+            &all_members,
+            ctx,
+            ambient || blocks.iter().any(|b| b.declare),
+        );
+        ctx.namespace.pop_scope();
+
+        let mut properties: Vec<crate::types::PropertyEntry> = Vec::new();
+        let mut targets: Vec<oxc_semantic::SymbolId> = Vec::new();
+        let mut whole = true;
+        for block in blocks.iter().copied() {
+            match namespace_properties(&namespace_members(block), ambient || block.declare, ctx) {
+                Some(found) => properties.extend(found),
+                None => whole = false,
+            }
+            if let Some(symbol) = block.id.symbol_id.get() {
+                if !targets.contains(&symbol) {
+                    targets.push(symbol);
                 }
             }
-            _ => {}
+        }
+        if !whole {
+            continue;
+        }
+
+        // The declarations the namespace merges with, other than its own blocks.
+        let mut base: Option<crate::arena::TypeId> = None;
+        let mut mergeable = true;
+        for (other, _) in items.iter().copied() {
+            let symbol = match other {
+                TopLevelItem::Function(f) => f.id.as_ref().filter(|id| id.name == name),
+                TopLevelItem::Class(c) => c.id.as_ref().filter(|id| id.name == name),
+                TopLevelItem::Enum(e) => Some(&e.id).filter(|id| id.name == name),
+                TopLevelItem::Variable(_) if declares_value_named(&other, name) => {
+                    mergeable = false;
+                    None
+                }
+                _ => None,
+            }
+            .and_then(|id| id.symbol_id.get());
+            if let Some(symbol) = symbol {
+                if base.is_some() {
+                    mergeable = false;
+                }
+                match ctx.symbols.get(symbol) {
+                    Some(type_id) => base = Some(type_id),
+                    // The other declaration has no type (an unannotated signature), so
+                    // there is nothing to put the object next to.
+                    None => mergeable = false,
+                }
+                if !targets.contains(&symbol) {
+                    targets.push(symbol);
+                }
+            }
+        }
+        if !mergeable {
+            continue;
+        }
+
+        properties.sort_by(|a, b| a.name.cmp(&b.name));
+        properties.dedup_by(|a, b| a.name == b.name);
+        let object = ctx
+            .arena
+            .alloc(Type::Object(crate::types::ObjectType::new(properties)));
+        let value = match base {
+            None => object,
+            Some(base) => match ctx.arena.alloc_intersection(vec![base, object]) {
+                Ok(merged) => merged,
+                Err(_) => continue,
+            },
+        };
+        for symbol in targets {
+            ctx.symbols.declare(symbol, value);
         }
     }
 }
@@ -253,15 +358,15 @@ fn declares_value_named(item: &TopLevelItem<'_>, name: &str) -> bool {
     }
 }
 
-// The object a namespace is as a value: one property per exported value member. None when
-// any of them has no type yet (an unannotated variable is typed from its initializer
-// later), because an object missing a member would report a property that exists as
-// missing. In an ambient namespace every member is exported unless some is marked.
-fn namespace_value(
+// One property per exported value member of a namespace block. None when any of them has no
+// type yet (an unannotated variable is typed from its initializer later), because an object
+// missing a member would report a property that exists as missing. In an ambient namespace
+// every member is exported unless some is marked.
+fn namespace_properties(
     members: &[(TopLevelItem<'_>, bool)],
     ambient: bool,
     ctx: &mut CheckContext<'_, '_>,
-) -> Option<crate::arena::TypeId> {
+) -> Option<Vec<crate::types::PropertyEntry>> {
     let any_marked = members.iter().any(|(_, exported)| *exported);
     let mut properties: Vec<crate::types::PropertyEntry> = Vec::new();
     for (item, exported) in members.iter().copied() {
@@ -302,12 +407,7 @@ fn namespace_value(
             | TopLevelItem::ExternalModule(_) => {}
         }
     }
-    properties.sort_by(|a, b| a.name.cmp(&b.name));
-    properties.dedup_by(|a, b| a.name == b.name);
-    Some(
-        ctx.arena
-            .alloc(Type::Object(crate::types::ObjectType::new(properties))),
-    )
+    Some(properties)
 }
 
 // Registers a function's signature under its symbol. Shared by the top-level pass
@@ -347,6 +447,11 @@ pub(super) fn declare_function(func: &Function<'_>, ctx: &mut CheckContext<'_, '
         None if func.r#async || func.generator => None,
         None => Some(ctx.arena.any()),
     };
+    let type_params = resolve_function_type_params(
+        func.type_parameters.as_deref(),
+        &mut ctx.namespace,
+        &mut ctx.arena,
+    );
     ctx.namespace.pop_type_params(scope);
     // Any parameter or the return type failing to resolve, an unknown
     // name in an annotation for example, means the whole function is
@@ -362,6 +467,7 @@ pub(super) fn declare_function(func: &Function<'_>, ctx: &mut CheckContext<'_, '
         .alloc(crate::types::Type::Function(crate::types::FunctionType {
             params,
             return_type,
+            type_params,
             is_untyped: false,
         }));
     ctx.symbols.declare(symbol_id, function_type);
@@ -378,38 +484,30 @@ fn declare_class_constructor(class: &Class<'_>, ctx: &mut CheckContext<'_, '_>) 
         crate::namespace::Resolution::Resolved(type_id) => type_id,
         _ => return,
     };
+    let class_scope = ctx
+        .namespace
+        .push_decl_type_params(&mut ctx.arena, class.type_parameters.as_deref());
+    let constructor_type_params = resolve_function_type_params(
+        class.type_parameters.as_deref(),
+        &mut ctx.namespace,
+        &mut ctx.arena,
+    );
     let (constructor_params, constructor_is_untyped) = match find_constructor(class) {
         None => (Vec::new(), false),
         Some(ctor) => {
-            // A generic class's own type parameters need to be in
-            // scope while its constructor's parameters are
-            // resolved, the same as a generic function's are just
-            // above -- otherwise `T` in `constructor(value: T)`
-            // fails to resolve, the whole signature falls back to
-            // "untyped, can't check arity", and `new Box(1)` never
-            // gets the inference-and-substitution treatment a
-            // generic function call already gets in
-            // check_callable. This only re-declares the same
-            // shadow namespace::resolve already set up while
-            // computing instance_type above; type_param_cache
-            // means it resolves to the identical GenericParameter
-            // TypeId, not a second, disconnected one.
-            let scope = ctx
-                .namespace
-                .push_decl_type_params(&mut ctx.arena, class.type_parameters.as_deref());
-            let params = resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena);
-            ctx.namespace.pop_type_params(scope);
-            match params {
+            match resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena) {
                 Some(params) => (params, false),
                 None => (Vec::new(), true),
             }
         }
     };
+    ctx.namespace.pop_type_params(class_scope);
     let constructor_type =
         ctx.arena
             .alloc(crate::types::Type::Function(crate::types::FunctionType {
                 params: constructor_params,
                 return_type: instance_type,
+                type_params: constructor_type_params,
                 is_untyped: constructor_is_untyped,
             }));
     ctx.symbols.declare(symbol_id, constructor_type);

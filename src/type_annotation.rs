@@ -6,7 +6,9 @@ use oxc_span::GetSpan;
 
 use crate::arena::{TypeArena, TypeId};
 use crate::namespace::{Resolution, TypeNamespace};
-use crate::types::{FunctionType, ObjectType, Param, PropertyEntry, Type, TypeParameterId};
+use crate::types::{
+    FunctionType, FunctionTypeParam, ObjectType, Param, PropertyEntry, Type, TypeParameterId,
+};
 
 pub fn resolve_type_annotation(
     annotation: &TSTypeAnnotation,
@@ -14,6 +16,41 @@ pub fn resolve_type_annotation(
     arena: &mut TypeArena,
 ) -> Option<TypeId> {
     resolve_ts_type(&annotation.type_annotation, namespace, arena)
+}
+
+/// Resolve the explicit type-parameter list owned by a function or method signature.
+/// The caller must have pushed this declaration's type-parameter scope already, so
+/// constraints/defaults resolve to the same stable GenericParameter nodes as the
+/// parameter and return annotations.
+pub(crate) fn resolve_function_type_params(
+    declared: Option<&oxc_ast::ast::TSTypeParameterDeclaration<'_>>,
+    namespace: &mut TypeNamespace,
+    arena: &mut TypeArena,
+) -> Vec<FunctionTypeParam> {
+    let Some(declared) = declared else {
+        return Vec::new();
+    };
+    let file_id = namespace.file_id();
+    declared
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            let id = TypeParameterId::with_file(file_id, param.span().start, index as u32);
+            let constraint = namespace.type_param_constraint(arena, id);
+            let default = if param.default.is_some() {
+                namespace.resolve_type_param_default(arena, declared, index)
+            } else {
+                None
+            };
+            FunctionTypeParam {
+                id,
+                name: param.name.name.to_string(),
+                constraint,
+                default,
+            }
+        })
+        .collect()
 }
 
 pub fn resolve_ts_type(
@@ -75,12 +112,21 @@ pub fn resolve_ts_type(
         }
 
         TSType::TSFunctionType(func_type) => {
+            let scope =
+                namespace.push_decl_type_params(arena, func_type.type_parameters.as_deref());
             namespace.note_implicit_any_params(&func_type.params);
             let params = resolve_params_with_any_fallback(&func_type.params, namespace, arena);
-            let return_type = resolve_type_annotation(&func_type.return_type, namespace, arena)?;
+            let return_type = resolve_type_annotation(&func_type.return_type, namespace, arena);
+            let type_params = resolve_function_type_params(
+                func_type.type_parameters.as_deref(),
+                namespace,
+                arena,
+            );
+            namespace.pop_type_params(scope);
             Some(arena.alloc(Type::Function(crate::types::FunctionType {
                 params,
-                return_type,
+                return_type: return_type?,
+                type_params,
                 is_untyped: false,
             })))
         }
@@ -630,11 +676,14 @@ fn resolve_method_signature(
     namespace.note_implicit_any_params(&method.params);
     let params = resolve_params_with_any_fallback(&method.params, namespace, arena);
     let return_type = resolve_type_annotation(return_annotation, namespace, arena);
+    let type_params =
+        resolve_function_type_params(method.type_parameters.as_deref(), namespace, arena);
     namespace.pop_type_params(scope);
 
     let function = arena.alloc(Type::Function(FunctionType {
         params,
         return_type: return_type?,
+        type_params,
         is_untyped: false,
     }));
     Some(PropertyEntry {

@@ -27,12 +27,27 @@ pub(super) fn check_function_declaration(
     if ctx.symbols.get(symbol_id).is_none() {
         declare_function(func, ctx);
     }
-    let Some(function_type) = ctx.symbols.get(symbol_id) else {
+    let Some(declared) = ctx.symbols.get(symbol_id) else {
         tracing::trace!(name = %name.name, "function signature not fully annotated, body not checked");
         return;
     };
-    let crate::types::Type::Function(function_type) = ctx.arena.get(function_type).clone() else {
-        return;
+    // A function that shares its name with a namespace is declared as the intersection of
+    // its signature and the namespace's object (see declare_namespace_values), and the body
+    // is checked against the signature half. Taking only a plain function type here would
+    // leave the body of every merged function unchecked, without a word.
+    let function_type = match ctx.arena.get(declared).clone() {
+        crate::types::Type::Function(function) => function,
+        crate::types::Type::Intersection(members) => {
+            let signature = members
+                .iter()
+                .find_map(|&member| match ctx.arena.get(member) {
+                    crate::types::Type::Function(function) => Some(function.clone()),
+                    _ => None,
+                });
+            let Some(signature) = signature else { return };
+            signature
+        }
+        _ => return,
     };
 
     bind_params(&func.params, &function_type.params, scoping, ctx);
@@ -78,6 +93,7 @@ pub(super) fn check_function_declaration(
             .alloc(crate::types::Type::Function(crate::types::FunctionType {
                 params: function_type.params,
                 return_type: inferred,
+                type_params: function_type.type_params,
                 is_untyped: function_type.is_untyped,
             }));
         ctx.symbols.declare(symbol_id, updated);

@@ -48,6 +48,14 @@ pub struct PParam {
 // declaration appears by key (`DeclRef`, `App`), never by body; an `App` also carries its
 // instantiated body, which is the amendment to LLD 3.4 the header records.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct PFunctionTypeParam {
+    pub key: TypeParamKey,
+    pub name: Box<str>,
+    pub constraint: Option<u32>,
+    pub default: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum PNode {
     Prim(Prim),
     StrLit(Box<str>),
@@ -64,6 +72,7 @@ pub enum PNode {
         params: Box<[PParam]>,
         ret: u32,
         is_untyped: bool,
+        type_params: Box<[PFunctionTypeParam]>,
     },
     DeclRef {
         key: DeclKey,
@@ -219,10 +228,30 @@ impl<'a, R: KeyResolver> Exporter<'a, R> {
                         ty: self.emit(p.type_id)?,
                     });
                 }
+                let ret = self.emit(f.return_type)?;
+                let mut type_params = Vec::with_capacity(f.type_params.len());
+                for parameter in &f.type_params {
+                    let key = self.resolver.type_param_key(parameter.id)?;
+                    let constraint = match parameter.constraint {
+                        Some(id) => Some(self.emit(id)?),
+                        None => None,
+                    };
+                    let default = match parameter.default {
+                        Some(id) => Some(self.emit(id)?),
+                        None => None,
+                    };
+                    type_params.push(PFunctionTypeParam {
+                        key,
+                        name: parameter.name.as_str().into(),
+                        constraint,
+                        default,
+                    });
+                }
                 PNode::Function {
                     params: params.into(),
-                    ret: self.emit(f.return_type)?,
+                    ret,
                     is_untyped: f.is_untyped,
+                    type_params: type_params.into(),
                 }
             }
             Type::GenericParameter(param, name, bound) => {
@@ -649,6 +678,7 @@ impl Importer {
                     params,
                     ret,
                     is_untyped,
+                    type_params,
                 } => {
                     let params = params
                         .iter()
@@ -659,9 +689,30 @@ impl Importer {
                             name: p.name.as_deref().map(Rc::from),
                         })
                         .collect();
+                    let mut local_type_params = Vec::with_capacity(type_params.len());
+                    for parameter in type_params.iter() {
+                        let id = self.tparam_id(parameter.key.owner, parameter.key.index);
+                        let constraint = parameter.constraint.map(|at| ids[at as usize]);
+                        let default = parameter.default.map(|at| ids[at as usize]);
+                        // `<T>() => void` has no child TypeParam node to teach the
+                        // importer about T, so the signature metadata registers it here.
+                        self.tparams.insert(id, parameter.key);
+                        arena.alloc(Type::GenericParameter(
+                            id,
+                            parameter.name.to_string(),
+                            constraint,
+                        ));
+                        local_type_params.push(crate::types::FunctionTypeParam {
+                            id,
+                            name: parameter.name.to_string(),
+                            constraint,
+                            default,
+                        });
+                    }
                     arena.alloc(Type::Function(FunctionType {
                         params,
                         return_type: ids[*ret as usize],
+                        type_params: local_type_params,
                         is_untyped: *is_untyped,
                     }))
                 }
@@ -774,6 +825,7 @@ mod tests {
         arena.alloc(Type::Function(FunctionType {
             params,
             return_type: ret,
+            type_params: Vec::new(),
             is_untyped: false,
         }))
     }
@@ -1274,6 +1326,67 @@ mod tests {
     }
 
     #[test]
+    fn an_unused_generic_signature_parameter_and_default_round_trip() {
+        // `<T = string>() => void`: T is absent from both the value parameter list and
+        // return type, so only explicit signature metadata can preserve it.
+        let mut arena = TypeArena::new();
+        let owner = key("factory", DeclKind::Function);
+        let id = TypeParameterId::with_file(FileId::ROOT, 17, 0);
+        let string = arena.string();
+        let void = arena.void();
+        let body = arena.alloc(Type::Function(FunctionType {
+            params: Vec::new(),
+            return_type: void,
+            type_params: vec![crate::types::FunctionTypeParam {
+                id,
+                name: "T".into(),
+                constraint: None,
+                default: Some(string),
+            }],
+            is_untyped: false,
+        }));
+        let keys = Keys {
+            slots: Vec::new(),
+            tparams: vec![(id, TypeParamKey { owner, index: 0 })],
+        };
+        let declared = [TypeParamInput {
+            id,
+            name: "T".into(),
+            bound: None,
+            default: Some(string),
+        }];
+        let exported = export_decl(
+            &arena,
+            &keys,
+            &DeclInput {
+                key: owner,
+                name: "factory",
+                kind: DeclKind::Function,
+                body,
+                type_params: &declared,
+            },
+        )
+        .expect("generic signature has stable parameter keys");
+
+        let provider = provider_of(&[&exported]);
+        let mut imported_arena = TypeArena::new();
+        let mut importer = Importer::new();
+        let imported = importer
+            .import_decl(&mut imported_arena, &provider, owner)
+            .expect("generic function imports");
+        let Type::Function(function) = imported_arena.get(imported).clone() else {
+            panic!("imported signature is not a function");
+        };
+        assert_eq!(function.type_params.len(), 1);
+        assert_eq!(function.type_params[0].name, "T");
+        assert_eq!(function.type_params[0].constraint, None);
+        assert_eq!(
+            function.type_params[0].default,
+            Some(imported_arena.string())
+        );
+    }
+
+    #[test]
     fn the_golden_export_does_not_change() {
         // If this fails the portable encoding or the hash changed: bump ENC_VERSION.
         let mut a = TypeArena::new();
@@ -1281,5 +1394,5 @@ mod tests {
         assert_eq!(f.sig.as_u128(), GOLDEN_F_SIG, "{:032x}", f.sig.as_u128());
     }
 
-    const GOLDEN_F_SIG: u128 = 0xedaa93964c272282dc044b9f0653da56;
+    const GOLDEN_F_SIG: u128 = 0x7f064bd9759f6fef3a369f79740bc0ee;
 }

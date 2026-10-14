@@ -3,7 +3,9 @@ use oxc_semantic::Scoping;
 use oxc_span::GetSpan;
 
 use crate::arena::TypeId;
-use crate::type_annotation::{resolve_params_with_any_fallback, resolve_type_annotation};
+use crate::type_annotation::{
+    resolve_function_type_params, resolve_params_with_any_fallback, resolve_type_annotation,
+};
 use crate::types::{FunctionType, Type};
 
 use super::super::context::CheckContext;
@@ -59,6 +61,9 @@ fn infer_arrow_function_type_inner(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
+    let type_param_scope = ctx
+        .namespace
+        .push_decl_type_params(&mut ctx.arena, arrow.type_parameters.as_deref());
     let param_types =
         resolve_params_with_any_fallback(&arrow.params, &mut ctx.namespace, &mut ctx.arena);
     bind_params(&arrow.params, &param_types, scoping, ctx);
@@ -86,6 +91,7 @@ fn infer_arrow_function_type_inner(
         }
     } else {
         let ArrowFunctionBody::FunctionBody(body) = &arrow.body else {
+            ctx.namespace.pop_type_params(type_param_scope);
             return ctx.arena.error();
         };
         // A block body has no return inference yet. Without an annotation its returns are
@@ -99,9 +105,16 @@ fn infer_arrow_function_type_inner(
         return_type
     };
 
+    let type_params = resolve_function_type_params(
+        arrow.type_parameters.as_deref(),
+        &mut ctx.namespace,
+        &mut ctx.arena,
+    );
+    ctx.namespace.pop_type_params(type_param_scope);
     ctx.arena.alloc(Type::Function(FunctionType {
         params: param_types,
         return_type,
+        type_params,
         is_untyped: false,
     }))
 }
@@ -126,6 +139,7 @@ fn infer_function_expression_type_inner(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
+    let type_param_scope = ctx.namespace.push_type_params(&mut ctx.arena, func);
     // Consumed here, before anything else, so the request only ever applies to
     // this exact function and never to one nested inside its parameters or body.
     // A function with its own `this` parameter has a typed `this` and is never
@@ -159,9 +173,16 @@ fn infer_function_expression_type_inner(
         ctx.leave_return_scope(return_scope);
     }
 
+    let type_params = resolve_function_type_params(
+        func.type_parameters.as_deref(),
+        &mut ctx.namespace,
+        &mut ctx.arena,
+    );
+    ctx.namespace.pop_type_params(type_param_scope);
     ctx.arena.alloc(Type::Function(FunctionType {
         params: param_types,
         return_type,
+        type_params,
         is_untyped: false,
     }))
 }

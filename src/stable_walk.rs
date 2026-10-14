@@ -134,13 +134,27 @@ impl<'a, R: KeyResolver> StableHasher<'a, R> {
                     });
                 }
                 let ret = self.hash(f.return_type)?;
-                // A function type carries no type-parameter list of its own: the
-                // declaration that owns it does (PortableDecl::type_params).
+                let mut tparams = Vec::with_capacity(f.type_params.len());
+                let mut bounds = Vec::with_capacity(f.type_params.len());
+                let mut defaults = Vec::with_capacity(f.type_params.len());
+                for parameter in &f.type_params {
+                    tparams.push(self.resolver.type_param_key(parameter.id)?);
+                    bounds.push(match parameter.constraint {
+                        Some(id) => Some(self.hash(id)?),
+                        None => None,
+                    });
+                    defaults.push(match parameter.default {
+                        Some(id) => Some(self.hash(id)?),
+                        None => None,
+                    });
+                }
                 return Some(hash_node(&NodeIn::Function {
                     params: &params,
                     ret,
                     is_untyped: f.is_untyped,
-                    tparams: &[],
+                    tparams: &tparams,
+                    bounds: &bounds,
+                    defaults: &defaults,
                 }));
             }
 
