@@ -233,6 +233,101 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
         SemanticQueries::new(&self.arena, &mut self.relation_cache)
     }
 
+    // Problem: `<T>(x: T) => T` passed where `(x: number) => number` is expected was
+    // rejected, because the comparison sees an unbound T against number. tsc first
+    // instantiates the generic source against the target's parameter types.
+    // Picked: infer the source's own type parameters from the target's parameter types,
+    // fill any left over from their default, constraint or unknown, and compare the
+    // instantiated signature. Only the check sees the instantiated type; messages keep
+    // the declared one.
+    // Cost: only a generic function at the top of the comparison is instantiated, not one
+    // nested inside an object property or a union member, and a generic target is
+    // compared as it is.
+    pub fn is_assignable_instantiating(&mut self, source: TypeId, target: TypeId) -> bool {
+        let source = self.instantiate_generic_source(source, target);
+        self.semantic().is_assignable(source, target)
+    }
+
+    fn instantiate_generic_source(&mut self, source: TypeId, target: TypeId) -> TypeId {
+        use crate::types::{FunctionType, Param, Type};
+        let (Type::Function(from), Type::Function(to)) =
+            (self.arena.get(source), self.arena.get(target))
+        else {
+            return source;
+        };
+        if from.type_params.is_empty() || !to.type_params.is_empty() {
+            return source;
+        }
+        let (from, to) = (from.clone(), to.clone());
+        let own: Vec<_> = from.type_params.iter().map(|p| p.id).collect();
+        let mut bindings = Vec::new();
+        for position in 0..from.params.len().max(to.params.len()) {
+            if let (Some(wanted), Some(given)) = (
+                crate::subtyping::param_type_at(&self.arena, &from.params, position),
+                crate::subtyping::param_type_at(&self.arena, &to.params, position),
+            ) {
+                crate::semantic::GenericSolver::infer_type_param_bindings(
+                    &mut self.arena,
+                    wanted,
+                    given,
+                    &mut bindings,
+                    &[],
+                    &mut self.relation_cache,
+                );
+            }
+        }
+        bindings.retain(|(id, _)| own.contains(id));
+        // An inferred type that breaks its parameter's `extends` bound falls back to the
+        // bound, which is what makes `<T extends string>(x: T)` fail against `(x: number)`.
+        for parameter in &from.type_params {
+            let Some(constraint) = parameter.constraint else {
+                continue;
+            };
+            let Some(slot) = bindings.iter().position(|(id, _)| *id == parameter.id) else {
+                continue;
+            };
+            let inferred = bindings[slot].1;
+            if !self.semantic().is_assignable(inferred, constraint) {
+                bindings[slot].1 = constraint;
+            }
+        }
+        // Inference from an `any` parameter yields any, so a parameter nothing else informed
+        // takes it instead of unknown.
+        let any = self.arena.any();
+        let target_has_any = to.params.iter().any(|p| p.type_id == any);
+        for parameter in &from.type_params {
+            if !bindings.iter().any(|(id, _)| *id == parameter.id) {
+                let fill = if target_has_any {
+                    any
+                } else {
+                    parameter
+                        .default
+                        .or(parameter.constraint)
+                        .unwrap_or_else(|| self.arena.unknown())
+                };
+                bindings.push((parameter.id, fill));
+            }
+        }
+        let substitute = |arena: &mut TypeArena, id: TypeId| {
+            crate::semantic::GenericSolver::substitute_bound_type_params(arena, id, &bindings)
+        };
+        let params: Vec<Param> = from
+            .params
+            .iter()
+            .map(|p| Param {
+                type_id: substitute(&mut self.arena, p.type_id),
+                ..p.clone()
+            })
+            .collect();
+        let return_type = substitute(&mut self.arena, from.return_type);
+        self.arena.alloc(Type::Function(FunctionType {
+            params,
+            return_type,
+            type_params: Vec::new(),
+            is_untyped: from.is_untyped,
+        }))
+    }
+
     pub fn warning(&mut self, message: DiagnosticMessage, span: Span) {
         self.diagnostics.push(Diagnostic {
             severity: Severity::Warning,

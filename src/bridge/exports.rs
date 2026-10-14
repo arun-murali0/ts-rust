@@ -663,7 +663,7 @@ fn collect_in<'ast>(
             Node::ClassValue { symbol } => variable(ctx, module, *symbol, item),
             Node::NamespaceValue { symbol } => variable(ctx, module, *symbol, item),
         };
-        match built.and_then(|p| register(&mut keys, ctx, module, p)) {
+        match built.and_then(|p| register(&mut keys, ctx, p)) {
             Some(p) => pending.push(p),
             None if exported => table.incomplete = true,
             None => {}
@@ -978,7 +978,6 @@ fn pending_of(module: ModuleKey, item: &Item<'_>, body: TypeId) -> Pending {
 fn register<'ast>(
     keys: &mut UnitKeys,
     ctx: &mut CheckContext<'ast, '_>,
-    module: ModuleKey,
     mut p: Pending,
 ) -> Option<Pending> {
     if matches!(
@@ -1006,123 +1005,183 @@ fn register<'ast>(
     // Generic function types can appear inside parameters, returns, object members,
     // aliases, and constraints. They have no top-level export declaration of their own,
     // so give their type parameters stable child keys before hashing or serializing the
-    // body. Top-level signature parameters above keep the declaration key itself.
-    let mut extra_roots = Vec::new();
-    for parameter in &p.type_params {
-        extra_roots.extend(parameter.bound);
-        extra_roots.extend(parameter.default);
+    // body. Top-level signature parameters above keep the declaration key itself. The key
+    // is the declaration's own key plus the path down to the signature, never a position
+    // in the file.
+    let parent = p.key;
+    let mut path = Vec::new();
+    register_nested_signature_keys(keys, &ctx.arena, &ctx.importer, parent, p.body, &mut path);
+    for (index, parameter) in p.type_params.iter().enumerate() {
+        for (tag, root) in [
+            (TAG_DECL_BOUND, parameter.bound),
+            (TAG_DECL_DEFAULT, parameter.default),
+        ] {
+            if let Some(root) = root {
+                path.clear();
+                path.push(tag);
+                path.extend((index as u32).to_le_bytes());
+                register_nested_signature_keys(
+                    keys,
+                    &ctx.arena,
+                    &ctx.importer,
+                    parent,
+                    root,
+                    &mut path,
+                );
+            }
+        }
     }
-    register_nested_signature_keys(
-        keys,
-        &ctx.arena,
-        &ctx.importer,
-        module,
-        p.body,
-        &extra_roots,
-    );
     Some(p)
 }
+
+// One byte per step from a declaration's type down to a nested type, with a number where
+// the step has an index, so two signatures in one declaration never share a path.
+const TAG_PROPERTY: u8 = 1;
+const TAG_PARAMETER: u8 = 2;
+const TAG_RETURN: u8 = 3;
+const TAG_MEMBER: u8 = 4;
+const TAG_ELEMENT: u8 = 5;
+const TAG_BOUND: u8 = 6;
+const TAG_DEFAULT: u8 = 7;
+const TAG_ARGUMENT: u8 = 8;
+const TAG_INNER: u8 = 9;
+const TAG_GENERIC_BOUND: u8 = 10;
+const TAG_DECL_BOUND: u8 = 11;
+const TAG_DECL_DEFAULT: u8 = 12;
 
 fn register_nested_signature_keys(
     keys: &mut UnitKeys,
     arena: &crate::arena::TypeArena,
     imported: &Importer,
-    module: ModuleKey,
+    parent: DeclKey,
     root: TypeId,
-    extra_roots: &[TypeId],
+    path: &mut Vec<u8>,
 ) {
-    fn visit(
-        keys: &mut UnitKeys,
-        arena: &crate::arena::TypeArena,
-        imported: &Importer,
-        module: ModuleKey,
-        id: TypeId,
-        seen: &mut std::collections::HashSet<TypeId>,
-    ) {
-        if !seen.insert(id) {
-            return;
+    struct Walk<'a> {
+        keys: &'a mut UnitKeys,
+        arena: &'a crate::arena::TypeArena,
+        imported: &'a Importer,
+        parent: DeclKey,
+        // Membership only; it is never iterated, so its order cannot reach the output.
+        seen: std::collections::HashSet<TypeId>,
+    }
+
+    // Runs `body` one step further down, and puts the path back afterwards.
+    fn step(path: &mut Vec<u8>, tag: u8, index: Option<u32>, body: impl FnOnce(&mut Vec<u8>)) {
+        let length = path.len();
+        path.push(tag);
+        if let Some(index) = index {
+            path.extend(index.to_le_bytes());
         }
-        match arena.raw(id) {
-            Type::Function(function) => {
-                if let Some(first) = function.type_params.first() {
-                    let owner =
-                        DeclKey::nested_type_signature(module, first.id.declaration_span_start());
-                    for (index, parameter) in function.type_params.iter().enumerate() {
-                        if keys.tparams.contains_key(&parameter.id)
-                            || imported.type_param_key(parameter.id).is_some()
-                        {
-                            continue;
+        body(path);
+        path.truncate(length);
+    }
+
+    impl Walk<'_> {
+        fn visit(&mut self, id: TypeId, path: &mut Vec<u8>) {
+            if !self.seen.insert(id) {
+                return;
+            }
+            match self.arena.raw(id) {
+                Type::Function(function) => {
+                    if !function.type_params.is_empty() {
+                        let owner = DeclKey::nested_type_signature(self.parent, path);
+                        for (index, parameter) in function.type_params.iter().enumerate() {
+                            if self.keys.tparams.contains_key(&parameter.id)
+                                || self.imported.type_param_key(parameter.id).is_some()
+                            {
+                                continue;
+                            }
+                            self.keys.tparams.insert(
+                                parameter.id,
+                                TypeParamKey {
+                                    owner,
+                                    index: index as u32,
+                                },
+                            );
                         }
-                        keys.tparams.insert(
-                            parameter.id,
-                            TypeParamKey {
-                                owner,
-                                index: index as u32,
-                            },
-                        );
+                    }
+                    for (index, parameter) in function.type_params.iter().enumerate() {
+                        let index = index as u32;
+                        if let Some(constraint) = parameter.constraint {
+                            step(path, TAG_BOUND, Some(index), |p| self.visit(constraint, p));
+                        }
+                        if let Some(default) = parameter.default {
+                            step(path, TAG_DEFAULT, Some(index), |p| self.visit(default, p));
+                        }
+                    }
+                    for (index, parameter) in function.params.iter().enumerate() {
+                        step(path, TAG_PARAMETER, Some(index as u32), |p| {
+                            self.visit(parameter.type_id, p)
+                        });
+                    }
+                    step(path, TAG_RETURN, None, |p| {
+                        self.visit(function.return_type, p)
+                    });
+                }
+                Type::Object(object) => {
+                    for property in object.properties.iter() {
+                        // The name is the step: properties are sorted by name, and a name
+                        // does not move when the declaration does.
+                        let length = path.len();
+                        path.push(TAG_PROPERTY);
+                        path.extend((property.name.len() as u32).to_le_bytes());
+                        path.extend(property.name.as_bytes());
+                        self.visit(property.type_id, path);
+                        path.truncate(length);
                     }
                 }
-                for parameter in &function.type_params {
-                    if let Some(constraint) = parameter.constraint {
-                        visit(keys, arena, imported, module, constraint, seen);
+                Type::Array(element) => step(path, TAG_ELEMENT, None, |p| self.visit(*element, p)),
+                Type::Union(members) | Type::Intersection(members) => {
+                    for (index, &member) in members.iter().enumerate() {
+                        step(path, TAG_MEMBER, Some(index as u32), |p| {
+                            self.visit(member, p)
+                        });
                     }
-                    if let Some(default) = parameter.default {
-                        visit(keys, arena, imported, module, default, seen);
+                }
+                Type::GenericParameter(_, _, bound) => {
+                    if let Some(bound) = bound {
+                        step(path, TAG_GENERIC_BOUND, None, |p| self.visit(*bound, p));
                     }
                 }
-                for parameter in &function.params {
-                    visit(keys, arena, imported, module, parameter.type_id, seen);
+                Type::Named(_, inner) => step(path, TAG_INNER, None, |p| self.visit(*inner, p)),
+                // An App's body belongs to its declaration, which is registered separately;
+                // the application only introduces its own arguments at this use site.
+                Type::App(_, arguments, _body) => {
+                    for (index, &argument) in arguments.iter().enumerate() {
+                        step(path, TAG_ARGUMENT, Some(index as u32), |p| {
+                            self.visit(argument, p)
+                        });
+                    }
                 }
-                visit(keys, arena, imported, module, function.return_type, seen);
+                // A Ref intentionally stops at a declaration boundary. Its body receives
+                // keys while its own declaration is registered.
+                Type::Number
+                | Type::String
+                | Type::Boolean
+                | Type::Null
+                | Type::Undefined
+                | Type::Any
+                | Type::Unknown
+                | Type::Error
+                | Type::Never
+                | Type::Void
+                | Type::StringLiteral(_)
+                | Type::NumberLiteral(_)
+                | Type::BooleanLiteral(_)
+                | Type::Ref(_) => {}
             }
-            Type::Object(object) => {
-                for property in object.properties.iter() {
-                    visit(keys, arena, imported, module, property.type_id, seen);
-                }
-            }
-            Type::Array(element) => visit(keys, arena, imported, module, *element, seen),
-            Type::Union(members) | Type::Intersection(members) => {
-                for &member in members {
-                    visit(keys, arena, imported, module, member, seen);
-                }
-            }
-            Type::GenericParameter(_, _, bound) => {
-                if let Some(bound) = bound {
-                    visit(keys, arena, imported, module, *bound, seen);
-                }
-            }
-            Type::Named(_, inner) => visit(keys, arena, imported, module, *inner, seen),
-            // An App's body belongs to its declaration, which is registered separately;
-            // the application only introduces its own arguments at this use site.
-            Type::App(_, arguments, _body) => {
-                for &argument in arguments {
-                    visit(keys, arena, imported, module, argument, seen);
-                }
-            }
-            // A Ref intentionally stops at a declaration boundary. Its body receives keys
-            // while its own declaration is registered.
-            Type::Number
-            | Type::String
-            | Type::Boolean
-            | Type::Null
-            | Type::Undefined
-            | Type::Any
-            | Type::Unknown
-            | Type::Error
-            | Type::Never
-            | Type::Void
-            | Type::StringLiteral(_)
-            | Type::NumberLiteral(_)
-            | Type::BooleanLiteral(_)
-            | Type::Ref(_) => {}
         }
     }
 
-    let mut seen = std::collections::HashSet::new();
-    visit(keys, arena, imported, module, root, &mut seen);
-    for &extra in extra_roots {
-        visit(keys, arena, imported, module, extra, &mut seen);
-    }
+    let mut walk = Walk {
+        keys,
+        arena,
+        imported,
+        parent,
+        seen: std::collections::HashSet::new(),
+    };
+    walk.visit(root, path);
 }
 
 // The declaration's own `<T extends B = D, ...>` list as export inputs. The bound is read

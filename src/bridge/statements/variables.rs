@@ -110,7 +110,7 @@ fn check_identifier_declarator(
         }
 
         (AnnotationOutcome::Resolved(declared), Some(actual)) => {
-            if !ctx.semantic().is_assignable(actual, declared) {
+            if !ctx.is_assignable_instantiating(actual, declared) {
                 let whole = crate::diagnostic_messages::messages::declared_type_mismatch(
                     &ctx.arena, actual, declared,
                 );
@@ -140,7 +140,7 @@ fn check_identifier_declarator(
                 // Cost: a declared type that is not a union is left alone, since there
                 // is nothing to narrow.
                 if matches!(ctx.arena.get(declared), crate::types::Type::Union(_))
-                    && ctx.semantic().is_assignable(actual, declared)
+                    && ctx.is_assignable_instantiating(actual, declared)
                 {
                     narrow_on_assignment(symbol_id, declared, actual, ctx);
                 }
@@ -217,7 +217,7 @@ fn check_destructured_declarator(
             return;
         }
         (AnnotationOutcome::Resolved(declared), Some(actual)) => {
-            if !ctx.semantic().is_assignable(actual, declared) {
+            if !ctx.is_assignable_instantiating(actual, declared) {
                 ctx.error(
                     crate::diagnostic_messages::messages::destructuring_pattern_type_mismatch(),
                     declarator

@@ -46,7 +46,7 @@ pub(super) fn infer_assignment_expression_type(
             // since it reads the current value.
             let declared = declared_identifier_target(&assign.left, scoping, ctx);
             let check_against = declared.map_or(target_type, |(_, declared_type)| declared_type);
-            if !ctx.semantic().is_assignable(right_type, check_against) {
+            if !ctx.is_assignable_instantiating(right_type, check_against) {
                 let whole = crate::diagnostic_messages::messages::declared_type_mismatch(
                     &ctx.arena,
                     right_type,

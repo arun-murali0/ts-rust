@@ -1640,3 +1640,21 @@ fn a_local_namespace_exported_under_another_name_takes_its_types_with_it() {
         project.errors("b.ts")
     );
 }
+
+#[test]
+fn generic_callable_metadata_survives_cross_file_imports() {
+    let checked = run(
+        "generic-callable-metadata",
+        &[
+            (
+                "cross_file_provider.ts",
+                include_str!("fixtures/generic-callable-signatures/cross_file_provider.ts"),
+            ),
+            (
+                "cross_file_consumer.ts",
+                include_str!("fixtures/generic-callable-signatures/cross_file_consumer.ts"),
+            ),
+        ],
+    );
+    checked.all_clean();
+}

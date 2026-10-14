@@ -138,7 +138,8 @@ pub fn declare_top_level<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCont
 // First pass over a statement list: every named type, so the rest can refer to it.
 // A namespace's members are registered the same way, under its name.
 fn declare_types<'ast>(items: &[(TopLevelItem<'ast>, bool)], ctx: &mut CheckContext<'ast, '_>) {
-    for (item, _) in items.iter().copied() {
+    for (item, exported) in items.iter().copied() {
+        ctx.namespace.set_declaration_exported(exported);
         match item {
             TopLevelItem::Alias(decl) => {
                 ctx.namespace.insert_type_alias(

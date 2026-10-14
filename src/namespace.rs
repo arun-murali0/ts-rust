@@ -212,6 +212,14 @@ pub struct TypeNamespace<'a> {
     // and which names have already had that first declaration reported (a third
     // declaration must not report the first one again).
     declaration_spans: FxHashMap<String, Span>,
+    // Inside a namespace a declaration is either exported (one symbol across every block
+    // of the namespace) or local to its own block. Kept per name: (exported, block).
+    declaration_visibility: FxHashMap<String, (bool, u32)>,
+    scope_blocks: Vec<u32>,
+    // Whether each enclosing namespace is itself exported; see effective_exported.
+    scope_exported: Vec<bool>,
+    block_counter: u32,
+    declaring_exported: bool,
     reported_first_declaration: Vec<String>,
 
     // See TypeArgumentIssue. Deduplicated by source position, since the same
@@ -277,6 +285,11 @@ impl<'a> TypeNamespace<'a> {
             declaration_collisions: Vec::new(),
             too_complex: Vec::new(),
             declaration_spans: FxHashMap::default(),
+            declaration_visibility: FxHashMap::default(),
+            scope_blocks: Vec::new(),
+            scope_exported: Vec::new(),
+            block_counter: 0,
+            declaring_exported: false,
             reported_first_declaration: Vec::new(),
             type_param_cache: FxHashMap::default(),
             resolving_constraints: Vec::new(),
@@ -379,10 +392,27 @@ impl<'a> TypeNamespace<'a> {
             None => name.to_string(),
         };
         self.scope.push(prefix);
+        self.block_counter += 1;
+        self.scope_blocks.push(self.block_counter);
+        self.scope_exported.push(self.declaring_exported);
     }
 
     pub fn pop_scope(&mut self) {
         self.scope.pop();
+        self.scope_blocks.pop();
+        self.scope_exported.pop();
+    }
+
+    // A declaration inside a namespace that is itself not exported belongs to that local
+    // namespace, a different symbol from the exported one of the same name, so it counts as
+    // local. The outermost namespace is in file scope, where exporting does not matter.
+    fn effective_exported(&self) -> bool {
+        self.declaring_exported && self.scope_exported.iter().skip(1).all(|exported| *exported)
+    }
+
+    /// Says whether the declaration about to be registered carries `export`.
+    pub fn set_declaration_exported(&mut self, exported: bool) {
+        self.declaring_exported = exported;
     }
 
     // The name a declaration is registered under in the current scope.
@@ -621,7 +651,26 @@ impl<'a> TypeNamespace<'a> {
     // the earlier entry), so flagging them would report an error tsc does not. Only
     // pairs that are an error in TypeScript are recorded: an alias on either side, two
     // classes, or an enum against anything but an enum.
+    //
+    // Problem: two blocks of one namespace share a registered name, so a class that is not
+    // exported from the second block (`namespace A { export class P {} }` then
+    // `namespace A { class P {} }`) looked like a redeclaration of the exported one.
+    // Picked: inside a namespace, two declarations collide when both are exported (they are
+    // one symbol across blocks) or both are local to the same block. A local one never
+    // collides with an exported one or with a local one in another block.
+    // Cost: an exported against a local declaration in one block (tsc's TS2395) is not
+    // reported.
     fn note_collision(&mut self, name: &str, new_kind: NewKind, span: Span) {
+        if let (Some(&block), Some(&(was_exported, was_block))) = (
+            self.scope_blocks.last(),
+            self.declaration_visibility.get(name),
+        ) {
+            let exported = self.effective_exported();
+            let same_symbol = was_exported == exported && (exported || was_block == block);
+            if !same_symbol {
+                return;
+            }
+        }
         let Some(existing) = self.entries.get(name) else {
             return;
         };
@@ -655,6 +704,12 @@ impl<'a> TypeNamespace<'a> {
     // Remembers where `name` was first declared. Called after note_collision, so the
     // declaration being added is never mistaken for the earlier one it collides with.
     fn remember_declaration(&mut self, name: &str, span: Span) {
+        let exported = self.effective_exported();
+        if let Some(&block) = self.scope_blocks.last() {
+            self.declaration_visibility
+                .entry(name.to_string())
+                .or_insert((exported, block));
+        }
         self.declaration_spans
             .entry(name.to_string())
             .or_insert(span);

@@ -192,7 +192,7 @@ pub(super) fn check_class_declaration(
                     if let Some(declared) =
                         resolve_type_annotation(annotation, &mut ctx.namespace, &mut ctx.arena)
                     {
-                        if !ctx.semantic().is_assignable(actual, declared) {
+                        if !ctx.is_assignable_instantiating(actual, declared) {
                             ctx.error(
                                 crate::diagnostic_messages::messages::static_field_initializer_mismatch(
                                     &ctx.arena, actual, declared,

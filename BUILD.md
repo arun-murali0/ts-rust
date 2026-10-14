@@ -13,6 +13,79 @@ parsing is not.
 
 ---
 
+## Engine track - finish this before the advanced stages
+
+Problem: the advanced stages (3 to 9) keep adding type system features on top of an engine
+that is only partly finished. A cross-file gap, a crash on a big file, or a result that
+depends on thread timing would then show up inside a feature that did nothing wrong. The
+decision is to finish the stable engine first and start advanced types after it.
+
+The plan follows the LLD sections (5, 6, 7, 8, 9), and each stage has an exit test so it is
+clear when it is done. Scope for now is E0 to E6. E7 and E8 follow; E8 also runs next to
+every other stage.
+
+E0 - Safety net. A harness that runs every corpus file alone and records aborts, and the
+determinism test (1, 2 and N threads, injected delays, byte identical output).
+tests/typescript-testcases (10,083 files, known-crashers-6.0.3) and scripts/compare-local.sh
+already cover part of this. Exit: zero aborts on the corpus outside the known crashers, and
+identical output across thread counts.
+
+E1 - Finish cross-file completeness. Make the owner key of a nested generic signature
+position free (today it is built from the source offset of the first type parameter, so a
+line added above a declaration changes its hash); build it from the parent declaration key
+and a path inside it instead, with a test that a blank line above changes no hash. Export overload sets (today only the first overload
+crosses and the unit is partial), `export * as ns`, default expressions, anonymous default
+function and class. [need to check: carry an overload set as an intersection of functions]
+Exit: on a real project the partial units are near zero and each remaining one has a named
+reason.
+
+E2 - Graph shape and edge kinds (LLD 4.1, 4.2). Flat graph vectors (scc_of, sccs, topo), a
+stable key per cycle from its sorted member keys, and edge kinds as flags (value, type only,
+side effect, dynamic, re-export). A dynamic import should only order files when its type is
+used; today every dynamic import with a string is an ordinary edge and can invent a cycle.
+Exit: unit tests on random graphs for order and membership.
+
+E3 - A cycle as one unit (LLD 4.3, 4.4). Cycle members are checked again for up to four
+rounds today. The HLD locks one cycle as one unit with phases declare, shapes, bodies, one
+arena, shared slots, and a circularity error when an inferred type re-enters itself.
+Exit: the cycle tests pass without the round limit and the output is stable.
+[yet to decide: build the unit as locked, or keep the iteration and amend the HLD]
+
+E4 - Scheduler and pipeline (LLD 5). Dependency counting per unit, a ready queue, ordered
+publication, a read and hash and header stage with backpressure, one internal error
+diagnostic when a unit panics (its dependents still run), cancellation checked at unit start.
+Exit: every unit runs exactly once after its dependencies on random graphs, and E0 stays green.
+
+E5 - Project config and resolution (LLD 6.4). tsconfig: extends, paths, baseUrl, rootDirs,
+typeRoots, types, include, exclude and the strict flags; package.json exports and types
+conditions; a resolution epoch as a project input. Then the gate on missing package imports
+comes off. Exit: a project that uses `paths` and package exports checks with no false TS2307.
+
+E6 - Library and ambient declarations (LLD 7.3). A library loading path through the same
+provider as dependencies, with a small hand written subset (Array, Promise, Record) until the
+advanced stages, because the real library files need mapped and conditional types. Global
+declarations, `declare global` and module augmentation, fixtures first, merged by key in file
+order and then source order. Typed `import()` and `typeof import()`, which need Promise.
+Exit: merge fixtures pass and give the same result in any file order.
+
+E7 - Query layer (LLD 6). Spike S1 first: pin the Salsa version and check early cutoff,
+thread handles and cancellation. [need to check: S1 outcome] Then the file guard, inputs,
+projection queries and the recorded reads. Exit: every row of the invalidation matrix in LLD
+6.5 is a test that asserts which queries ran and compares with a cold run.
+
+E8 - Limits, safety, measurement (LLD 2.5, 8, 9). Budgets and an instantiation depth limit
+with a TS2589 style error, one shared guard for anything that can re-enter itself, Miri or
+ASan on the reset paths, a compile-fail test that arena data cannot outlive a unit, an audit
+for hash map iteration in output code, and the metrics from LLD 9.5.
+
+Engine exit gate: E0 to E8 exit tests green, no abort on the corpus, byte identical output
+across thread counts, a body only edit rechecks one unit, and baseline numbers recorded.
+Deferred to the advanced stages: everything in Stages 3 to 9, tuples, bigint, symbol, const
+assertions, template literal types, abstract and static class sides, async and generators,
+and the real library file content.
+
+---
+
 ## Stage 1 - Generics completion
 
 Section 6, remaining items (most of §6 is already `[x]`). Shipped since: inference
@@ -58,16 +131,18 @@ checker-side:
    module is reported (TS2305, TS2307, TS1192) only against a complete export list.
 3. `import type` as a checker-side distinction - the type-only flag is read when
    an import is bound.
-4. Still to do: export classes, enums and overloads; `export * as ns`, default
-   classes and expressions; packages (an import from `node_modules` binds
-   nothing yet).
+4. Classes, enums, namespaces, `export *`, `export =`, default classes and default
+   identifiers cross files; a package's `.d.ts` is read for what it exports. Still to do:
+   export overloads, `export * as ns`, default expressions and anonymous defaults (E1).
 
 Why here: unblocks every other stage from being single-file-only, which is
 the single biggest realism gap in real-world usage - almost no real
 TypeScript project is one file.
 
-Not done: tsconfig `paths`/`baseUrl` (the resolver is built without a tsconfig),
-ambient modules, and re-checking only changed files and their dependents.
+Not done: tsconfig `paths`/`baseUrl` (the resolver is built without a tsconfig, so a missing
+package import is only reported when nothing could be hiding it), declaration merging and
+augmentation across files, and re-checking only changed files and their dependents (E5, E6,
+E7 in the engine track).
 
 Dependencies: none structurally, but benefits from Stage 1 being stable so
 generic types resolve correctly once they can cross file boundaries.
@@ -196,10 +271,10 @@ Dependencies: none required; ordered last due to size/risk.
 
 ## Set aside - full module ecosystem features
 
-Beyond the Stage 2 foundation:
-- Ambient modules (`declare module`), wildcard ambient modules
-- Namespace merging, module/global augmentation
-- `.d.ts` parsing for node_modules packages
+Beyond the Stage 2 foundation. Done since: ambient modules (`declare module "x"`), namespaces
+with merging inside one file, `.d.ts` for packages and the `@types` fallback. Still set aside:
+- Wildcard ambient modules
+- Module/global augmentation and declaration merging across files (E6)
 - UMD / global scripts vs modules
 
 Why separate: `oxc_resolver` gets you a file path; parsing real `.d.ts`
@@ -220,6 +295,11 @@ above, not sequenced here.
 
 | Stage | Depends on | Parallel with |
 |---|---|---|
+| Engine E0 - safety net | none | any |
+| Engine E1 to E2 - cross-file gaps, graph shape | E0 | each other |
+| Engine E3 to E4 - cycle unit, scheduler | E2 | - |
+| Engine E5 to E6 - config, library and ambient | E3 | each other |
+| Engine E7 to E8 - query layer, limits | E4 | E8 runs alongside all |
 | 1 - Generics completion | none | 2 |
 | 2 - Module resolution (foundation) | none | 1 |
 | 3 - Tuples & intersections | none | 4 |
