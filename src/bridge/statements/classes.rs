@@ -16,6 +16,20 @@ use super::super::expressions::infer_expression_type;
 use super::support::report_implicit_any_params;
 use super::{bind_params, check_statement};
 
+fn has_getter_named(class: &oxc_ast::ast::Class<'_>, key: &oxc_ast::ast::PropertyKey<'_>) -> bool {
+    let Some(name) = key.static_name() else {
+        return false;
+    };
+    class.body.body.iter().any(|element| {
+        matches!(
+            element,
+            ClassElement::MethodDefinition(m)
+                if matches!(m.kind, oxc_ast::ast::MethodDefinitionKind::Get)
+                    && m.key.static_name().is_some_and(|other| other == name)
+        )
+    })
+}
+
 pub(super) fn check_class_declaration(
     class: &oxc_ast::ast::Class<'_>,
     scoping: &Scoping,
@@ -26,6 +40,14 @@ pub(super) fn check_class_declaration(
     // flagged the way tsc would.
     for element in &class.body.body {
         if let ClassElement::MethodDefinition(method) = element {
+            // Problem: `set p(v) {}` next to `get p()` read as an implicit any, but tsc types
+            // the setter's parameter from the getter. Picked: skip a setter that has a
+            // getter of the same name in the class. A setter alone is still reported.
+            if matches!(method.kind, oxc_ast::ast::MethodDefinitionKind::Set)
+                && has_getter_named(class, &method.key)
+            {
+                continue;
+            }
             report_implicit_any_params(&method.value.params, ctx);
         }
     }

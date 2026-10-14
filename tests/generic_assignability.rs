@@ -70,3 +70,29 @@ fn a_target_parameter_of_any_instantiates_the_source_with_any() {
     );
     assert!(found.is_empty(), "{found:?}");
 }
+
+// A parameter with a default takes its type from the default, and a setter takes its
+// parameter type from the getter next to it, so neither is an implicit any (TS7006). A bare
+// parameter and a setter with no getter still are.
+#[test]
+fn defaulted_parameter_and_getter_typed_setter_are_not_implicit_any() {
+    let found = errors(
+        "function a(y = false) { return y; }\n\
+         const f = (z = 1) => z;\n\
+         class C { get p() { return 'x'; } set p(v) { } }\n",
+    );
+    assert!(
+        found.iter().all(|(code, _)| *code != Some(7006)),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn bare_parameter_and_lone_setter_are_still_implicit_any() {
+    let found = errors("function a(y) { return y; }\nclass C { set p(v) { } }\n");
+    assert_eq!(
+        found.iter().filter(|(code, _)| *code == Some(7006)).count(),
+        2,
+        "{found:?}"
+    );
+}

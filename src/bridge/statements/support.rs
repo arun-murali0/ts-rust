@@ -126,7 +126,10 @@ pub(super) fn report_implicit_any_params(
     ctx: &mut CheckContext<'_, '_>,
 ) {
     for param in &params.items {
-        if param.type_annotation.is_some() {
+        // Problem: the comment above promised that a default skips the report, but only the
+        // annotation was tested, so `y = false` and `foo = {}` read as implicit any, though
+        // tsc types them from the default.
+        if param.type_annotation.is_some() || param.initializer.is_some() {
             continue;
         }
         let BindingPattern::BindingIdentifier(id) = &param.pattern else {

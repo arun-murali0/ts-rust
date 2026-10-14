@@ -437,7 +437,7 @@ impl<'a> TypeNamespace<'a> {
 
     pub fn note_implicit_any_params(&mut self, params: &oxc_ast::ast::FormalParameters) {
         for param in &params.items {
-            if param.type_annotation.is_some() {
+            if param.type_annotation.is_some() || param.initializer.is_some() {
                 continue;
             }
             let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &param.pattern else {
