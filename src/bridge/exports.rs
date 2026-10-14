@@ -663,7 +663,7 @@ fn collect_in<'ast>(
             Node::ClassValue { symbol } => variable(ctx, module, *symbol, item),
             Node::NamespaceValue { symbol } => variable(ctx, module, *symbol, item),
         };
-        match built.and_then(|p| register(&mut keys, ctx, p)) {
+        match built.and_then(|p| register(&mut keys, ctx, module, p)) {
             Some(p) => pending.push(p),
             None if exported => table.incomplete = true,
             None => {}
@@ -978,6 +978,7 @@ fn pending_of(module: ModuleKey, item: &Item<'_>, body: TypeId) -> Pending {
 fn register<'ast>(
     keys: &mut UnitKeys,
     ctx: &mut CheckContext<'ast, '_>,
+    module: ModuleKey,
     mut p: Pending,
 ) -> Option<Pending> {
     if matches!(
@@ -1002,7 +1003,126 @@ fn register<'ast>(
             },
         );
     }
+    // Generic function types can appear inside parameters, returns, object members,
+    // aliases, and constraints. They have no top-level export declaration of their own,
+    // so give their type parameters stable child keys before hashing or serializing the
+    // body. Top-level signature parameters above keep the declaration key itself.
+    let mut extra_roots = Vec::new();
+    for parameter in &p.type_params {
+        extra_roots.extend(parameter.bound);
+        extra_roots.extend(parameter.default);
+    }
+    register_nested_signature_keys(
+        keys,
+        &ctx.arena,
+        &ctx.importer,
+        module,
+        p.body,
+        &extra_roots,
+    );
     Some(p)
+}
+
+fn register_nested_signature_keys(
+    keys: &mut UnitKeys,
+    arena: &crate::arena::TypeArena,
+    imported: &Importer,
+    module: ModuleKey,
+    root: TypeId,
+    extra_roots: &[TypeId],
+) {
+    fn visit(
+        keys: &mut UnitKeys,
+        arena: &crate::arena::TypeArena,
+        imported: &Importer,
+        module: ModuleKey,
+        id: TypeId,
+        seen: &mut std::collections::HashSet<TypeId>,
+    ) {
+        if !seen.insert(id) {
+            return;
+        }
+        match arena.raw(id) {
+            Type::Function(function) => {
+                if let Some(first) = function.type_params.first() {
+                    let owner =
+                        DeclKey::nested_type_signature(module, first.id.declaration_span_start());
+                    for (index, parameter) in function.type_params.iter().enumerate() {
+                        if keys.tparams.contains_key(&parameter.id)
+                            || imported.type_param_key(parameter.id).is_some()
+                        {
+                            continue;
+                        }
+                        keys.tparams.insert(
+                            parameter.id,
+                            TypeParamKey {
+                                owner,
+                                index: index as u32,
+                            },
+                        );
+                    }
+                }
+                for parameter in &function.type_params {
+                    if let Some(constraint) = parameter.constraint {
+                        visit(keys, arena, imported, module, constraint, seen);
+                    }
+                    if let Some(default) = parameter.default {
+                        visit(keys, arena, imported, module, default, seen);
+                    }
+                }
+                for parameter in &function.params {
+                    visit(keys, arena, imported, module, parameter.type_id, seen);
+                }
+                visit(keys, arena, imported, module, function.return_type, seen);
+            }
+            Type::Object(object) => {
+                for property in object.properties.iter() {
+                    visit(keys, arena, imported, module, property.type_id, seen);
+                }
+            }
+            Type::Array(element) => visit(keys, arena, imported, module, *element, seen),
+            Type::Union(members) | Type::Intersection(members) => {
+                for &member in members {
+                    visit(keys, arena, imported, module, member, seen);
+                }
+            }
+            Type::GenericParameter(_, _, bound) => {
+                if let Some(bound) = bound {
+                    visit(keys, arena, imported, module, *bound, seen);
+                }
+            }
+            Type::Named(_, inner) => visit(keys, arena, imported, module, *inner, seen),
+            // An App's body belongs to its declaration, which is registered separately;
+            // the application only introduces its own arguments at this use site.
+            Type::App(_, arguments, _body) => {
+                for &argument in arguments {
+                    visit(keys, arena, imported, module, argument, seen);
+                }
+            }
+            // A Ref intentionally stops at a declaration boundary. Its body receives keys
+            // while its own declaration is registered.
+            Type::Number
+            | Type::String
+            | Type::Boolean
+            | Type::Null
+            | Type::Undefined
+            | Type::Any
+            | Type::Unknown
+            | Type::Error
+            | Type::Never
+            | Type::Void
+            | Type::StringLiteral(_)
+            | Type::NumberLiteral(_)
+            | Type::BooleanLiteral(_)
+            | Type::Ref(_) => {}
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    visit(keys, arena, imported, module, root, &mut seen);
+    for &extra in extra_roots {
+        visit(keys, arena, imported, module, extra, &mut seen);
+    }
 }
 
 // The declaration's own `<T extends B = D, ...>` list as export inputs. The bound is read

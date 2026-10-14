@@ -5,7 +5,9 @@ use oxc_ast::ast::{
     VariableDeclaration,
 };
 
-use crate::type_annotation::{resolve_function_params, resolve_type_annotation};
+use crate::type_annotation::{
+    resolve_function_params, resolve_function_type_params, resolve_type_annotation,
+};
 use crate::types::Type;
 
 use super::context::CheckContext;
@@ -445,6 +447,11 @@ pub(super) fn declare_function(func: &Function<'_>, ctx: &mut CheckContext<'_, '
         None if func.r#async || func.generator => None,
         None => Some(ctx.arena.any()),
     };
+    let type_params = resolve_function_type_params(
+        func.type_parameters.as_deref(),
+        &mut ctx.namespace,
+        &mut ctx.arena,
+    );
     ctx.namespace.pop_type_params(scope);
     // Any parameter or the return type failing to resolve, an unknown
     // name in an annotation for example, means the whole function is
@@ -460,6 +467,7 @@ pub(super) fn declare_function(func: &Function<'_>, ctx: &mut CheckContext<'_, '
         .alloc(crate::types::Type::Function(crate::types::FunctionType {
             params,
             return_type,
+            type_params,
             is_untyped: false,
         }));
     ctx.symbols.declare(symbol_id, function_type);
@@ -476,38 +484,30 @@ fn declare_class_constructor(class: &Class<'_>, ctx: &mut CheckContext<'_, '_>) 
         crate::namespace::Resolution::Resolved(type_id) => type_id,
         _ => return,
     };
+    let class_scope = ctx
+        .namespace
+        .push_decl_type_params(&mut ctx.arena, class.type_parameters.as_deref());
+    let constructor_type_params = resolve_function_type_params(
+        class.type_parameters.as_deref(),
+        &mut ctx.namespace,
+        &mut ctx.arena,
+    );
     let (constructor_params, constructor_is_untyped) = match find_constructor(class) {
         None => (Vec::new(), false),
         Some(ctor) => {
-            // A generic class's own type parameters need to be in
-            // scope while its constructor's parameters are
-            // resolved, the same as a generic function's are just
-            // above -- otherwise `T` in `constructor(value: T)`
-            // fails to resolve, the whole signature falls back to
-            // "untyped, can't check arity", and `new Box(1)` never
-            // gets the inference-and-substitution treatment a
-            // generic function call already gets in
-            // check_callable. This only re-declares the same
-            // shadow namespace::resolve already set up while
-            // computing instance_type above; type_param_cache
-            // means it resolves to the identical GenericParameter
-            // TypeId, not a second, disconnected one.
-            let scope = ctx
-                .namespace
-                .push_decl_type_params(&mut ctx.arena, class.type_parameters.as_deref());
-            let params = resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena);
-            ctx.namespace.pop_type_params(scope);
-            match params {
+            match resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena) {
                 Some(params) => (params, false),
                 None => (Vec::new(), true),
             }
         }
     };
+    ctx.namespace.pop_type_params(class_scope);
     let constructor_type =
         ctx.arena
             .alloc(crate::types::Type::Function(crate::types::FunctionType {
                 params: constructor_params,
                 return_type: instance_type,
+                type_params: constructor_type_params,
                 is_untyped: constructor_is_untyped,
             }));
     ctx.symbols.declare(symbol_id, constructor_type);

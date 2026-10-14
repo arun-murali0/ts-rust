@@ -134,6 +134,55 @@ fn very_long_operator_chain_does_not_overflow_a_worker_stack() {
     );
 }
 
+// Problem: a generic signature that leads back to itself made the free-parameter walk run
+// forever. `Chain<S>` and its `then` method are two types that lead to each other, and the
+// walk pushed `then`'s own binder S onto a list on every lap, so a "seen this type under
+// these binders" key never repeated (found with gdb: two type ids alternating, the binder
+// list growing by one per lap). TypeScript's promiseChaining test hung on it. See
+// free_generic_params in semantic/generics.rs.
+#[test]
+fn self_referential_generic_signature_terminates() {
+    let source = "\
+class Chain<T> {
+    constructor(public value: T) {}
+    then<S>(cb: (x: T) => S): Chain<S> {
+        const result = cb(this.value);
+        const z = this.then(x => result).then(x => \"abc\").then(x => x.length);
+        return new Chain(result);
+    }
+}
+declare function unwrap<T>(c: Chain<T>): T;
+declare const c: Chain<number>;
+const r: string = unwrap(c);
+";
+    let diagnostics = check(source, "self_referential_signature.ts");
+    // The call returns a number, so assigning it to a string must still be reported.
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .contains("Type 'number' is not assignable to type 'string'")),
+        "the mismatch must still be reported: {diagnostics:?}"
+    );
+}
+
+// A generic function's own parameter is bound inside it, so a type holding only such a
+// function is not itself generic, while a reference to an enclosing parameter is still free.
+#[test]
+fn nested_generic_function_binds_its_own_parameter_only() {
+    let diagnostics = check(
+        "declare function outer<T>(x: T, f: <U>(u: U, t: T) => U): T;\n\
+         const r: string = outer(1, (u, t) => u);\n",
+        "nested_binder.ts",
+    );
+    // outer infers T = number from the first argument, so the string annotation is an error.
+    assert!(
+        diagnostics.iter().any(|d| d
+            .message
+            .contains("Type 'number' is not assignable to type 'string'")),
+        "{diagnostics:?}"
+    );
+}
+
 // Problem: asking whether a type mentions a type parameter walked every path through
 // classes that refer to each other, and a node cut short by a cycle was never
 // remembered, so the work grew with the number of paths: 2^n and worse. TypeScript's
@@ -141,7 +190,7 @@ fn very_long_operator_chain_does_not_overflow_a_worker_stack() {
 // namespaces) never finished. Inference over the same types had the same shape: it
 // forgot a pair as soon as its match finished, so each route to it matched it again.
 // Here 24 plain classes each point at the next 5, and one call uses the first. See
-// scan_for_type_param and SeenPairs in semantic/generics.rs; both have to be fixed
+// free_generic_params and SeenPairs in semantic/generics.rs; both have to be fixed
 // for this to finish. The check runs on its own thread so a regression fails this
 // test after a timeout instead of freezing the whole suite.
 #[test]

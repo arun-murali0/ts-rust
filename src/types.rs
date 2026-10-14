@@ -276,14 +276,33 @@ impl TypeParameterId {
     pub fn parameter_index(&self) -> u32 {
         self.parameter_index
     }
+
+    pub(crate) fn declaration_span_start(&self) -> u32 {
+        self.declaration_span_start
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FunctionType {
     pub params: Vec<Param>,
     pub return_type: TypeId,
-
+    /// The ordered type parameters declared by this signature itself. This is
+    /// authoritative for explicit type arguments and defaults; discovering parameters
+    /// only by walking input/return types loses unused parameters such as `<T>() => void`.
+    pub type_params: Vec<FunctionTypeParam>,
     pub is_untyped: bool,
+}
+
+/// One type parameter owned by a function or method signature.
+///
+/// `constraint` and `default` are resolved TypeIds in the same arena as the signature.
+/// The `id` is stable declaration identity, not an arena index.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FunctionTypeParam {
+    pub id: TypeParameterId,
+    pub name: String,
+    pub constraint: Option<TypeId>,
+    pub default: Option<TypeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

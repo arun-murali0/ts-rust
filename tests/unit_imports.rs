@@ -514,3 +514,11 @@ fn a_generic_passed_on_keeps_its_parameters() {
     );
     assert_eq!(errors(&c).len(), 1, "{:?}", c.diagnostics);
 }
+
+#[test]
+fn an_imported_generic_function_preserves_signature_defaults() {
+    clean(
+        "export declare function make<T = string>(): T;",
+        "import { make } from './a'; const text: string = make();",
+    );
+}

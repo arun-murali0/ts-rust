@@ -23,11 +23,6 @@ pub(super) use elaborate::report_mismatch;
 pub(super) use excess::check_excess_properties;
 pub(super) use members::infer_member_access_type;
 
-pub(super) use crate::semantic::{
-    collect_generic_param_constraints, contains_type_param, expected_param_type,
-    infer_type_param_bindings, ordered_generic_param_ids, substitute_bound_type_params,
-    substitute_type_params,
-};
 use assignment::infer_assignment_expression_type;
 use binary::infer_binary_expression_type;
 use calls::{infer_call_expression_type, infer_new_expression_type};

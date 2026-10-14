@@ -1,9 +1,10 @@
 use crate::arena::{TypeArena, TypeId};
 use crate::fxhash::{FxBuildHasher, FxHashMap};
 use crate::semantic::queries::{RelationCache, SemanticQueries};
-use crate::types::{FunctionType, ObjectType, PropertyEntry, Type};
+use crate::types::{FunctionType, FunctionTypeParam, ObjectType, PropertyEntry, Type};
 use smallvec::SmallVec;
 use std::collections::HashSet;
+use std::rc::Rc;
 
 // Structural inference: walks a generic function's declared parameter type
 // alongside a call's actual argument type in lockstep, recording a binding the
@@ -99,6 +100,36 @@ fn same_literal_base(arena: &TypeArena, a: TypeId, b: TypeId) -> bool {
     matches!((literal_base(arena, a), literal_base(arena, b)), (Some(x), Some(y)) if x == y)
 }
 
+/// Whether a declared constraint asks inference to retain literal candidates.
+pub(crate) fn preserves_literal_inference(arena: &TypeArena, constraint: TypeId) -> bool {
+    bound_keeps_literals(arena, constraint)
+}
+
+/// Merge one already-collected inference candidate into a type parameter's chosen
+/// binding. Kept in one place so the structural collector and the new candidate
+/// finalizer use identical subtype/literal-widening policy.
+pub(crate) fn merge_inference_candidate(
+    arena: &mut TypeArena,
+    id: crate::types::TypeParameterId,
+    candidate: TypeId,
+    keeps_literals: bool,
+    bindings: &mut Vec<(crate::types::TypeParameterId, TypeId)>,
+    cache: &mut RelationCache,
+) {
+    match bindings.iter_mut().find(|(bound, _)| *bound == id) {
+        None => bindings.push((id, candidate)),
+        Some((_, existing)) => {
+            if is_subtype_via_cache(arena, cache, candidate, *existing) {
+                // The existing binding already covers this candidate.
+            } else if is_subtype_via_cache(arena, cache, *existing, candidate) {
+                *existing = candidate;
+            } else if keeps_literals && same_literal_base(arena, *existing, candidate) {
+                *existing = arena.alloc_union(vec![*existing, candidate]);
+            }
+        }
+    }
+}
+
 // The (param_type, arg_type) pairs one inference call has already matched, or is
 // matching right now.
 type SeenPairs = HashSet<(TypeId, TypeId), FxBuildHasher>;
@@ -174,22 +205,9 @@ fn infer_type_param_bindings_uncached(
                 crate::types::widen(arena, arg_type)
             };
 
-            match bindings.iter_mut().find(|(bound, _)| *bound == id) {
-                None => bindings.push((id, candidate)),
-                Some((_, existing)) => {
-                    if is_subtype_via_cache(arena, cache, candidate, *existing) {
-                        // The existing binding already covers this candidate.
-                    } else if is_subtype_via_cache(arena, cache, *existing, candidate) {
-                        *existing = candidate;
-                    } else if keeps_literals && same_literal_base(arena, *existing, candidate) {
-                        // `pair(1, 2)` for `T extends number`: neither literal covers
-                        // the other, but both are numbers, so T is 1 | 2. Literals of
-                        // different primitives (`pair("a", 1)`) are not combined; the
-                        // first binding stays and the second argument is reported.
-                        *existing = arena.alloc_union(vec![*existing, candidate]);
-                    }
-                }
-            }
+            // `pair(1, 2)` for `T extends number` keeps both literal candidates as a
+            // union; unconstrained candidates were widened above before they arrive here.
+            merge_inference_candidate(arena, id, candidate, keeps_literals, bindings, cache);
         }
         Type::Array(param_element) => {
             let arg_element = match arena.get(arg_type) {
@@ -232,9 +250,24 @@ fn infer_type_param_bindings_uncached(
             let Type::Function(arg_fn) = arena.get(arg_type).clone() else {
                 return;
             };
+            // A nested signature's own type parameters are binders, not inference targets
+            // of the enclosing call. Free outer parameters in the same signature remain
+            // candidates (for example `<U>(x: U) => T` can still infer the outer T).
+            let mut nested_locked = locked.to_vec();
+            for parameter in &param_fn.type_params {
+                if !nested_locked.contains(&parameter.id) {
+                    nested_locked.push(parameter.id);
+                }
+            }
             for (p, a) in param_fn.params.iter().zip(&arg_fn.params) {
                 infer_type_param_bindings_inner(
-                    arena, p.type_id, a.type_id, bindings, locked, cache, seen,
+                    arena,
+                    p.type_id,
+                    a.type_id,
+                    bindings,
+                    &nested_locked,
+                    cache,
+                    seen,
                 );
             }
             infer_type_param_bindings_inner(
@@ -242,7 +275,7 @@ fn infer_type_param_bindings_uncached(
                 param_fn.return_type,
                 arg_fn.return_type,
                 bindings,
-                locked,
+                &nested_locked,
                 cache,
                 seen,
             );
@@ -508,9 +541,20 @@ impl Substitution<'_> {
                     });
                 }
                 let return_type = self.rewrite(arena, function.return_type, cut);
+                let type_params = function
+                    .type_params
+                    .iter()
+                    .map(|param| FunctionTypeParam {
+                        id: param.id,
+                        name: param.name.clone(),
+                        constraint: param.constraint.map(|id| self.rewrite(arena, id, cut)),
+                        default: param.default.map(|id| self.rewrite(arena, id, cut)),
+                    })
+                    .collect();
                 arena.alloc(Type::Function(FunctionType {
                     params,
                     return_type,
+                    type_params,
                     is_untyped: function.is_untyped,
                 }))
             }
@@ -552,161 +596,221 @@ impl Substitution<'_> {
     }
 }
 
-// Collects every distinct type parameter appearing in type_id, then hands them
-// back in declaration order rather than tree-walk-encounter order. An explicit
-// call-site type argument list (identity<string, number>(x, y)) has no
-// declaration span of its own to key a TypeParameterId lookup off of (it is
-// just a positional list), so the only way to zip it correctly against a
-// function's own T, U, ... is to recover the order they were declared in. That
-// order survives structurally: push_type_params numbers each parameter by its
-// position in the source `<...>` list (see TypeParameterId::parameter_index),
-// so sorting by that index reconstructs it even though nothing about a
-// FunctionType itself remembers "T came before U".
+// The free type parameters of a type: every GenericParameter reachable from it that is not
+// declared by a generic function type on the way down. `<U>(x: U) => U` has none; its U is
+// bound. `<U>(x: U, y: T) => U` has T. Each element is the parameter's id and the
+// GenericParameter node that names it, so one walk answers three questions: is the type
+// generic at all (contains_type_param), which parameters does it need explicit type
+// arguments for, in declaration order (ordered_generic_param_ids), and which of them carry
+// an `extends` bound (collect_generic_param_constraints).
+//
+// Problem 1: an earlier version of this walk carried the list of generic binders it was
+// inside and keyed its "already visited" set by (type, binders). A self-referential generic
+// signature never repeats that key. `class Chain<T> { then<S>(cb: (x: T) => S): Chain<S> }`
+// is two types, Chain<S> and the `then` function, that lead to each other, and every lap
+// through `then` pushed S onto the binder list again. gdb on the hung process showed exactly
+// two type ids alternating and a binder list that went from 3,841 to 6,118 entries between
+// samples: the walk never ended. On TypeScript's own tests that was 15 files that hung or
+// ran out of memory (promiseChaining, promisePermutations, chainedCalls...).
+// Fix: the free set of a node does not depend on the path that reached it. It is the node's
+// own contents minus the binders the node itself declares, so there is no path-dependent
+// key left to grow.
+//
+// Problem 2: the first version of that fix still walked down from the start and cut a
+// cycle where it re-entered a node that was still open. An answer cut at an outer open node
+// is only partial, so it was not remembered, and every other path to the same node walked
+// it again. With classes that point at each other (`class C0 { p1: C1; ... p5: C5 }` and so
+// on, as in resolvingClassDeclarationWhenInBaseTypeResolution) the number of paths grows
+// exponentially, and the walk never finished.
+// Picked: find every type reachable from the start once, then settle the free sets of all of
+// them together. A set is the union of its children's sets minus the node's own binders,
+// which only ever grows as the children's sets do, so repeating it until nothing changes
+// reaches the one right answer for every node at once, cycles included. Each node is
+// visited once to find it and a few times to settle it, so the cost follows the size of the
+// graph and not the number of paths through it. The answers are exact for every node, so all
+// of them are remembered in the arena, not only the ones a cut did not touch.
+// Cost: one small vector per node and a few passes over the reachable graph the first time a
+// type is asked about; the arena keeps the boolean, so every later question is one lookup. A
+// node the arena already knows to hold no parameter is not walked into at all.
+type FreeParam = (crate::types::TypeParameterId, TypeId);
+
+fn is_constrained(arena: &TypeArena, node: TypeId) -> bool {
+    matches!(arena.get(node), Type::GenericParameter(_, _, Some(_)))
+}
+
+// Adds `from` to `into`, one entry per parameter id, first seen first. When a parameter is
+// met both as a bare node and as one carrying its constraint, the constrained node is kept:
+// the constraint is the same wherever the parameter appears.
+fn merge_free(arena: &TypeArena, into: &mut Vec<FreeParam>, from: &[FreeParam]) {
+    for &(id, node) in from {
+        match into.iter_mut().find(|(existing, _)| *existing == id) {
+            None => into.push((id, node)),
+            Some(slot) => {
+                if !is_constrained(arena, slot.1) && is_constrained(arena, node) {
+                    slot.1 = node;
+                }
+            }
+        }
+    }
+}
+
+// The types a type is made of, in the order their free sets are merged: a generic function's
+// own bounds and defaults, then its parameters, then its return type.
+fn parts_of(arena: &TypeArena, type_id: TypeId) -> SmallVec<[TypeId; 8]> {
+    let mut parts = SmallVec::new();
+    match arena.get(type_id) {
+        Type::Array(element) => parts.push(*element),
+        Type::Function(function) => {
+            for parameter in &function.type_params {
+                parts.extend(
+                    [parameter.constraint, parameter.default]
+                        .into_iter()
+                        .flatten(),
+                );
+            }
+            parts.extend(function.params.iter().map(|parameter| parameter.type_id));
+            parts.push(function.return_type);
+        }
+        Type::Object(object) => parts.extend(object.properties.iter().map(|p| p.type_id)),
+        Type::Union(members) | Type::Intersection(members) => parts.extend(members.iter().copied()),
+        _ => {}
+    }
+    parts
+}
+
+// Whether two lists name the same parameters, each by the same kind of node. The order is
+// left out on purpose: it follows the order the children happened to be settled in, and it
+// is the set that decides whether another pass is needed.
+fn same_free_set(arena: &TypeArena, a: &[FreeParam], b: &[FreeParam]) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|&(id, node)| {
+            b.iter().any(|&(other, other_node)| {
+                other == id && is_constrained(arena, node) == is_constrained(arena, other_node)
+            })
+        })
+}
+
+// The free parameters of `type_id`, in first-seen order. The arena's "mentions a type
+// parameter" answer is published for every node reached, so the next contains_type_param on
+// any of them is one lookup.
+fn free_generic_params(arena: &TypeArena, type_id: TypeId) -> Rc<[FreeParam]> {
+    // Every type reachable from the start, each once, in the order it was found. `position`
+    // doubles as the visited set.
+    let mut nodes: Vec<TypeId> = Vec::new();
+    let mut parts: Vec<SmallVec<[usize; 8]>> = Vec::new();
+    let mut position: FxHashMap<TypeId, usize> = FxHashMap::default();
+    reach(arena, type_id, &mut nodes, &mut parts, &mut position);
+
+    let mut sets: Vec<Vec<FreeParam>> = nodes
+        .iter()
+        .map(|&node| match arena.get(node) {
+            Type::GenericParameter(id, _, _) => vec![(*id, node)],
+            _ => Vec::new(),
+        })
+        .collect();
+
+    // Last found first: a node is found before the parts it is made of, so going backwards
+    // settles most parts before the node that uses them, and an acyclic graph is done in
+    // one pass plus the pass that sees nothing change.
+    loop {
+        let mut changed = false;
+        for index in (0..nodes.len()).rev() {
+            let mut free: Vec<FreeParam> = match arena.get(nodes[index]) {
+                Type::GenericParameter(id, _, _) => vec![(*id, nodes[index])],
+                _ => Vec::new(),
+            };
+            for &part in &parts[index] {
+                merge_free(arena, &mut free, &sets[part]);
+            }
+            // The function's own binders are bound inside it, wherever they were used.
+            if let Type::Function(function) = arena.get(nodes[index]) {
+                free.retain(|(id, _)| !function.type_params.iter().any(|own| own.id == *id));
+            }
+            if !same_free_set(arena, &free, &sets[index]) {
+                changed = true;
+            }
+            sets[index] = free;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    for (node, set) in nodes.iter().zip(&sets) {
+        arena.remember_mentions_type_param(*node, !set.is_empty());
+    }
+    Rc::from(sets[position[&type_id]].clone())
+}
+
+// Finds `type_id` and everything reachable from it, once each. A type the arena already
+// knows to mention no parameter is a leaf: it can only contribute an empty set.
+fn reach(
+    arena: &TypeArena,
+    type_id: TypeId,
+    nodes: &mut Vec<TypeId>,
+    parts: &mut Vec<SmallVec<[usize; 8]>>,
+    position: &mut FxHashMap<TypeId, usize>,
+) -> usize {
+    if let Some(&known) = position.get(&type_id) {
+        return known;
+    }
+    // Reserved before the parts are visited, so a cycle back to this node finds its slot.
+    let slot = nodes.len();
+    position.insert(type_id, slot);
+    nodes.push(type_id);
+    parts.push(SmallVec::new());
+    if arena.cached_mentions_type_param(type_id) != Some(false) {
+        let children: SmallVec<[usize; 8]> = parts_of(arena, type_id)
+            .into_iter()
+            .map(|child| reach(arena, child, nodes, parts, position))
+            .collect();
+        parts[slot] = children;
+    }
+    slot
+}
+
+// Whether a type mentions a *free* type parameter, i.e. one not declared by a generic
+// function type inside it. Answers are kept in the arena (TypeArena::cached_mentions_type_param),
+// not per call: the checker asks it for every call expression, mostly about types that never
+// change, and interning has turned the type graph into a DAG.
+pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
+    if let Some(known) = arena.cached_mentions_type_param(type_id) {
+        return known;
+    }
+    !free_generic_params(arena, type_id).is_empty()
+}
+
+// Collects the free type parameters appearing in type_id, in declaration order where their
+// identity provides one. An explicit call-site type argument list (identity<string, number>(x, y))
+// has no declaration span of its own to key a TypeParameterId lookup off of -- it is just a
+// positional list -- so the only way to zip it against a function's own T, U, ... is to recover
+// the order they were declared in. That order survives in the ids: push_type_params numbers each
+// parameter by its position in the source `<...>` list (TypeParameterId::parameter_index).
+// Signature-owned parameters are stored explicitly on FunctionType and are supplied by the caller
+// before this walk, so only the newly discovered parameters are sorted here. Sorting the caller's
+// existing output would interleave indices from unrelated declarations (a method's U and its
+// enclosing class's T can both have index zero).
 pub(crate) fn ordered_generic_param_ids(
     arena: &TypeArena,
     type_id: TypeId,
     out: &mut Vec<crate::types::TypeParameterId>,
 ) {
-    // Most callees are not generic. The arena remembers that per type, so the
-    // common case costs one lookup instead of a walk (this runs for every call
-    // expression, on each parameter and the return type).
+    // Most callees are not generic, and the arena remembers that per type, so the common case
+    // costs one lookup instead of a walk (this runs for every call expression, on each
+    // parameter and the return type).
     if !contains_type_param(arena, type_id) {
         return;
     }
-    ordered_generic_param_ids_inner(arena, type_id, out, &mut SmallVec::new());
-    out.sort_by_key(|id| id.parameter_index());
-}
-
-// The walk only accumulates a set of parameters, so a node reached a second time
-// (through a self-referential property, or just because interning shares it
-// between parents) can never add anything the first visit did not. That is why
-// `visited` is never unwound, unlike the path stacks the walks that build a new
-// type need: a shared subtype is walked once per call instead of once per
-// parent. First-seen order is unchanged, and the sort by parameter_index above
-// is what fixes the final order anyway. The `out.contains` check below is a
-// separate thing (it dedupes which *parameters* get collected) and does not
-// bound the walk.
-//
-// `visited` is a plain Vec with a linear lookup, not a hash set. Only types that
-// really mention a parameter get this far (the check above), and those are
-// function signatures and small generic objects, where a handful of comparisons
-// is cheaper than hashing and allocating a table on every call.
-fn ordered_generic_param_ids_inner(
-    arena: &TypeArena,
-    type_id: TypeId,
-    out: &mut Vec<crate::types::TypeParameterId>,
-    visited: &mut SmallVec<[TypeId; 16]>,
-) {
-    if visited.contains(&type_id) {
-        return;
-    }
-    visited.push(type_id);
-    match arena.get(type_id) {
-        Type::GenericParameter(id, _, _) => {
-            if !out.contains(id) {
-                out.push(*id);
-            }
-        }
-        Type::Array(element) => ordered_generic_param_ids_inner(arena, *element, out, visited),
-        Type::Function(f) => {
-            for param in &f.params {
-                ordered_generic_param_ids_inner(arena, param.type_id, out, visited);
-            }
-            ordered_generic_param_ids_inner(arena, f.return_type, out, visited);
-        }
-        Type::Object(o) => {
-            for property in o.properties.iter() {
-                ordered_generic_param_ids_inner(arena, property.type_id, out, visited);
-            }
-        }
-        Type::Union(members) | Type::Intersection(members) => {
-            for &member in members {
-                ordered_generic_param_ids_inner(arena, member, out, visited);
-            }
-        }
-        _ => {}
-    }
-}
-
-pub(crate) fn contains_type_param(arena: &TypeArena, type_id: TypeId) -> bool {
-    if let Some(known) = arena.cached_mentions_type_param(type_id) {
-        return known;
-    }
-    let mut visited: HashSet<TypeId, FxBuildHasher> = HashSet::default();
-    let found = scan_for_type_param(arena, type_id, &mut visited);
-    if !found {
-        // The walk reached every type reachable from type_id and none of them is a
-        // parameter, so the same is true of each type it passed through: whatever
-        // one of them reaches, type_id reaches too. All of them are remembered in
-        // one go, which is what keeps the next question about any of them to a lookup.
-        for id in visited {
-            arena.remember_mentions_type_param(id, false);
+    let mut found: Vec<crate::types::TypeParameterId> = free_generic_params(arena, type_id)
+        .iter()
+        .map(|&(id, _)| id)
+        .collect();
+    found.sort_by_key(|id| id.parameter_index());
+    for id in found {
+        if !out.contains(&id) {
+            out.push(id);
         }
     }
-    found
-}
-
-// The "does this type mention a type parameter" question. Answers are kept in
-// the arena (TypeArena::cached_mentions_type_param), not per call: the checker
-// asks it for every call expression, mostly about types that never change, and
-// interning has turned the type graph into a DAG, so the same `number[]` or
-// `{ id: number }` node hangs off many parents.
-//
-// Problem: the walk used to keep only the ids on its current path, and to
-// remember a `false` only for a node whose walk had not been cut short by a
-// cycle. In a graph where classes refer to each other (Node { next: Node }, through
-// the Ref namespace::resolve gives its declaration), almost every node is cut by
-// some cycle, so almost nothing was remembered and a node shared by many parents
-// was walked again for every path that led to it. The number of paths grows
-// exponentially with the number of classes: TypeScript's own
-// resolvingClassDeclarationWhenInBaseTypeResolution test, about 50 generic classes
-// that refer to each other across namespaces, never finished.
-// Picked: one visited set for the whole question. A node already visited is not
-// walked again, so the walk is linear in the types reachable from the start.
-// Returning `false` for it is right whatever is still open above it: the question
-// is only whether some parameter is reachable, so if there is one, it will be
-// found by the walk that is still running, and the `true` it produces travels up
-// through every open node (and is remembered for each) without looking at the
-// visited node's answer again.
-// Cost: a `true` is only remembered for the nodes on the path to the parameter, not
-// for the other nodes the walk visited first; asking about those again walks them
-// again, once. A `false` is remembered for every visited node, see
-// contains_type_param.
-fn scan_for_type_param(
-    arena: &TypeArena,
-    type_id: TypeId,
-    visited: &mut HashSet<TypeId, FxBuildHasher>,
-) -> bool {
-    if let Some(known) = arena.cached_mentions_type_param(type_id) {
-        return known;
-    }
-    if !visited.insert(type_id) {
-        return false;
-    }
-
-    let found = match arena.get(type_id) {
-        Type::GenericParameter(_, _, _) => true,
-        Type::Array(element) => scan_for_type_param(arena, *element, visited),
-        Type::Function(f) => {
-            f.params
-                .iter()
-                .any(|p| scan_for_type_param(arena, p.type_id, visited))
-                || scan_for_type_param(arena, f.return_type, visited)
-        }
-        Type::Object(o) => o
-            .properties
-            .iter()
-            .any(|p| scan_for_type_param(arena, p.type_id, visited)),
-        Type::Union(members) | Type::Intersection(members) => members
-            .iter()
-            .any(|&m| scan_for_type_param(arena, m, visited)),
-        _ => false,
-    };
-
-    if found {
-        arena.remember_mentions_type_param(type_id, true);
-    }
-    found
 }
 
 // The type an argument at index is checked against. A rest parameter absorbs
@@ -732,74 +836,28 @@ pub(crate) fn expected_param_type(
     })
 }
 
-// Walks type_id the same way contains_type_param does, but collects every
-// constrained GenericParameter it finds instead of just checking for their
-// presence. Used once per call, after inference finishes, to find which of a
-// generic function's own type parameters actually have an `extends` bound to
-// check the inferred argument against. A parameter found more than once (T
-// appearing in two parameter positions, for instance) is only recorded once,
-// since its constraint is the same wherever it appears. The name travels
-// alongside the constraint purely so the diagnostic that checks these can name
-// the offending type parameter; it plays no role in matching.
+// Like the parameter collector, this sees constraints belonging to free parameters but not
+// constraints declared by a nested generic function's own binders: those are checked when that
+// nested signature is instantiated, not when the enclosing function is called. It reads the
+// same free set (see free_generic_params), keeping a constraint for each constrained parameter.
+// A parameter found more than once (T appearing in two parameter positions, for instance) is
+// only recorded once, since its constraint is the same wherever it appears. The name travels
+// alongside the constraint purely so the diagnostic that checks these can name the offending
+// type parameter; it plays no role in matching.
 pub(crate) fn collect_generic_param_constraints(
     arena: &TypeArena,
     type_id: TypeId,
     constraints: &mut Vec<(crate::types::TypeParameterId, String, TypeId)>,
 ) {
-    // Same early exit as ordered_generic_param_ids: no parameter, no constraints.
     if !contains_type_param(arena, type_id) {
         return;
     }
-    collect_generic_param_constraints_inner(arena, type_id, constraints, &mut SmallVec::new());
-}
-
-// Same walk as ordered_generic_param_ids_inner, and the same choice of guard: a
-// visited set that is never unwound. The walk only accumulates constraints, and
-// a node reached a second time (by a cycle or by plain sharing) would add
-// nothing the first visit did not. The constraint-level dedup below is a separate
-// concern (which *parameters* get recorded) and does not bound the walk.
-fn collect_generic_param_constraints_inner(
-    arena: &TypeArena,
-    type_id: TypeId,
-    constraints: &mut Vec<(crate::types::TypeParameterId, String, TypeId)>,
-    visited: &mut SmallVec<[TypeId; 16]>,
-) {
-    if visited.contains(&type_id) {
-        return;
-    }
-    visited.push(type_id);
-    match arena.get(type_id) {
-        Type::GenericParameter(id, name, Some(constraint)) => {
-            if !constraints.iter().any(|(existing, _, _)| existing == id) {
-                constraints.push((*id, name.clone(), *constraint));
+    for &(id, node) in free_generic_params(arena, type_id).iter() {
+        if let Type::GenericParameter(_, name, Some(constraint)) = arena.get(node) {
+            if !constraints.iter().any(|(existing, _, _)| *existing == id) {
+                constraints.push((id, name.clone(), *constraint));
             }
         }
-        Type::GenericParameter(_, _, None) => {}
-        Type::Array(element) => {
-            collect_generic_param_constraints_inner(arena, *element, constraints, visited)
-        }
-        Type::Function(f) => {
-            for param in &f.params {
-                collect_generic_param_constraints_inner(arena, param.type_id, constraints, visited);
-            }
-            collect_generic_param_constraints_inner(arena, f.return_type, constraints, visited);
-        }
-        Type::Object(o) => {
-            for property in o.properties.iter() {
-                collect_generic_param_constraints_inner(
-                    arena,
-                    property.type_id,
-                    constraints,
-                    visited,
-                );
-            }
-        }
-        Type::Union(members) | Type::Intersection(members) => {
-            for &member in members {
-                collect_generic_param_constraints_inner(arena, member, constraints, visited);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -827,6 +885,48 @@ mod tests {
 
         assert_eq!(bindings, vec![(id, number)]);
         assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn nested_generic_signature_parameters_are_bound_but_outer_parameters_remain_free() {
+        let mut arena = TypeArena::new();
+        let outer_id = TypeParameterId::new(10, 0);
+        let local_id = TypeParameterId::new(20, 0);
+        let outer = arena.alloc(Type::GenericParameter(outer_id, "T".into(), None));
+        let local = arena.alloc(Type::GenericParameter(local_id, "U".into(), None));
+        let void = arena.void();
+
+        let only_local = arena.alloc(Type::Function(FunctionType {
+            params: vec![crate::types::Param::required(local)],
+            return_type: void,
+            type_params: vec![FunctionTypeParam {
+                id: local_id,
+                name: "U".into(),
+                constraint: None,
+                default: None,
+            }],
+            is_untyped: false,
+        }));
+        assert!(!contains_type_param(&arena, only_local));
+        let mut leaked = Vec::new();
+        ordered_generic_param_ids(&arena, only_local, &mut leaked);
+        assert!(leaked.is_empty());
+
+        let with_outer = arena.alloc(Type::Function(FunctionType {
+            params: vec![crate::types::Param::required(local)],
+            return_type: outer,
+            type_params: vec![FunctionTypeParam {
+                id: local_id,
+                name: "U".into(),
+                constraint: None,
+                default: None,
+            }],
+            is_untyped: false,
+        }));
+        assert!(contains_type_param(&arena, with_outer));
+        let mut ids = Vec::new();
+        ordered_generic_param_ids(&arena, with_outer, &mut ids);
+        assert_eq!(ids, vec![outer_id]);
     }
 
     fn property(name: &str, type_id: TypeId) -> PropertyEntry {

@@ -93,6 +93,7 @@ pub(super) fn check_function_declaration(
             .alloc(crate::types::Type::Function(crate::types::FunctionType {
                 params: function_type.params,
                 return_type: inferred,
+                type_params: function_type.type_params,
                 is_untyped: function_type.is_untyped,
             }));
         ctx.symbols.declare(symbol_id, updated);

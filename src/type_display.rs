@@ -166,6 +166,24 @@ fn write_signature(
     out: &mut String,
     depth: usize,
 ) {
+    if !function.type_params.is_empty() {
+        out.push('<');
+        for (index, type_param) in function.type_params.iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&type_param.name);
+            if let Some(constraint) = type_param.constraint {
+                out.push_str(" extends ");
+                write_type(arena, constraint, out, depth.saturating_sub(1));
+            }
+            if let Some(default) = type_param.default {
+                out.push_str(" = ");
+                write_type(arena, default, out, depth.saturating_sub(1));
+            }
+        }
+        out.push('>');
+    }
     out.push('(');
     for (index, param) in function.params.iter().enumerate() {
         if index > 0 {
@@ -547,6 +565,7 @@ mod tests {
                 },
             ],
             return_type: number,
+            type_params: Vec::new(),
             is_untyped: false,
         }));
         assert_eq!(render(&arena, func), "(a: number, b?: string) => number");
@@ -566,6 +585,7 @@ mod tests {
                 name: Some("rest".into()),
             }],
             return_type: void_like,
+            type_params: Vec::new(),
             is_untyped: false,
         }));
         assert_eq!(render(&arena, func), "(rest: ...number[]) => undefined");
@@ -583,6 +603,7 @@ mod tests {
                 name: None,
             }],
             return_type: number,
+            type_params: Vec::new(),
             is_untyped: false,
         }));
         assert_eq!(render(&arena, func), "(arg0: number) => number");

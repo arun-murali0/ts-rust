@@ -1,9 +1,11 @@
 mod generics;
 pub mod queries;
+mod solver;
 
+// Only the helpers still used outside this module. The call checker reaches the rest
+// through GenericSolver, which calls into generics.rs directly.
 pub(crate) use generics::{
-    collect_generic_param_constraints, contains_type_param, expected_param_type,
-    infer_type_param_bindings, ordered_generic_param_ids, substitute_bound_type_params,
-    substitute_type_params,
+    contains_type_param, substitute_bound_type_params, substitute_type_params,
 };
 pub use queries::SemanticQueries;
+pub(crate) use solver::{GenericInferenceSession, GenericSolver};

@@ -587,12 +587,14 @@ mod tests {
         let sub = arena.alloc(Type::Function(FunctionType {
             params: vec![Param::required(arena.unknown())],
             return_type: arena.number(),
+            type_params: Vec::new(),
             is_untyped: false,
         }));
 
         let sup = arena.alloc(Type::Function(FunctionType {
             params: vec![Param::required(arena.string())],
             return_type: arena.unknown(),
+            type_params: Vec::new(),
             is_untyped: false,
         }));
 
@@ -617,12 +619,14 @@ mod tests {
                 },
             ],
             return_type: arena.undefined(),
+            type_params: Vec::new(),
             is_untyped: false,
         }));
 
         let sup = arena.alloc(Type::Function(FunctionType {
             params: vec![Param::required(arena.number())],
             return_type: arena.undefined(),
+            type_params: Vec::new(),
             is_untyped: false,
         }));
 
@@ -641,12 +645,14 @@ mod tests {
                 Param::required(arena.number()),
             ],
             return_type: arena.undefined(),
+            type_params: Vec::new(),
             is_untyped: false,
         }));
 
         let needs_one = arena.alloc(Type::Function(FunctionType {
             params: vec![Param::required(arena.number())],
             return_type: arena.undefined(),
+            type_params: Vec::new(),
             is_untyped: false,
         }));
 
@@ -670,6 +676,7 @@ mod tests {
                 name: None,
             }],
             return_type: arena.undefined(),
+            type_params: Vec::new(),
             is_untyped: false,
         }));
 
@@ -679,6 +686,7 @@ mod tests {
                 Param::required(arena.number()),
             ],
             return_type: arena.undefined(),
+            type_params: Vec::new(),
             is_untyped: false,
         }));
 
@@ -950,6 +958,7 @@ mod intersection_relation_tests {
                 name: None,
             }],
             return_type: returns,
+            type_params: Vec::new(),
             is_untyped: false,
         }))
     }
