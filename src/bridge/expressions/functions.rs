@@ -77,7 +77,7 @@ fn infer_arrow_function_type_inner(
         let inferred = infer_expression_type(body_expr, scoping, ctx);
         match declared_return {
             Some(declared) => {
-                if !ctx.semantic().is_assignable(inferred, declared) {
+                if !ctx.is_assignable_instantiating(inferred, declared) {
                     ctx.error(
                         crate::diagnostic_messages::messages::return_type_mismatch(
                             &ctx.arena, inferred, declared,

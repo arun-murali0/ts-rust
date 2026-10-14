@@ -60,7 +60,7 @@ pub(super) fn check_return_statement(
     }
 
     if let Some(expected) = ctx.current_return_type {
-        if !ctx.semantic().is_assignable(actual, expected) {
+        if !ctx.is_assignable_instantiating(actual, expected) {
             let whole = crate::diagnostic_messages::messages::return_type_mismatch(
                 &ctx.arena, actual, expected,
             );

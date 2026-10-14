@@ -324,3 +324,55 @@ fn an_unexported_class_in_a_later_block_does_not_collide_with_an_exported_one() 
         "{found:?}"
     );
 }
+
+// Inside a namespace, exported declarations are one symbol across blocks, so two exported
+// classes of one name are a redeclaration; two local classes in one block are too. A local
+// class in another block is a different symbol.
+#[test]
+fn exported_classes_with_one_name_in_two_blocks_are_a_duplicate() {
+    let found = errors("namespace N { export class C {} }\nnamespace N { export class C {} }\n");
+    assert!(
+        found.iter().any(|(code, _)| *code == Some(2300)),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn local_classes_with_one_name_in_one_block_are_a_duplicate() {
+    let found = errors("namespace N { class C {} class C {} }\n");
+    assert!(
+        found.iter().any(|(code, _)| *code == Some(2300)),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn local_classes_with_one_name_in_different_blocks_are_not() {
+    let found = errors("namespace N { class C {} }\nnamespace N { class C {} }\n");
+    assert!(
+        found.iter().all(|(code, _)| *code != Some(2300)),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn common_library_globals_are_not_reported_as_unknown_names() {
+    let found = errors(
+        "const a = new Uint8Array(4);\nconst u = new URL('x');\nconst d = document.title;\nconst e = encodeURIComponent('x');\nconst r = fetch('x');\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+// A class exported from a namespace that is not itself exported lives in that local
+// namespace, so it is not a second declaration of the class in the exported namespace.
+#[test]
+fn an_exported_class_inside_a_local_namespace_does_not_collide_with_the_exported_one() {
+    let found = errors(
+        "namespace X.Y.Z { export class Line { length!: number } }\n\
+         namespace X { export namespace Y { namespace Z { export class Line { name!: string } } } }\n",
+    );
+    assert!(
+        found.iter().all(|(code, _)| *code != Some(2300)),
+        "{found:?}"
+    );
+}

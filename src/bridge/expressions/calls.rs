@@ -789,7 +789,7 @@ fn check_callable(
             continue;
         };
         let expected = GenericSolver::substitute_type_params(&mut ctx.arena, param_type, &bindings);
-        if !ctx.semantic().is_assignable(arg_type, expected) {
+        if !ctx.is_assignable_instantiating(arg_type, expected) {
             // tsc reports a bad property of an object literal argument on the property
             // itself, as a plain assignability error; only an argument it cannot take
             // apart gets the `Argument of type ...` message.
