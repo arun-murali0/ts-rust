@@ -276,10 +276,6 @@ impl TypeParameterId {
     pub fn parameter_index(&self) -> u32 {
         self.parameter_index
     }
-
-    pub(crate) fn declaration_span_start(&self) -> u32 {
-        self.declaration_span_start
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

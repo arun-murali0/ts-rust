@@ -621,7 +621,18 @@ impl<'a> TypeNamespace<'a> {
     // the earlier entry), so flagging them would report an error tsc does not. Only
     // pairs that are an error in TypeScript are recorded: an alias on either side, two
     // classes, or an enum against anything but an enum.
+    //
+    // Problem: two blocks of one namespace share a registered name, so a class that is not
+    // exported from the second block (`namespace A { export class P {} }` then
+    // `namespace A { class P {} }`) looked like a redeclaration of the exported one, and
+    // tsc's own TwoInternalModules... tests reported TS2300 that tsc does not.
+    // Picked: no collision is recorded inside a namespace, since a declaration here does
+    // not say whether it is exported.
+    // Cost: a real duplicate inside a namespace goes unreported, as before namespaces merged.
     fn note_collision(&mut self, name: &str, new_kind: NewKind, span: Span) {
+        if !self.scope.is_empty() {
+            return;
+        }
         let Some(existing) = self.entries.get(name) else {
             return;
         };

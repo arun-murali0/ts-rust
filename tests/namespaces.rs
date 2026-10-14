@@ -299,3 +299,28 @@ fn new_on_a_member_of_something_with_no_such_member_is_reported_once() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].0, Some(2339));
 }
+
+// Problem: `new Intl.DateTimeFormat()` started reporting TS2304 for `Intl` once `new`
+// accepted a member expression, because the library global is not modelled. Picked: treat
+// it as a known ambient global like Math and JSON, so its members are unchecked.
+#[test]
+fn new_on_an_unmodelled_library_namespace_is_not_reported() {
+    let found = errors("const f = new Intl.DateTimeFormat();\n");
+    assert!(found.is_empty(), "{found:?}");
+}
+
+// A class left unexported in a second block of a namespace is local to that block; it is
+// not a second declaration of the exported one (tsc accepts this, and reports no TS2300).
+#[test]
+fn an_unexported_class_in_a_later_block_does_not_collide_with_an_exported_one() {
+    let found = errors(
+        "namespace Z { export class Line { length!: number } }\n\
+         namespace Z { class Line { name!: string } }\n\
+         var l: { length: number };\n\
+         var l: Z.Line;\n",
+    );
+    assert!(
+        found.iter().all(|(code, _)| *code != Some(2300)),
+        "{found:?}"
+    );
+}

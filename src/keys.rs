@@ -212,14 +212,18 @@ impl DeclKey {
         Self(w.finish())
     }
 
-    /// Stable owner for a generic signature nested inside a module declaration. The
-    /// signature's first type-parameter source position distinguishes it from sibling
-    /// signatures, while the module key keeps equal offsets in different files apart.
-    pub(crate) fn nested_type_signature(module: ModuleKey, first_parameter_start: u32) -> Self {
+    /// Stable owner for a generic signature nested inside a declaration (a method of an
+    /// interface, a callback parameter, a function typed property). It is the key of the
+    /// declaration it is written in plus the path from that declaration's type down to the
+    /// signature, so it does not change when lines are added above it: an offset in the
+    /// file would, and a hash that moved with it would tell a dependent that an unchanged
+    /// signature had changed.
+    pub(crate) fn nested_type_signature(parent: DeclKey, path: &[u8]) -> Self {
         let mut w = StreamWriter::new();
-        w.u8(0xDD)
-            .raw128(module.as_u128())
-            .u32(first_parameter_start);
+        w.u8(0xDD).raw128(parent.as_u128()).u32(path.len() as u32);
+        for byte in path {
+            w.u8(*byte);
+        }
         Self(w.finish())
     }
 }

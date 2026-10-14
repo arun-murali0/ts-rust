@@ -463,3 +463,51 @@ fn a_default_exported_identifier_is_listed_under_default() {
     let public: Vec<&str> = out.export_names.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(public, vec!["default"]);
 }
+
+// The key of a nested generic signature must not depend on where in the file it was
+// written: an edit above a declaration moves every offset below it, and a hash that moved
+// with them would tell a dependent that an unchanged signature had changed.
+fn signature_of(source: &str, name: &str) -> ts_rust::SigHash {
+    let out = run(source);
+    out.exports
+        .iter()
+        .find(|decl| &*decl.name == name)
+        .unwrap_or_else(|| panic!("{name} is not exported: {out:?}"))
+        .sig
+}
+
+const BOX: &str = "export interface Box { map: <U>(f: (x: number) => U) => U[] }\n";
+
+#[test]
+fn lines_added_above_a_declaration_do_not_change_its_hash() {
+    let plain = signature_of(BOX, "Box");
+    let padded = signature_of(&format!("\n\n// a comment\n{BOX}"), "Box");
+    assert_eq!(plain, padded);
+}
+
+#[test]
+fn a_declaration_added_above_does_not_change_the_hash_of_the_one_below() {
+    let alone = signature_of(BOX, "Box");
+    let below = signature_of(
+        &format!("export interface Other {{ id: number; name: string }}\n{BOX}"),
+        "Box",
+    );
+    assert_eq!(alone, below);
+}
+
+#[test]
+fn a_change_to_the_nested_signature_still_changes_the_hash() {
+    let plain = signature_of(BOX, "Box");
+    let bounded = signature_of(
+        "export interface Box { map: <U extends string>(f: (x: number) => U) => U[] }\n",
+        "Box",
+    );
+    assert_ne!(plain, bounded);
+}
+
+#[test]
+fn two_nested_signatures_in_one_declaration_keep_distinct_keys() {
+    let both = "export interface Pair { a: <T>(x: T) => T; b: <T>(x: T) => T[] }\n";
+    let moved = format!("\n\n{both}");
+    assert_eq!(signature_of(both, "Pair"), signature_of(&moved, "Pair"));
+}
