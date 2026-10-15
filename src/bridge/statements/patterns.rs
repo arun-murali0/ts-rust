@@ -40,6 +40,19 @@ pub(crate) fn bind_pattern(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) {
+    bind_pattern_in(pattern, type_id, false, scoping, ctx);
+}
+
+// `from_array_element` is true when `type_id` is the element type of an array this checker
+// built from a literal (see bind_array_pattern): its union may then be an artifact of there
+// being no tuple type, not something the program wrote.
+fn bind_pattern_in(
+    pattern: &BindingPattern,
+    type_id: TypeId,
+    from_array_element: bool,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) {
     match pattern {
         BindingPattern::BindingIdentifier(id) => {
             if let Some(symbol_id) = id.symbol_id.get() {
@@ -47,7 +60,9 @@ pub(crate) fn bind_pattern(
             }
         }
         BindingPattern::ObjectPattern(object) => bind_object_pattern(object, type_id, scoping, ctx),
-        BindingPattern::ArrayPattern(array) => bind_array_pattern(array, type_id, scoping, ctx),
+        BindingPattern::ArrayPattern(array) => {
+            bind_array_pattern(array, type_id, from_array_element, scoping, ctx)
+        }
         // `{x = 1} = y` or `function f(x = 1)`: the default only ever substitutes
         // for undefined at runtime, so the effective bound type is the source
         // type with undefined (and, as an over-approximation, null too) removed,
@@ -58,7 +73,7 @@ pub(crate) fn bind_pattern(
 
             let non_nullish = narrow_to_non_nullish(&mut ctx.arena, type_id);
             let effective = ctx.arena.alloc_union(vec![non_nullish, default_type]);
-            bind_pattern(&assignment.left, effective, scoping, ctx);
+            bind_pattern_in(&assignment.left, effective, from_array_element, scoping, ctx);
         }
     }
 }
@@ -99,6 +114,7 @@ fn bind_object_pattern(
 fn bind_array_pattern(
     array: &ArrayPattern,
     type_id: TypeId,
+    from_array_element: bool,
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) {
@@ -114,6 +130,32 @@ fn bind_array_pattern(
     let (element_type, is_real_array) = match ctx.arena.get(type_id) {
         Type::Array(element) => (*element, true),
         Type::Any | Type::Error => (type_id, false),
+        // Problem: `var [a, [b]] = [1, ["x"]]` reported TS2488 on the inner pattern. With no
+        // tuple type, the literal is `(number | string[])[]`, so the inner pattern's source
+        // is a union with `number` in it; tsc has `[number, string[]]` and sees the array.
+        // Picked: for an element of such an array, take the array members of the union and
+        // drop the rest as the literal's own widening. A union that has no array member is
+        // still reported, and so is any source that is not an element of an array.
+        Type::Union(members) if from_array_element => {
+            let elements: Vec<TypeId> = members
+                .iter()
+                .filter_map(|member| match ctx.arena.get(*member) {
+                    Type::Array(element) => Some(*element),
+                    _ => None,
+                })
+                .collect();
+            if elements.is_empty() {
+                ctx.error(
+                    crate::diagnostic_messages::messages::array_destructuring_requires_array(
+                        &ctx.arena, type_id,
+                    ),
+                    array.span(),
+                );
+                (ctx.arena.error(), false)
+            } else {
+                (ctx.arena.alloc_union(elements), true)
+            }
+        }
         _ => {
             ctx.error(
                 crate::diagnostic_messages::messages::array_destructuring_requires_array(
@@ -141,7 +183,7 @@ fn bind_array_pattern(
         } else {
             element_type
         };
-        bind_pattern(element_pattern, bound_type, scoping, ctx);
+        bind_pattern_in(element_pattern, bound_type, is_real_array, scoping, ctx);
     }
 
     // Array rest does have a precise type, unlike object rest above: whatever is

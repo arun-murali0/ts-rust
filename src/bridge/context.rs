@@ -128,6 +128,12 @@ pub struct CheckContext<'ast, 'src> {
     // of an import can be answered with the key the declaration already has. Only ever
     // looked up by name, never walked.
     pub imported_names: FxHashMap<String, Vec<DeclKey>>,
+
+    // How many ambient blocks (`declare namespace`, `declare module "x" { }`) the walker
+    // is inside. Zero outside any. tsc treats every declaration in such a block as ambient
+    // without its own `declare`, so a class there has no property initializers to demand
+    // (TS2564) and a private member of it is not an implicit-any report (TS7006).
+    pub ambient_depth: u32,
 }
 
 const CANCEL_CHECK_INTERVAL: u32 = 32;
@@ -185,6 +191,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             imports: None,
             importer: Importer::new(),
             imported_names: FxHashMap::default(),
+            ambient_depth: 0,
         }
     }
 

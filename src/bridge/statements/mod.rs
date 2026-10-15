@@ -106,9 +106,13 @@ pub(crate) fn check_statement(stmt: &Statement, scoping: &Scoping, ctx: &mut Che
             if let Some(body) = &module.body {
                 ctx.namespace
                     .push_scope(&super::declare::module_scope(&module.id.value));
+                // An external module declaration is ambient by nature, so everything in
+                // its body is too (see CheckContext::ambient_depth).
+                ctx.ambient_depth += 1;
                 for statement in &body.body {
                     check_statement(statement, scoping, ctx);
                 }
+                ctx.ambient_depth -= 1;
                 ctx.namespace.pop_scope();
             }
         }
@@ -202,6 +206,12 @@ fn check_namespace(
 ) {
     use oxc_ast::ast::TSNamespaceDeclarationBody;
     ctx.namespace.push_scope(&ns.id.name);
+    // `declare namespace N { }` makes every declaration inside it ambient. A nested
+    // `namespace A.B` is checked through the recursion below, inside this same count.
+    let ambient = ns.declare;
+    if ambient {
+        ctx.ambient_depth += 1;
+    }
     match &ns.body {
         TSNamespaceDeclarationBody::TSModuleBlock(block) => {
             for statement in &block.body {
@@ -211,6 +221,9 @@ fn check_namespace(
         TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner) => {
             check_namespace(inner, scoping, ctx)
         }
+    }
+    if ambient {
+        ctx.ambient_depth -= 1;
     }
     ctx.namespace.pop_scope();
 }
