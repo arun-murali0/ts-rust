@@ -135,6 +135,7 @@ fn is_ambient_global(name: &str) -> bool {
             | "Intl"
             | "Atomics"
             | "WebAssembly"
+            | "arguments"
             | "Int8Array"
             | "Uint8Array"
             | "Uint8ClampedArray"

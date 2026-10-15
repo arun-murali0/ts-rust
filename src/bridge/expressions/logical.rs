@@ -96,9 +96,25 @@ pub(super) fn infer_as_expression_type(
     scoping: &Scoping,
     ctx: &mut CheckContext<'_, '_>,
 ) -> TypeId {
-    infer_expression_type(&as_expr.expression, scoping, ctx);
+    let inner = infer_expression_type(&as_expr.expression, scoping, ctx);
+    // Problem: `x as const` read `const` as a type name and reported "Cannot find name
+    // 'const'". Picked: a const assertion keeps the expression's own type.
+    // Cost: it does not narrow the expression's literals or make an object readonly, so
+    // `{ k: 1 } as const` is typed as the plain object, which can only miss an error.
+    if is_const_assertion(&as_expr.type_annotation) {
+        return inner;
+    }
     resolve_ts_type(&as_expr.type_annotation, &mut ctx.namespace, &mut ctx.arena)
         .unwrap_or_else(|| ctx.arena.error())
+}
+
+fn is_const_assertion(annotation: &oxc_ast::ast::TSType) -> bool {
+    matches!(
+        annotation,
+        oxc_ast::ast::TSType::TSTypeReference(reference)
+            if matches!(&reference.type_name,
+                oxc_ast::ast::TSTypeName::IdentifierReference(id) if id.name == "const")
+    )
 }
 
 pub(super) fn infer_non_null_expression_type(

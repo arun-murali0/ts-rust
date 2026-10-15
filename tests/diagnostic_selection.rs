@@ -52,3 +52,36 @@ fn type_used_as_a_value_is_ts2693() {
         "{found:?}"
     );
 }
+
+// Members every value has are not reported as missing, while a member that does not exist is.
+#[test]
+fn members_every_value_has_are_found() {
+    let found = errors(
+        "enum E { A }\nconst a = (1).toString();\nconst b = E.toString();\n\
+         const c = 's'.valueOf();\nconst d = [1].toString();\n\
+         declare function f(): void;\nconst g = f.call(null);\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_member_that_does_not_exist_is_still_reported() {
+    let found = errors("interface I { a: number }\ndeclare const i: I;\nconst h = i.nope;\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, Some(2339), "{found:?}");
+}
+
+#[test]
+fn a_const_assertion_is_not_an_unknown_name() {
+    let found = errors(
+        "enum E { A, B }\nconst a = 1 as const;\nconst b = E.B as const;\n\
+         const c = ['a', 'b'] as const;\nconst d = { k: 1 } as const;\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn the_arguments_object_is_not_an_unknown_name() {
+    let found = errors("function f() { return arguments.length; }\n");
+    assert!(found.is_empty(), "{found:?}");
+}
