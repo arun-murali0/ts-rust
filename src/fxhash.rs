@@ -1,4 +1,4 @@
-use std::hash::{BuildHasherDefault, Hasher};
+use std::hash::{BuildHasher, Hasher};
 
 // A small reimplementation of rustc's FxHash (the multiply-rotate-xor scheme the Rust
 // compiler itself uses internally), kept in-tree instead of adding the `rustc-hash`
@@ -12,6 +12,39 @@ const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
 #[derive(Default)]
 pub struct FxHasher {
     hash: u64,
+}
+
+// The normal compiler build always starts each hash at zero, preserving the original
+// FxHash behavior. Unit tests can choose a different initial state before constructing
+// maps, which changes bucket/iteration order without changing map semantics.
+#[cfg(test)]
+pub(crate) static TEST_HASH_SEED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug)]
+pub struct FxBuildHasher {
+    initial_hash: u64,
+}
+
+impl Default for FxBuildHasher {
+    fn default() -> Self {
+        #[cfg(test)]
+        let initial_hash = TEST_HASH_SEED.load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let initial_hash = 0;
+        Self { initial_hash }
+    }
+}
+
+impl BuildHasher for FxBuildHasher {
+    type Hasher = FxHasher;
+
+    #[inline]
+    fn build_hasher(&self) -> Self::Hasher {
+        FxHasher {
+            hash: self.initial_hash,
+        }
+    }
 }
 
 impl FxHasher {
@@ -74,7 +107,6 @@ impl Hasher for FxHasher {
     }
 }
 
-pub type FxBuildHasher = BuildHasherDefault<FxHasher>;
 pub type FxHashMap<K, V> = std::collections::HashMap<K, V, FxBuildHasher>;
 
 #[cfg(test)]
