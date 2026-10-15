@@ -376,3 +376,26 @@ fn an_exported_class_inside_a_local_namespace_does_not_collide_with_the_exported
         "{found:?}"
     );
 }
+
+// Inside a namespace a member is named by its short name in a message, as tsc prints it; from
+// outside, the qualified name stays.
+#[test]
+fn messages_inside_a_namespace_use_the_short_member_name() {
+    let found = errors(
+        "namespace Test { interface T { a: number } export function f(): T { return null as any } \
+         export const x: T = 5; }\n",
+    );
+    assert!(
+        found
+            .iter()
+            .any(|(_, m)| m.contains("to type 'T'") && !m.contains("Test.T")),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn messages_outside_a_namespace_keep_the_qualified_name() {
+    let found =
+        errors("namespace Test { export interface T { a: number } }\nconst x: Test.T = 5;\n");
+    assert!(found.iter().any(|(_, m)| m.contains("Test.T")), "{found:?}");
+}

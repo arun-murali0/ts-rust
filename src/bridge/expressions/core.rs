@@ -37,10 +37,16 @@ pub(crate) fn resolve_identifier_type(
         if is_ambient_global(&ident.name) {
             return ctx.arena.any();
         }
-        ctx.error(
-            crate::diagnostic_messages::messages::unresolved_identifier(&ident.name),
-            ident.span(),
-        );
+        // Problem: `Iterator` or a user's own `interface I {}` used as a value read as "Cannot
+        // find name", where tsc says the name only refers to a type (TS2693).
+        // Picked: a name this checker knows as a type, or one of the library types that have
+        // no value, gets TS2693.
+        let message = if ctx.namespace.contains(&ident.name) || is_library_type_only(&ident.name) {
+            crate::diagnostic_messages::messages::type_used_as_value(&ident.name)
+        } else {
+            crate::diagnostic_messages::messages::unresolved_identifier(&ident.name)
+        };
+        ctx.error(message, ident.span());
         return ctx.arena.error();
     };
 
@@ -67,6 +73,32 @@ pub(crate) fn resolve_identifier_type(
 
 // Values the runtime provides in every script. A name is only here if a program can use
 // it with no import and no declaration; anything else is a real unresolved name.
+// Library names that are only types: using one as a value is TS2693, not an unknown name.
+fn is_library_type_only(name: &str) -> bool {
+    matches!(
+        name,
+        "Iterator"
+            | "Iterable"
+            | "IterableIterator"
+            | "AsyncIterator"
+            | "AsyncIterable"
+            | "ArrayLike"
+            | "PromiseLike"
+            | "Partial"
+            | "Required"
+            | "Readonly"
+            | "Record"
+            | "Pick"
+            | "Omit"
+            | "Exclude"
+            | "Extract"
+            | "NonNullable"
+            | "ReturnType"
+            | "Parameters"
+            | "InstanceType"
+    )
+}
+
 // Stopgap until lib declarations are loaded (E6 in BUILD.md): the names tsc's default lib
 // provides as values (ECMAScript built-ins and the common DOM globals). Each reads as `any`.
 fn is_ambient_global(name: &str) -> bool {

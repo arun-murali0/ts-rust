@@ -49,6 +49,7 @@ pub enum DiagnosticCode {
     ModuleNotFound,
     NoExportedMember,
     NoDefaultExport,
+    TypeUsedAsValue,
 
     // 1300s: destructuring
     ArrayDestructuringRequiresArray,
@@ -128,6 +129,7 @@ impl DiagnosticCode {
             ModuleNotFound => "TSR1203",
             NoExportedMember => "TSR1204",
             NoDefaultExport => "TSR1205",
+            TypeUsedAsValue => "TSR1206",
 
             ArrayDestructuringRequiresArray => "TSR1301",
 
@@ -206,6 +208,7 @@ impl DiagnosticCode {
             ModuleNotFound => 2307,
             NoExportedMember => 2305,
             NoDefaultExport => 1192,
+            TypeUsedAsValue => 2693,
 
             ArrayDestructuringRequiresArray => 2488,
 

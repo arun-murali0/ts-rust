@@ -203,11 +203,43 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
         self.cancelled
     }
 
+    // Problem: a type declared in the namespace being checked was written `Test.ILineTokens`
+    // in a message, where tsc writes `ILineTokens`: inside a namespace its members are
+    // reachable by their short name, and tsc prints the shortest name that resolves there.
+    // Picked: drop every enclosing namespace prefix from the finished text, a prefix only
+    // when it starts a name (not when it ends another identifier or path).
+    // Cost: a member of an enclosing namespace that a local name hides would also lose its
+    // prefix, which tsc keeps.
+    fn message_text(&self, text: String) -> String {
+        let mut text = text;
+        let mut prefixes: Vec<&String> = self.namespace.scope_prefixes().iter().collect();
+        prefixes.sort_by_key(|prefix| std::cmp::Reverse(prefix.len()));
+        for prefix in prefixes {
+            let needle = format!("{prefix}.");
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find(&needle) {
+                let before = rest[..at].chars().next_back();
+                let starts_a_name = before
+                    .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '$' || c == '.'));
+                out.push_str(&rest[..at]);
+                if !starts_a_name {
+                    out.push_str(&needle);
+                }
+                rest = &rest[at + needle.len()..];
+            }
+            out.push_str(rest);
+            text = out;
+        }
+        text
+    }
+
     pub fn error(&mut self, message: DiagnosticMessage, span: Span) {
+        let text = self.message_text(message.text);
         self.diagnostics.push(Diagnostic {
             severity: Severity::Error,
             code: message.code,
-            message: message.text,
+            message: text,
             file_name: self.file_name.to_string(),
             start: span.start,
             end: span.end,
@@ -329,10 +361,11 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
     }
 
     pub fn warning(&mut self, message: DiagnosticMessage, span: Span) {
+        let text = self.message_text(message.text);
         self.diagnostics.push(Diagnostic {
             severity: Severity::Warning,
             code: message.code,
-            message: message.text,
+            message: text,
             file_name: self.file_name.to_string(),
             start: span.start,
             end: span.end,
