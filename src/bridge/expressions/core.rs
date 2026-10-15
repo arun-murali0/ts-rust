@@ -25,6 +25,9 @@ pub(crate) fn resolve_identifier_type(
         if ident.name == "undefined" {
             return ctx.arena.undefined();
         }
+        if let Some(&global_type) = ctx.global_values.get(ident.name.as_str()) {
+            return global_type;
+        }
         // Problem: a name the language provides without any declaration in the file
         // (`Error`, `console`, `Math`) is unresolved to oxc's scope analysis, so a
         // body that throws `new Error(...)` or logs reported "Cannot find name".

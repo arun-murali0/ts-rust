@@ -1,8 +1,9 @@
 use oxc_ast::ast::{Function, Statement};
 use oxc_semantic::Scoping;
+use oxc_span::GetSpan;
 
 use super::super::context::CheckContext;
-use super::super::declare::declare_function;
+use super::super::declare::{declare_function, resolve_function_type};
 use super::support::report_implicit_any_params;
 use super::{bind_params, check_statement};
 
@@ -13,8 +14,21 @@ pub(super) fn check_function_declaration(
 ) {
     report_implicit_any_params(&func.params, ctx);
 
-    let Some(body) = &func.body else { return };
-    let Some(name) = func.id.as_ref() else { return };
+    let Some(body) = &func.body else {
+        // An anonymous default function in a declaration file has no body. Its
+        // explicitly written signature is still a valid export.
+        if func.id.is_none()
+            && let Some(signature) = resolve_function_type(func, ctx)
+        {
+            ctx.exported_function_types
+                .insert(func.span().start, signature);
+        }
+        return;
+    };
+    let Some(name) = func.id.as_ref() else {
+        check_anonymous_function_body(func, body, scoping, ctx);
+        return;
+    };
     let Some(symbol_id) = name.symbol_id.get() else {
         return;
     };
@@ -100,6 +114,59 @@ pub(super) fn check_function_declaration(
     }
 
     ctx.namespace.pop_type_params(type_param_scope);
+}
+
+// Checks the body of `export default function (...) { ... }`. Unlike a named
+// function declaration it has no SymbolId where its inferred signature can be stored,
+// so publish the completed FunctionType under the declaration's stable source offset
+// for the export collector to serialize after the body pass.
+fn check_anonymous_function_body(
+    func: &Function,
+    body: &oxc_ast::ast::FunctionBody,
+    scoping: &Scoping,
+    ctx: &mut CheckContext<'_, '_>,
+) {
+    let Some(signature) = resolve_function_type(func, ctx) else {
+        // Async/generator functions without annotations need Promise/Iterator return
+        // modeling, which the current built-in type universe does not express yet.
+        return;
+    };
+    let crate::types::Type::Function(function_type) = ctx.arena.get(signature).clone() else {
+        return;
+    };
+
+    bind_params(&func.params, &function_type.params, scoping, ctx);
+    let outer_narrow = std::mem::take(&mut ctx.narrow);
+    let type_param_scope = ctx.namespace.push_type_params(&mut ctx.arena, func);
+    let infers_return = func.return_type.is_none();
+    let return_scope = ctx.enter_return_scope(Some(function_type.return_type), infers_return);
+    hoist_function_declarations(&body.statements, ctx);
+    for body_stmt in &body.statements {
+        check_statement(body_stmt, scoping, ctx);
+    }
+    let returned = ctx.leave_return_scope(return_scope);
+    ctx.narrow = outer_narrow;
+
+    let return_type = if infers_return {
+        if returned.is_empty() {
+            ctx.arena.void()
+        } else {
+            ctx.arena.alloc_union(returned)
+        }
+    } else {
+        function_type.return_type
+    };
+    let inferred = ctx
+        .arena
+        .alloc(crate::types::Type::Function(crate::types::FunctionType {
+            params: function_type.params,
+            return_type,
+            type_params: function_type.type_params,
+            is_untyped: function_type.is_untyped,
+        }));
+    ctx.namespace.pop_type_params(type_param_scope);
+    ctx.exported_function_types
+        .insert(func.span().start, inferred);
 }
 
 // Declares every function declared directly in `statements` before any of them is

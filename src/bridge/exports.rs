@@ -10,25 +10,20 @@
 // way of exporting a declaration: `export interface A`, `export default function f`, and
 // `export { a, b as c }` naming a declaration written elsewhere in the file.
 //
-// What is exported: an interface, type alias, function, and `const`/`let`/`var`. The
-// exports are read after the bodies are checked, so a function without a return
-// annotation and a variable without a type annotation are exported with the type that
-// was inferred for them. A name that was imported and is exported
-// again (`export { X }`, `export { X } from "./a"`) is not a new declaration: the table
-// maps it to the key it already has, and the dependent finds the declaration through the
-// same provider. An interface or alias that is not exported but that an export names
-// (`interface Hidden` and `export function f(h: Hidden)`) is exported under its own key
-// and no name: the dependent can follow the reference, and cannot import it. Anything
-// else that is exported (a class, an enum, a default expression, `export *`, an
-// overload after the first) is left out and marks the table
-// incomplete. Leaving an export out makes a dependent see nothing; it never makes it see
-// something wrong.
+// The table carries interfaces, aliases, classes, enums, functions, variables, namespace
+// values, re-exports, overload signatures, destructured bindings, and supported default
+// forms. Exports are read after bodies are checked, so ordinary functions and variables
+// retain their inferred types. Re-exports preserve the provider's declaration keys instead
+// of inventing identities in the forwarding file. A declaration reached by an exported
+// signature can travel under its own key without becoming importable by name. Forms whose
+// public shape cannot be represented yet keep the table explicitly incomplete; that is
+// safer than claiming a missing export is definitely absent.
 
 use oxc_ast::ast::{
-    BindingPattern, Declaration, ExportDefaultDeclarationKind, Expression, Function,
+    BindingPattern, Class, Declaration, ExportDefaultDeclarationKind, Expression, Function,
     ModuleExportName, Program, Statement, TSTypeParameterDeclaration,
 };
-use oxc_semantic::SymbolId;
+use oxc_semantic::{Scoping, SymbolId};
 use oxc_span::GetSpan;
 
 use crate::arena::{BUILTIN_GENERICS, DeclSlot, TypeId};
@@ -39,7 +34,7 @@ use crate::portable::{
     DeclInput, Importer, ModuleExports, PNode, PortableDecl, TypeParamInput, export_decl,
 };
 use crate::stable_walk::KeyResolver;
-use crate::types::{Type, TypeParameterId};
+use crate::types::{ObjectType, PropertyEntry, Type, TypeParameterId};
 
 use super::context::CheckContext;
 
@@ -59,6 +54,11 @@ pub(crate) struct ExportTable {
     pub collected: bool,
     /// The modules a script file declares with `declare module "x"`, by specifier.
     pub ambient: Vec<(String, ExportTable)>,
+    /// `declare module "x"` declarations written in an external module. These augment
+    /// the resolved module instead of answering the specifier themselves.
+    pub augmentations: Vec<(String, ExportTable)>,
+    /// UMD names introduced by `export as namespace`.
+    pub umd_namespaces: Vec<String>,
 }
 
 // A top-level declaration the exports may be built from, and the names it is exported
@@ -71,20 +71,42 @@ struct Item<'ast> {
     index: u32,
     node: Node<'ast>,
     exported_as: Vec<String>,
+    overloaded: bool,
 }
 
 enum Node<'ast> {
     Interface,
     Alias,
     Function(&'ast Function<'ast>),
-    Var { symbol: Option<SymbolId> },
-    Enum { symbol: Option<SymbolId> },
+    Var {
+        symbol: Option<SymbolId>,
+    },
+    Enum {
+        symbol: Option<SymbolId>,
+    },
     // The instance side of a class: read from the namespace like an interface.
     Class,
     // The constructor, the class name used as a value.
-    ClassValue { symbol: Option<SymbolId> },
+    ClassValue {
+        symbol: Option<SymbolId>,
+    },
     // A namespace as a value: the object its exported members make.
-    NamespaceValue { symbol: Option<SymbolId> },
+    NamespaceValue {
+        symbol: Option<SymbolId>,
+    },
+    /// An expression exported as the module's default value. Its type is inferred from
+    /// the already-checked expression while exports are serialized.
+    DefaultExpression(&'ast Expression<'ast>),
+    DefaultFunction(&'ast Function<'ast>),
+    DefaultClassInstance(&'ast Class<'ast>),
+    DefaultClassValue(&'ast Class<'ast>),
+    /// `export * as ns from "./m"`: the value side is a namespace object made from the
+    /// source module's exported value declarations.
+    ReExportNamespace {
+        source: String,
+    },
+    /// A property type exposed through an `export =` object.
+    Typed(TypeId),
 }
 
 // One export waiting for the resolver to be complete: every exported declaration has to
@@ -177,7 +199,89 @@ fn push_item<'ast>(
         index,
         node,
         exported_as,
+        overloaded: false,
     });
+}
+
+// Export every identifier introduced by a destructuring declaration. The checker
+// already records the individual symbol types during the body pass; this walk only
+// recovers their names and symbol IDs for the portable export table.
+fn collect_binding_identifiers<'ast>(
+    pattern: &'ast BindingPattern<'ast>,
+    out: &mut Vec<(String, Option<SymbolId>)>,
+) {
+    match pattern {
+        BindingPattern::BindingIdentifier(id) => {
+            out.push((id.name.to_string(), id.symbol_id.get()))
+        }
+        BindingPattern::ObjectPattern(object) => {
+            for property in &object.properties {
+                collect_binding_identifiers(&property.value, out);
+            }
+            if let Some(rest) = &object.rest {
+                collect_binding_identifiers(&rest.argument, out);
+            }
+        }
+        BindingPattern::ArrayPattern(array) => {
+            for element in array.elements.iter().flatten() {
+                collect_binding_identifiers(element, out);
+            }
+            if let Some(rest) = &array.rest {
+                collect_binding_identifiers(&rest.argument, out);
+            }
+        }
+        BindingPattern::AssignmentPattern(assignment) => {
+            collect_binding_identifiers(&assignment.left, out);
+        }
+    }
+}
+
+fn re_export_namespace(
+    ctx: &mut CheckContext<'_, '_>,
+    module: ModuleKey,
+    item: &Item<'_>,
+    source: &str,
+) -> Option<Pending> {
+    let imports = ctx.imports?;
+    // A partial module still contributes the exports the checker knows about. The
+    // caller marks the forwarding table incomplete, but preserving known members is
+    // better than dropping the entire namespace value.
+    if !matches!(imports.module_exports(source), ModuleExports::Known { .. }) {
+        return None;
+    }
+    let provider: &dyn crate::portable::DeclProvider = imports;
+    let mut properties = Vec::new();
+    let mut seen_names = std::collections::HashSet::new();
+    for (name, key) in imports.export_all(source) {
+        let decl = provider.decl(key)?;
+        if !matches!(
+            decl.kind,
+            DeclKind::Function | DeclKind::Var | DeclKind::Enum
+        ) {
+            continue;
+        }
+        if !seen_names.insert(name.clone()) {
+            continue;
+        }
+        let value = match decl.kind {
+            DeclKind::Function | DeclKind::Var => {
+                ctx.importer.import_decl(&mut ctx.arena, provider, key)
+            }
+            DeclKind::Enum => ctx
+                .importer
+                .import_enum(&mut ctx.arena, provider, key)
+                .map(|(_, value)| value),
+            _ => None,
+        }?;
+        properties.push(PropertyEntry {
+            name: name.into(),
+            type_id: value,
+            optional: false,
+            is_method: false,
+        });
+    }
+    let body = ctx.arena.alloc(Type::Object(ObjectType::new(properties)));
+    Some(pending_of(module, item, body))
 }
 
 fn push_declaration<'ast>(
@@ -230,18 +334,22 @@ fn push_declaration<'ast>(
         }
         Declaration::VariableDeclaration(v) => {
             for declarator in &v.declarations {
-                let BindingPattern::BindingIdentifier(id) = &declarator.id else {
-                    // `export const { a, b } = ...` has no annotation of its own to export.
-                    if exported {
-                        *incomplete = true;
-                    }
-                    continue;
-                };
-                let names = named(&id.name);
-                let node = Node::Var {
-                    symbol: id.symbol_id.get(),
-                };
-                push_item(items, seen, &id.name, DeclKind::Var, node, names);
+                let mut bindings = Vec::new();
+                collect_binding_identifiers(&declarator.id, &mut bindings);
+                if bindings.is_empty() && exported {
+                    *incomplete = true;
+                }
+                for (name, symbol) in bindings {
+                    let names = named(&name);
+                    push_item(
+                        items,
+                        seen,
+                        &name,
+                        DeclKind::Var,
+                        Node::Var { symbol },
+                        names,
+                    );
+                }
             }
         }
         Declaration::TSEnumDeclaration(d) => {
@@ -272,12 +380,15 @@ fn push_declaration<'ast>(
 
 pub(crate) fn collect_exports<'ast>(
     program: &'ast Program<'ast>,
+    scoping: &Scoping,
     ctx: &mut CheckContext<'ast, '_>,
     module: ModuleKey,
 ) -> ExportTable {
     let definition = program.source_type.is_typescript_definition();
-    let mut table = collect_in(&program.body, definition, false, ctx, module);
-    table.ambient = collect_ambient(program, ctx);
+    let mut table = collect_in(&program.body, definition, false, scoping, ctx, module);
+    let (ambient, augmentations) = collect_ambient(program, scoping, ctx, module);
+    table.ambient = ambient;
+    table.augmentations = augmentations;
     table
 }
 
@@ -287,13 +398,16 @@ pub(crate) fn collect_exports<'ast>(
 // syntax augments a module that exists elsewhere, which this does not read.
 fn collect_ambient<'ast>(
     program: &'ast Program<'ast>,
+    scoping: &Scoping,
     ctx: &mut CheckContext<'ast, '_>,
-) -> Vec<(String, ExportTable)> {
+    owner: ModuleKey,
+) -> (Vec<(String, ExportTable)>, Vec<(String, ExportTable)>) {
     let is_module = program.body.iter().any(|stmt| {
         matches!(
             stmt,
             Statement::ImportDeclaration(_)
                 | Statement::ExportDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
                 | Statement::ExportDefaultDeclaration(_)
                 | Statement::ExportAllDeclaration(_)
                 | Statement::ExportFromDeclaration(_)
@@ -302,27 +416,33 @@ fn collect_ambient<'ast>(
                 | Statement::TSImportEqualsDeclaration(_)
         )
     });
-    if is_module {
-        return Vec::new();
-    }
-    let mut found = Vec::new();
+    let mut ambient = Vec::new();
+    let mut augmentations = Vec::new();
+    let mut ordinals: FxHashMap<String, u32> = FxHashMap::default();
     for stmt in &program.body {
         let Statement::TSExternalModuleDeclaration(module) = stmt else {
             continue;
         };
         let specifier = module.id.value.to_string();
+        let ordinal = ordinals.entry(specifier.clone()).or_insert(0);
+        let block_ordinal = *ordinal;
+        *ordinal += 1;
+        let module_key = ModuleKey::ambient_child(&specifier, owner, block_ordinal);
         // `declare module "x";` with no block says only that `x` exists, and that
         // everything imported from it is `any`. It answers the specifier, so the import is
         // not a missing module, and it lists no names, so no name is called missing.
         let Some(body) = &module.body else {
-            found.push((
-                specifier,
-                ExportTable {
-                    collected: true,
-                    incomplete: true,
-                    ..ExportTable::default()
-                },
-            ));
+            let result = ExportTable {
+                collected: true,
+                incomplete: true,
+                ..ExportTable::default()
+            };
+            let destination = if is_module {
+                &mut augmentations
+            } else {
+                &mut ambient
+            };
+            destination.push((specifier, result));
             continue;
         };
         // The block's declarations were registered inside this scope, so resolving a
@@ -334,6 +454,7 @@ fn collect_ambient<'ast>(
             matches!(
                 stmt,
                 Statement::ExportDeclaration(_)
+                    | Statement::ExportNamedDeclaration(_)
                     | Statement::ExportDefaultDeclaration(_)
                     | Statement::ExportAllDeclaration(_)
                     | Statement::ExportFromDeclaration(_)
@@ -343,14 +464,22 @@ fn collect_ambient<'ast>(
         let table = collect_in(
             &body.body,
             true,
-            !marked,
+            // An augmentation contributes declarations to an existing module. Its
+            // declaration members are part of the augmented namespace even when the
+            // source does not repeat `export` on every declaration.
+            is_module || !marked,
+            scoping,
             ctx,
-            ModuleKey::ambient(&specifier),
+            module_key,
         );
         ctx.namespace.pop_scope();
-        found.push((specifier, table));
+        if is_module {
+            augmentations.push((specifier, table));
+        } else {
+            ambient.push((specifier, table));
+        }
     }
-    found
+    (ambient, augmentations)
 }
 
 fn collect_in<'ast>(
@@ -359,6 +488,7 @@ fn collect_in<'ast>(
     // Every top-level declaration is exported, as in an ambient module block that marks
     // none of its members.
     export_all: bool,
+    scoping: &Scoping,
     ctx: &mut CheckContext<'ast, '_>,
     module: ModuleKey,
 ) -> ExportTable {
@@ -371,8 +501,15 @@ fn collect_in<'ast>(
     let mut specifiers: Vec<Specifier> = Vec::new();
     // `export { a } from "./a"`: the source as written, and its specifiers.
     let mut from_modules: Vec<(String, Vec<Specifier>)> = Vec::new();
+    // `export = value` carries the module's whole value. Object values also expose
+    // their properties to named imports for common declaration-file interop.
+    let mut export_assignment: Option<&'ast Expression<'ast>> = None;
+    let mut export_assignment_type: Option<TypeId> = None;
     // `export * from "./a"`: the source as written.
     let mut stars: Vec<String> = Vec::new();
+    // `export * as ns from "./a"` also carries type names under `ns.Name`, not just
+    // the namespace object's value properties.
+    let mut namespace_stars: Vec<(String, String)> = Vec::new();
 
     for stmt in statements {
         match stmt {
@@ -397,6 +534,23 @@ fn collect_in<'ast>(
                         names,
                     );
                 }
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                    // The body pass checks anonymous functions and records their complete
+                    // FunctionType by source offset. In declaration files there is no body,
+                    // so only an explicitly annotated signature can be carried.
+                    if f.body.is_some() || f.return_type.is_some() {
+                        push_item(
+                            &mut items,
+                            &mut seen,
+                            "default",
+                            DeclKind::Function,
+                            Node::DefaultFunction(f),
+                            vec!["default".to_string()],
+                        );
+                    } else {
+                        table.incomplete = true;
+                    }
+                }
                 ExportDefaultDeclarationKind::TSInterfaceDeclaration(d) => {
                     let names = vec!["default".to_string()];
                     push_item(
@@ -419,14 +573,47 @@ fn collect_in<'ast>(
                         );
                     }
                 }
+                ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                    // Anonymous default classes still have a portable instance shape and
+                    // a constructor value. Use the reserved export name for both halves;
+                    // neither is inserted into the source file's ordinary namespace.
+                    push_item(
+                        &mut items,
+                        &mut seen,
+                        "default",
+                        DeclKind::Class,
+                        Node::DefaultClassInstance(c),
+                        vec!["default".to_string()],
+                    );
+                    push_item(
+                        &mut items,
+                        &mut seen,
+                        "default",
+                        DeclKind::Var,
+                        Node::DefaultClassValue(c),
+                        vec!["default".to_string()],
+                    );
+                }
                 // `export default Foo` names a declaration of this file, so it is
                 // `export { Foo as default }`.
                 ExportDefaultDeclarationKind::Identifier(id) => specifiers.push(Specifier {
                     local: id.name.to_string(),
                     exported: "default".to_string(),
                 }),
-                // An anonymous function or class, or any other expression: no declaration
-                // of ours to give a key to.
+                other if other.as_expression().is_some() => {
+                    if let Some(expr) = other.as_expression() {
+                        push_item(
+                            &mut items,
+                            &mut seen,
+                            "default",
+                            DeclKind::Var,
+                            Node::DefaultExpression(expr),
+                            vec!["default".to_string()],
+                        );
+                    }
+                }
+                // Anonymous function/class declarations still need a dedicated portable
+                // callable/class-signature representation; don't pretend they're complete.
                 _ => table.incomplete = true,
             },
             Statement::ExportNamedDeclaration(named) => {
@@ -448,12 +635,23 @@ fn collect_in<'ast>(
                     .collect();
                 from_modules.push((from.source.value.to_string(), list));
             }
-            // `export * from "./a"` re-exports what ./a exports, read once the file's own
-            // exports are known. `export * as ns from` needs a namespace object type
-            // the portable form does not have.
+            // `export * from "./a"` re-exports what ./a exports. `export * as ns`
+            // additionally exports the source module's value side as an object.
             Statement::ExportAllDeclaration(all) => {
-                if all.exported.is_some() {
-                    table.incomplete = true;
+                if let Some(exported) = &all.exported {
+                    let alias = export_name(exported);
+                    let source = all.source.value.to_string();
+                    push_item(
+                        &mut items,
+                        &mut seen,
+                        &alias,
+                        DeclKind::Var,
+                        Node::ReExportNamespace {
+                            source: source.clone(),
+                        },
+                        vec![alias.clone()],
+                    );
+                    namespace_stars.push((alias, source));
                 } else {
                     stars.push(all.source.value.to_string());
                 }
@@ -485,8 +683,8 @@ fn collect_in<'ast>(
                     );
                 }
             }
-            // `export = x` and `export as namespace X` change what the module exports in a
-            // way this pass does not read, so the list cannot be called complete.
+            // A namespace declaration can be named by an explicit export or can be
+            // exported through an ambient declaration context.
             Statement::TSNamespaceDeclaration(ns) => {
                 // Not exported by itself, but `export { N }` or an exported declaration
                 // may still reach it, so it is registered with no names.
@@ -494,18 +692,51 @@ fn collect_in<'ast>(
             }
             // `export = name` hands the module's whole value to one declaration. It is
             // listed under the name `export=`, which no source can write, so an
-            // `import x = require()` or a default import can find it. The module stays
-            // partial, because a named import of one of its properties is still legal.
+            // `import x = require()` or a default import can find it. Object properties
+            // are collected below for named-import compatibility.
             Statement::TSExportAssignment(assign) => {
-                table.incomplete = true;
+                export_assignment = Some(&assign.expression);
                 if let Expression::Identifier(id) = &assign.expression {
+                    // Preserve the declaration's own identity when the assignment names
+                    // a local or imported declaration. It may carry generic parameters or
+                    // references that would be lost by copying only its value shape.
+                    let name = id.name.to_string();
                     specifiers.push(Specifier {
-                        local: id.name.to_string(),
+                        local: name,
                         exported: "export=".to_string(),
                     });
+                } else {
+                    // Expressions have no declaration slot of their own. They still have
+                    // a real inferred type, which can be serialized as the module's
+                    // `export=` value instead of making the entire table incomplete.
+                    let diagnostic_count = ctx.diagnostics.len();
+                    let value_type =
+                        super::expressions::infer_expression_type(&assign.expression, scoping, ctx);
+                    ctx.diagnostics.truncate(diagnostic_count);
+                    export_assignment_type = Some(value_type);
+                    push_item(
+                        &mut items,
+                        &mut seen,
+                        "export=",
+                        DeclKind::Var,
+                        Node::Typed(value_type),
+                        vec!["export=".to_string()],
+                    );
                 }
             }
-            Statement::TSNamespaceExportDeclaration(_) => table.incomplete = true,
+            // `export as namespace X` declares a global UMD name. It does not add a
+            // named export to this module's import table, so it does not make that table
+            // incomplete (the global-script binding itself is handled separately).
+            Statement::TSNamespaceExportDeclaration(namespace) => {
+                let name = namespace.id.name.to_string();
+                if !table
+                    .umd_namespaces
+                    .iter()
+                    .any(|existing| existing == &name)
+                {
+                    table.umd_namespaces.push(name);
+                }
+            }
             Statement::TSEnumDeclaration(d) => {
                 let node = Node::Enum {
                     symbol: d.id.symbol_id.get(),
@@ -533,16 +764,15 @@ fn collect_in<'ast>(
             }
             Statement::VariableDeclaration(v) => {
                 for declarator in &v.declarations {
-                    if let BindingPattern::BindingIdentifier(id) = &declarator.id {
-                        let node = Node::Var {
-                            symbol: id.symbol_id.get(),
-                        };
+                    let mut bindings = Vec::new();
+                    collect_binding_identifiers(&declarator.id, &mut bindings);
+                    for (name, symbol) in bindings {
                         push_item(
                             &mut items,
                             &mut seen,
-                            &id.name,
+                            &name,
                             DeclKind::Var,
-                            node,
+                            Node::Var { symbol },
                             Vec::new(),
                         );
                     }
@@ -551,6 +781,86 @@ fn collect_in<'ast>(
             _ => {}
         }
     }
+
+    // `export = value` permits named imports of properties from an object value in
+    // common CommonJS declaration patterns. Give each property a portable declaration
+    // keyed in this module, while retaining the original value under `export=`.
+    if let Some(expression) = export_assignment {
+        let value_type = export_assignment_type.or_else(|| {
+            if let Expression::Identifier(id) = expression {
+                id.reference_id
+                    .get()
+                    .and_then(|reference_id| scoping.get_reference(reference_id).symbol_id())
+                    .and_then(|symbol| ctx.symbols.get(symbol))
+                    .or_else(|| {
+                        let symbol = items.iter().find_map(|item| {
+                            if item.name != id.name.as_str() {
+                                return None;
+                            }
+                            match &item.node {
+                                Node::Var { symbol } | Node::ClassValue { symbol } => *symbol,
+                                _ => None,
+                            }
+                        });
+                        symbol.and_then(|symbol| ctx.symbols.get(symbol))
+                    })
+            } else {
+                let diagnostic_count = ctx.diagnostics.len();
+                let ty = super::expressions::infer_expression_type(expression, scoping, ctx);
+                ctx.diagnostics.truncate(diagnostic_count);
+                Some(ty)
+            }
+        });
+        let properties = value_type.and_then(|ty| match ctx.arena.get(ty) {
+            Type::Object(object) => Some(object.properties.clone()),
+            _ => None,
+        });
+        if let Some(properties) = properties {
+            for property in properties.iter() {
+                if items.iter().any(|item| {
+                    item.name == property.name.as_ref()
+                        && item.kind == DeclKind::Var
+                        && !item.exported_as.is_empty()
+                }) {
+                    continue;
+                }
+                push_item(
+                    &mut items,
+                    &mut seen,
+                    &property.name,
+                    DeclKind::Var,
+                    Node::Typed(property.type_id),
+                    vec![property.name.to_string()],
+                );
+            }
+        } else {
+            // A non-object `export =` value is preserved under the assignment key, but
+            // this portable model cannot prove that it has no named/static properties
+            // (functions can carry properties too). Keep the module partial rather than
+            // incorrectly diagnosing every named import as definitely absent.
+            table.incomplete = true;
+        }
+    }
+
+    // Overloads are separate public signatures; an implementation body is not part of
+    // the callable API. Keep each signature as its own stable declaration key, then the
+    // importer combines them into a callable intersection.
+    for item in &mut items {
+        if item.kind == DeclKind::Function
+            && seen
+                .get(&(item.name.clone(), item.kind as u8))
+                .copied()
+                .unwrap_or(0)
+                > 1
+        {
+            item.overloaded = true;
+        }
+    }
+    // The implementation contributes behavior, not a public signature. Remove it before
+    // resolving `export { pick }`, otherwise the specifier would accidentally re-export it.
+    items.retain(|item| {
+        !matches!(&item.node, Node::Function(function) if item.overloaded && function.body.is_some())
+    });
 
     // `export { a, b as c }`: each names a declaration of this file (any kind that has
     // that name, so a type and a value both go out), or something this file imported.
@@ -631,11 +941,24 @@ fn collect_in<'ast>(
         }
     }
 
-    // In a declaration file a top-level declaration with no `export` is exported anyway
-    // unless the file says otherwise (`export {}`), and which of the two it is cannot be
-    // told here. So such a file's list is partial: what it names explicitly still crosses,
-    // and a name missing from it is never reported.
-    if definition && items.iter().any(|item| item.exported_as.is_empty()) {
+    // Problem: in a declaration file a top-level declaration with no `export` is still
+    // exported, unless the file has an export statement (`export {}`, `export { a }`,
+    // `export * from`, `export =`, `export default x`), which turns that off. Treating every
+    // unmarked declaration as private reported a valid import as a missing member.
+    // Picked: the list is complete when the file has such a statement, and partial when it
+    // does not, because then which declarations are exported cannot be told from here. Checked
+    // against tsc 6.0.3: with `export {}` a local name is TS2459, without one it imports.
+    // Cost: a declaration file with no export statement keeps a partial list, so a misspelled
+    // name in an import from it is not reported.
+    let has_export_statement = statements.iter().any(|stmt| match stmt {
+        Statement::ExportNamedDeclaration(_)
+        | Statement::ExportFromDeclaration(_)
+        | Statement::ExportAllDeclaration(_)
+        | Statement::TSExportAssignment(_) => true,
+        Statement::ExportDefaultDeclaration(export) => export.declaration.as_expression().is_some(),
+        _ => false,
+    });
+    if definition && !has_export_statement && items.iter().any(|item| item.exported_as.is_empty()) {
         table.incomplete = true;
     }
 
@@ -657,11 +980,25 @@ fn collect_in<'ast>(
         let built = match &item.node {
             Node::Interface | Node::Alias => interface_or_alias(ctx, module, item),
             Node::Function(f) => function(ctx, module, f, item),
+            Node::DefaultFunction(f) => default_function(ctx, module, f, item),
+            Node::DefaultClassInstance(class) => default_class_instance(ctx, module, class, item),
+            Node::DefaultClassValue(class) => default_class_value(ctx, module, class, item),
             Node::Var { symbol } => variable(ctx, module, *symbol, item),
             Node::Enum { symbol } => enumeration(ctx, module, *symbol, item),
             Node::Class => interface_or_alias(ctx, module, item),
             Node::ClassValue { symbol } => variable(ctx, module, *symbol, item),
             Node::NamespaceValue { symbol } => variable(ctx, module, *symbol, item),
+            Node::DefaultExpression(expr) => {
+                // Expression checking has already happened in the body pass. Reuse the
+                // same inference entry point to capture the result, but do not let the
+                // export-serialization pass duplicate diagnostics.
+                let diagnostic_count = ctx.diagnostics.len();
+                let body = super::expressions::infer_expression_type(expr, scoping, ctx);
+                ctx.diagnostics.truncate(diagnostic_count);
+                Some(pending_of(module, item, body))
+            }
+            Node::ReExportNamespace { source } => re_export_namespace(ctx, module, item, source),
+            Node::Typed(body) => Some(pending_of(module, item, *body)),
         };
         match built.and_then(|p| register(&mut keys, ctx, p)) {
             Some(p) => pending.push(p),
@@ -758,6 +1095,27 @@ fn collect_in<'ast>(
             table.decls.push(decl);
         }
     }
+    // A namespace re-export has both a value side (`ns.member`) and a type namespace
+    // (`ns.Type`). Preserve the source declarations' stable keys rather than copying
+    // their shapes into declarations owned by the barrel file.
+    for (alias, source) in namespace_stars {
+        let known = ctx.imports.map(|imports| imports.module_exports(&source));
+        if !matches!(known, Some(ModuleExports::Known { complete: true })) {
+            table.incomplete = true;
+        }
+        let existing_names: std::collections::HashSet<String> =
+            table.names.iter().map(|(name, _)| name.clone()).collect();
+        for (name, key) in ctx
+            .imports
+            .map(|imports| imports.export_all(&source))
+            .unwrap_or_default()
+        {
+            let qualified = format!("{alias}.{name}");
+            if !existing_names.contains(&qualified) {
+                table.names.push((qualified, key));
+            }
+        }
+    }
     table
 }
 
@@ -792,19 +1150,98 @@ fn function<'ast>(
     f: &'ast Function<'ast>,
     item: &Item<'_>,
 ) -> Option<Pending> {
-    let id = f.id.as_ref()?;
-    // The first overload is the only one the checker declares; a later one would be
-    // exported under a key that has no type behind it. A function without a return
-    // annotation was declared with a placeholder `any` and its body has been walked by
-    // the time exports are read, so the signature holds the inferred return type.
-    if item.index > 0 {
-        return None;
+    if item.overloaded {
+        let body = super::declare::resolve_function_type(f, ctx)?;
+        return with_type_params(
+            ctx,
+            pending_of(module, item, body),
+            f.type_parameters.as_deref(),
+        );
     }
+    let id = f.id.as_ref()?;
     let body = ctx.symbols.get(id.symbol_id.get()?)?;
     with_type_params(
         ctx,
         pending_of(module, item, body),
         f.type_parameters.as_deref(),
+    )
+}
+
+fn default_function<'ast>(
+    ctx: &mut CheckContext<'ast, '_>,
+    module: ModuleKey,
+    function: &'ast Function<'ast>,
+    item: &Item<'_>,
+) -> Option<Pending> {
+    let body = ctx
+        .exported_function_types
+        .get(&function.span().start)
+        .copied()
+        .or_else(|| {
+            function
+                .id
+                .as_ref()
+                .and_then(|id| id.symbol_id.get())
+                .and_then(|symbol| ctx.symbols.get(symbol))
+        })
+        .or_else(|| super::declare::resolve_function_type(function, ctx))?;
+    with_type_params(
+        ctx,
+        pending_of(module, item, body),
+        function.type_parameters.as_deref(),
+    )
+}
+
+fn default_class_instance<'ast>(
+    ctx: &mut CheckContext<'ast, '_>,
+    module: ModuleKey,
+    class: &'ast Class<'ast>,
+    item: &Item<'_>,
+) -> Option<Pending> {
+    let body = ctx
+        .namespace
+        .resolve_anonymous_class(class, &mut ctx.arena)?;
+    with_type_params(
+        ctx,
+        pending_of(module, item, body),
+        class.type_parameters.as_deref(),
+    )
+}
+
+fn default_class_value<'ast>(
+    ctx: &mut CheckContext<'ast, '_>,
+    module: ModuleKey,
+    class: &'ast Class<'ast>,
+    item: &Item<'_>,
+) -> Option<Pending> {
+    let instance = ctx
+        .namespace
+        .resolve_anonymous_class(class, &mut ctx.arena)?;
+    let scope = ctx
+        .namespace
+        .push_decl_type_params(&mut ctx.arena, class.type_parameters.as_deref());
+    let (params, is_untyped) = match super::declare::find_constructor(class) {
+        Some(constructor) => match super::super::type_annotation::resolve_function_params(
+            &constructor.params,
+            &mut ctx.namespace,
+            &mut ctx.arena,
+        ) {
+            Some(params) => (params, false),
+            None => (Vec::new(), true),
+        },
+        None => (Vec::new(), false),
+    };
+    ctx.namespace.pop_type_params(scope);
+    let body = ctx.arena.alloc(Type::Function(crate::types::FunctionType {
+        params,
+        return_type: instance,
+        type_params: Vec::new(),
+        is_untyped,
+    }));
+    with_type_params(
+        ctx,
+        pending_of(module, item, body),
+        class.type_parameters.as_deref(),
     )
 }
 

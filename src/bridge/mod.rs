@@ -106,7 +106,7 @@ pub(crate) fn check_file(
     // copied out of it, and it is cleared as soon as the unit ends. A check with no
     // module key has no identity to give a declaration, so it exports nothing.
     let exports = match module {
-        Some(module) => exports::collect_exports(&program, &mut ctx, module),
+        Some(module) => exports::collect_exports(&program, semantic.scoping(), &mut ctx, module),
         None => ExportTable::default(),
     };
     let (diagnostics, metrics) = publish(&mut ctx);
