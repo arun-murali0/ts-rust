@@ -333,6 +333,14 @@ pub mod messages {
         )
     }
 
+    // A name that is a type and not a value, written where a value is expected.
+    pub fn type_used_as_value(name: &str) -> DiagnosticMessage {
+        DiagnosticMessage::new(
+            DiagnosticCode::TypeUsedAsValue,
+            format!("'{name}' only refers to a type, but is being used as a value here."),
+        )
+    }
+
     pub fn unresolved_identifier(name: &str) -> DiagnosticMessage {
         DiagnosticMessage::new(
             DiagnosticCode::UnresolvedIdentifier,

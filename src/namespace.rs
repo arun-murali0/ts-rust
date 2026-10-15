@@ -397,6 +397,11 @@ impl<'a> TypeNamespace<'a> {
         self.scope_exported.push(self.declaring_exported);
     }
 
+    /// The namespaces being checked, outermost first, as full prefixes (`A`, `A.B`).
+    pub fn scope_prefixes(&self) -> &[String] {
+        &self.scope
+    }
+
     pub fn pop_scope(&mut self) {
         self.scope.pop();
         self.scope_blocks.pop();

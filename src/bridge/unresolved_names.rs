@@ -68,7 +68,10 @@ impl<'a> Visit<'a> for Walker<'_, '_, '_, '_> {
     }
 
     fn visit_ts_type_reference(&mut self, it: &TSTypeReference<'a>) {
+        // `as const` parses as a reference to a type named `const`, which is a reserved word and
+        // so never a declared name: it is the const assertion, not a missing type.
         if let TSTypeName::IdentifierReference(id) = &it.type_name
+            && id.name != "const"
             && is_unresolved_type_name(id, self.scoping, &self.ctx.namespace)
         {
             self.ctx.error(

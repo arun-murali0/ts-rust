@@ -145,8 +145,10 @@ fn reason(arena: &TypeArena, source: TypeId, target: TypeId, depth: usize) -> Ve
     // A lone missing property is promoted to the head (tsc's TS2741) only for a plain
     // object target. For `A & B` tsc keeps "not assignable to 'A & B'" as the head and puts
     // the missing property beneath it, so the promotion is skipped there.
-    let target_is_intersection = matches!(arena.get(target), Type::Intersection(_));
-    if !target_is_intersection && below.first().is_some_and(Level::is_missing) {
+    // Nor is it promoted past an array: `I1[]` to `C1[]` stays "not assignable to 'C1[]'" with
+    // the element's missing property beneath, where promoting it named the element instead.
+    let target_is_object = matches!(arena.get(target), Type::Object(_));
+    if target_is_object && below.first().is_some_and(Level::is_missing) {
         return below;
     }
     let mut levels = vec![Level::not_assignable(arena, source, target)];

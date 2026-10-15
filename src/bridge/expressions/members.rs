@@ -75,7 +75,9 @@ fn lookup_member(arena: &mut TypeArena, type_id: TypeId, property_name: &str) ->
         Type::Object(object) => {
             match object.properties.iter().find(|p| *p.name == *property_name) {
                 Some(property) => Some(property.type_id),
-                None => arena.record_value_type(effective),
+                None => arena
+                    .record_value_type(effective)
+                    .or_else(|| universal_member(arena, effective, property_name)),
             }
         }
         Type::Union(members) => {
@@ -112,8 +114,53 @@ fn lookup_member(arena: &mut TypeArena, type_id: TypeId, property_name: &str) ->
                 ),
             }
         }
+        // A primitive, a function or an array has the members every value has.
+        Type::Number
+        | Type::String
+        | Type::Boolean
+        | Type::StringLiteral(_)
+        | Type::NumberLiteral(_)
+        | Type::BooleanLiteral(_)
+        | Type::Function(_)
+        | Type::Array(_) => universal_member(arena, effective, property_name),
         _ => None,
     }
+}
+
+// Problem: `x.toString()` on a number, an enum object or a class reported "Property
+// 'toString' does not exist", because a type only has the members written for it and no
+// type carried the ones every value inherits from Object (and every function from Function).
+// Picked: answer those few by name, loosely typed: arguments are `any` and the results are
+// what the method returns, or `any` where that depends on the receiver.
+// Cost: `(1).toString(1, 2)` and a wrong argument type are not caught, and a method such
+// as `toFixed` that only some primitives have is still missing.
+fn universal_member(
+    arena: &mut TypeArena,
+    receiver: TypeId,
+    property_name: &str,
+) -> Option<TypeId> {
+    use crate::types::{FunctionType, Param};
+    let any = arena.any();
+    let any_array = arena.alloc(Type::Array(any));
+    let rest = Param {
+        type_id: any_array,
+        optional: false,
+        rest: true,
+        name: None,
+    };
+    let result = match property_name {
+        "toString" | "toLocaleString" => arena.string(),
+        "valueOf" => any,
+        "hasOwnProperty" | "isPrototypeOf" | "propertyIsEnumerable" => arena.boolean(),
+        "call" | "apply" | "bind" if matches!(arena.get(receiver), Type::Function(_)) => any,
+        _ => return None,
+    };
+    Some(arena.alloc(Type::Function(FunctionType {
+        params: vec![rest],
+        return_type: result,
+        type_params: Vec::new(),
+        is_untyped: false,
+    })))
 }
 
 // Problem: reading a property of `string | null` reported "Property 'length' does not
