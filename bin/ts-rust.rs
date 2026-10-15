@@ -238,6 +238,19 @@ fn check_with_modules(files: &[PathBuf], options: &Options) -> Result<Tally, Str
         );
     }
 
+    // A warning and not an error: the cycle's files were checked, but what they export was
+    // still changing when the recheck bound ran out, so an import from them may lack names.
+    for id in &report.unsettled {
+        let Some(path) = graph.files().path(*id) else {
+            continue;
+        };
+        tally.warnings += 1;
+        println!(
+            "{}: warning: import cycle did not settle, exports from this file may be incomplete",
+            path.display()
+        );
+    }
+
     let cycles = graph.cycles();
     if options.cycles {
         for cycle in &cycles {

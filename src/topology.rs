@@ -4,6 +4,7 @@ use petgraph::Direction;
 use petgraph::algo::tarjan_scc;
 use petgraph::graph::{DiGraph, NodeIndex};
 
+use crate::module_resolution::ModuleRequestKind;
 use crate::types::FileId;
 
 // The import edges of a project as a petgraph graph, built from a ModuleGraph with
@@ -18,10 +19,11 @@ use crate::types::FileId;
 // from before petgraph was in the tree. This is the petgraph version of the same
 // answer, and a test in tests/module_resolution.rs holds the two to the same result.
 // Nodes carry FileId and NodeIndex stays private, so nothing outside this file
-// depends on how the graph is stored. Edge kinds (LLD 4.2) are not weights yet.
+// depends on how the graph is stored. Edges retain syntax-level kinds for diagnostics
+// and tooling; component ordering still treats every kind as a dependency.
 #[derive(Debug, Default)]
 pub struct ModuleTopology {
-    graph: DiGraph<FileId, ()>,
+    graph: DiGraph<FileId, ModuleRequestKind>,
     nodes: BTreeMap<FileId, NodeIndex>,
 }
 
@@ -30,13 +32,41 @@ impl ModuleTopology {
         Self::default()
     }
 
-    /// Records that from imports to. Adding the same pair twice is one edge.
+    /// Records an ordinary static import. Adding the same typed edge twice is one edge.
+    /// Kept as a convenience for graph algorithms and existing callers.
     pub fn add_dependency(&mut self, from: FileId, to: FileId) {
+        self.add_typed_dependency(from, to, ModuleRequestKind::StaticImport);
+    }
+
+    /// Records the syntax-level kind of a dependency. Two files can have more than one
+    /// edge between them (for example a value import and a re-export); the topology keeps
+    /// those kinds even though `dependencies()` returns each target only once.
+    pub fn add_typed_dependency(&mut self, from: FileId, to: FileId, kind: ModuleRequestKind) {
         let from_node = self.node(from);
         let to_node = self.node(to);
-        if self.graph.find_edge(from_node, to_node).is_none() {
-            self.graph.add_edge(from_node, to_node, ());
+        let exists = self
+            .graph
+            .edges_connecting(from_node, to_node)
+            .any(|edge| *edge.weight() == kind);
+        if !exists {
+            self.graph.add_edge(from_node, to_node, kind);
         }
+    }
+
+    /// The sorted, distinct kinds of edges from `from` to `to`.
+    pub fn edge_kinds(&self, from: FileId, to: FileId) -> Vec<ModuleRequestKind> {
+        let (Some(&from_node), Some(&to_node)) = (self.nodes.get(&from), self.nodes.get(&to))
+        else {
+            return Vec::new();
+        };
+        let mut kinds: Vec<_> = self
+            .graph
+            .edges_connecting(from_node, to_node)
+            .map(|edge| *edge.weight())
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        kinds
     }
 
     /// Records a file with no edges yet, so it is part of the topology either way.
@@ -117,6 +147,7 @@ impl ModuleTopology {
         // petgraph lists the newest edge first, so sort: the answer should not depend
         // on the order the edges were added in.
         files.sort();
+        files.dedup();
         files
     }
 }
@@ -124,6 +155,7 @@ impl ModuleTopology {
 #[cfg(test)]
 mod tests {
     use super::ModuleTopology;
+    use crate::module_resolution::ModuleRequestKind;
     use crate::types::FileId;
 
     fn id(index: u32) -> FileId {
@@ -162,6 +194,19 @@ mod tests {
         topology.add_dependency(id(1), id(2));
         assert_eq!(topology.dependencies(id(1)), [id(2)]);
         assert_eq!(topology.len(), 2);
+    }
+
+    #[test]
+    fn parallel_edges_keep_distinct_kinds_but_dependencies_stay_unique() {
+        let mut topology = ModuleTopology::new();
+        topology.add_typed_dependency(id(1), id(2), ModuleRequestKind::StaticImport);
+        topology.add_typed_dependency(id(1), id(2), ModuleRequestKind::ReExport);
+        topology.add_typed_dependency(id(1), id(2), ModuleRequestKind::StaticImport);
+        assert_eq!(topology.dependencies(id(1)), [id(2)]);
+        assert_eq!(
+            topology.edge_kinds(id(1), id(2)),
+            [ModuleRequestKind::StaticImport, ModuleRequestKind::ReExport,]
+        );
     }
 
     #[test]

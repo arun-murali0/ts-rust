@@ -47,8 +47,8 @@ pub use error::CheckerError;
 pub use keys::{DeclKey, DeclKind, ENC_VERSION, ModuleKey, NodeHash, SigHash, TypeParamKey};
 pub use line_index::LineIndex;
 pub use portable::{
-    DeclProvider, ImportSource, ModuleExports, PNode, PParam, PProp, PTypeParam, PortableDecl,
-    PortableType,
+    DeclProvider, GlobalNamespace, ImportSource, ModuleExports, PNode, PParam, PProp, PTypeParam,
+    PortableDecl, PortableType,
 };
 pub use stable_hash::Prim;
 pub use unit::{AmbientExports, CancelToken, UnitContext, UnitError, UnitOutput, Worker};
@@ -67,8 +67,16 @@ pub use topology::ModuleTopology;
 #[cfg(feature = "module-resolution")]
 pub use module_resolution::{
     FileFingerprint, FileOutcome, FileReport, ModuleEdge, ModuleError, ModuleGraph, ModuleRequest,
-    ModuleResolver, ModuleScan, ProjectReport, check_project, content_hash, scan_module_requests,
+    ModuleRequestKind, ModuleResolver, ModuleScan, ProjectReport, check_project, content_hash,
+    scan_module_requests,
 };
+
+// Exposed only so a test can make an import cycle run out of recheck rounds (see
+// tests/project_imports.rs). Hidden from generated docs since it is not part of the
+// supported public API.
+#[cfg(feature = "module-resolution")]
+#[doc(hidden)]
+pub use module_resolution::check_project_bounded;
 
 pub use arena::TypeArenaStats;
 pub use bridge::CheckMetrics;

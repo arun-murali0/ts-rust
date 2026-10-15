@@ -418,6 +418,24 @@ pub trait ImportSource: DeclProvider {
     fn export_all(&self, _specifier: &str) -> Vec<(String, DeclKey)> {
         Vec::new()
     }
+
+    /// Global UMD namespace aliases declared by the project's modules, together with
+    /// their public members and (for `export =`) the module's whole exported value.
+    /// Implementations return an owned snapshot so an importing unit never borrows project
+    /// graph storage while it is mutating its own arena.
+    fn global_namespaces(&self) -> Vec<GlobalNamespace> {
+        Vec::new()
+    }
+}
+
+/// The UMD global binding contributed by one or more project exports.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalNamespace {
+    pub name: String,
+    pub members: Vec<(String, DeclKey)>,
+    /// The value assigned by `export =`, if present. This can be callable, not merely an
+    /// object namespace (for example a CommonJS function exposed as a UMD global).
+    pub export_assignment: Option<DeclKey>,
 }
 
 /// What an importing unit knows about the module behind a specifier.

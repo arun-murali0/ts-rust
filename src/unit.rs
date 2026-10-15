@@ -105,6 +105,12 @@ pub struct UnitOutput {
     // The modules this unit declares with `declare module "x" { ... }`, which answer the
     // specifier `x` for every file of the project.
     pub ambient: Vec<AmbientExports>,
+    /// `export as namespace Name` aliases that expose this module's value exports as a
+    /// global namespace in script consumers.
+    pub umd_namespaces: Vec<String>,
+    /// Module declarations inside an external module augment an existing module instead
+    /// of introducing a standalone ambient module.
+    pub augmentations: Vec<AmbientExports>,
 }
 
 /// The exports of one `declare module "x"` block (see `UnitOutput`).
@@ -114,6 +120,8 @@ pub struct AmbientExports {
     pub exports: Vec<PortableDecl>,
     pub export_names: Vec<(String, DeclKey)>,
     pub complete: bool,
+    /// `true` for `declare module "x"` inside an external module.
+    pub augmentation: bool,
 }
 
 const _: fn() = || {
@@ -199,6 +207,19 @@ impl Worker {
                         complete: ambient.collected && !ambient.incomplete,
                         exports: ambient.decls,
                         export_names: ambient.names,
+                        augmentation: false,
+                    })
+                    .collect(),
+                umd_namespaces: table.umd_namespaces,
+                augmentations: table
+                    .augmentations
+                    .into_iter()
+                    .map(|(specifier, augmentation)| AmbientExports {
+                        specifier,
+                        complete: augmentation.collected && !augmentation.incomplete,
+                        exports: augmentation.decls,
+                        export_names: augmentation.names,
+                        augmentation: true,
                     })
                     .collect(),
             }),
@@ -234,6 +255,8 @@ fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
         export_names: Vec::new(),
         exports_complete: false,
         ambient: Vec::new(),
+        umd_namespaces: Vec::new(),
+        augmentations: Vec::new(),
     }
 }
 
