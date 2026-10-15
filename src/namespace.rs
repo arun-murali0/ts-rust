@@ -1128,6 +1128,20 @@ impl<'a> TypeNamespace<'a> {
         }
     }
 
+    /// Resolves the instance shape of an anonymous class expression/declaration for
+    /// export serialization. It has no name to register in `entries`, but its generic
+    /// parameters still use the same file-and-span identity cache as named classes.
+    pub(crate) fn resolve_anonymous_class(
+        &mut self,
+        class: &'a Class<'a>,
+        arena: &mut TypeArena,
+    ) -> Option<TypeId> {
+        let scope = self.push_decl_type_params(arena, class.type_parameters.as_deref());
+        let resolved = self.resolve_class(class, arena);
+        self.pop_type_params(scope);
+        resolved
+    }
+
     // Builds a class's structural shape by first copying the parent's own already
     // resolved properties, then overriding or adding this class's own fields and
     // methods. This clones the parent's whole property list at every level of an

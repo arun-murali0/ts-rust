@@ -213,11 +213,24 @@ fn the_same_source_gives_the_same_keys_and_signatures_in_any_worker() {
 }
 
 #[test]
-fn a_second_function_overload_is_unsupported() {
+fn exported_overloads_preserve_all_public_signatures_and_omit_the_implementation() {
     let out = run("export function f(a: number): number;
          export function f(a: string): string;
          export function f(a: any): any { return a; }");
-    assert!(out.incomplete);
+    assert!(!out.incomplete, "{out:?}");
+    let exported = out
+        .export_names
+        .iter()
+        .filter(|(name, _)| name == "f")
+        .count();
+    assert_eq!(
+        exported, 2,
+        "each overload has a stable declaration key: {out:?}"
+    );
+    assert_eq!(
+        out.exports.iter().filter(|decl| &*decl.name == "f").count(),
+        2
+    );
 }
 
 #[test]
@@ -325,6 +338,31 @@ fn a_default_exported_function_is_listed_under_default() {
 }
 
 #[test]
+fn named_default_function_exports_the_inferred_body_return_type() {
+    use ts_rust::{PNode, Prim};
+    let out = run("export default function render(value: number) { return value + 1; }");
+    assert!(!out.incomplete, "{out:?}");
+    assert!(
+        out.export_names.iter().any(|(name, key)| {
+            name == "default"
+                && out
+                    .exports
+                    .iter()
+                    .any(|decl| decl.key == *key && &*decl.name == "render")
+        }),
+        "the named function must be exported as default: {out:?}"
+    );
+    let body = body_of(&out, "render");
+    let PNode::Function { ret, .. } = &body.nodes[body.root as usize] else {
+        panic!("expected a function signature: {body:?}");
+    };
+    assert!(
+        matches!(body.nodes[*ret as usize], PNode::Prim(Prim::Number)),
+        "return type must be inferred from the body: {body:?}"
+    );
+}
+
+#[test]
 fn a_default_exported_interface_is_listed_under_default() {
     let out = run("export default interface Config { debug: boolean }");
     assert!(!out.incomplete, "{out:?}");
@@ -335,10 +373,56 @@ fn a_default_exported_interface_is_listed_under_default() {
 }
 
 #[test]
-fn a_default_export_with_no_declaration_to_key_is_unsupported() {
-    assert!(run("export default class {}").incomplete);
-    assert!(run("export default 1 + 2;").incomplete);
-    assert!(run("export default function (a: number): number { return a; }").incomplete);
+fn anonymous_default_class_exports_instance_and_constructor_sides() {
+    let out =
+        run("export default class { value: number = 1; read(): number { return this.value; } }");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(
+        out.export_names
+            .iter()
+            .filter(|(name, _)| name == "default")
+            .count(),
+        2,
+        "class exports type and value sides"
+    );
+    assert!(
+        out.exports
+            .iter()
+            .any(|decl| decl.kind == DeclKind::Class && &*decl.name == "default")
+    );
+    assert!(
+        out.exports
+            .iter()
+            .any(|decl| decl.kind == DeclKind::Var && &*decl.name == "default")
+    );
+}
+
+#[test]
+fn default_expression_exports_its_inferred_type() {
+    use ts_rust::PNode;
+    let out = run("export default 1 + 2;");
+    assert!(!out.incomplete, "{out:?}");
+    assert!(out.export_names.iter().any(|(name, _)| name == "default"));
+    let body = body_of(&out, "default");
+    assert!(matches!(
+        body.nodes[body.root as usize],
+        PNode::Prim(ts_rust::Prim::Number)
+    ));
+}
+
+#[test]
+fn anonymous_default_function_exports_inferred_return_type() {
+    use ts_rust::{PNode, Prim};
+    let out = run("export default function (a: number) { return a + 1; }");
+    assert!(!out.incomplete, "{out:?}");
+    let body = body_of(&out, "default");
+    let PNode::Function { ret, .. } = &body.nodes[body.root as usize] else {
+        panic!("a function: {body:?}");
+    };
+    assert!(
+        matches!(body.nodes[*ret as usize], PNode::Prim(Prim::Number)),
+        "{body:?}"
+    );
 }
 
 #[test]
@@ -510,4 +594,49 @@ fn two_nested_signatures_in_one_declaration_keep_distinct_keys() {
     let both = "export interface Pair { a: <T>(x: T) => T; b: <T>(x: T) => T[] }\n";
     let moved = format!("\n\n{both}");
     assert_eq!(signature_of(both, "Pair"), signature_of(&moved, "Pair"));
+}
+
+#[test]
+fn default_expression_is_exported_under_default() {
+    use ts_rust::PNode;
+    let out = run("export default 42;");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(
+        out.export_names
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["default"]
+    );
+    let body = body_of(&out, "default");
+    assert!(
+        matches!(&body.nodes[body.root as usize], PNode::NumLit(bits) if f64::from_bits(*bits) == 42.0)
+    );
+}
+
+#[test]
+fn destructured_exports_export_each_local_binding() {
+    let out = run("export const { a, b: renamed } = { a: 1, b: 'x' };");
+    assert!(!out.incomplete, "{out:?}");
+    assert_eq!(names(&out), vec!["a", "renamed"]);
+    assert_eq!(
+        out.export_names
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "renamed"]
+    );
+}
+
+#[test]
+fn external_declaration_files_do_not_implicitly_export_local_declarations() {
+    let ctx = UnitContext::new(
+        FileId::ROOT,
+        "types.d.ts",
+        "export {}; interface Hidden { value: number }",
+    )
+    .with_module(ModuleKey::project("types.d.ts"));
+    let out = Worker::new().check_unit(&ctx).unwrap();
+    assert!(!out.incomplete, "{out:?}");
+    assert!(out.export_names.is_empty(), "{out:?}");
 }

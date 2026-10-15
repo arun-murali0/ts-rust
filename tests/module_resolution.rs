@@ -102,6 +102,7 @@ fn a_type_only_import_is_marked_and_resolved() {
     let import = edge(&graph, "basic/main.ts", "./point");
     assert!(import.is_type);
     assert!(import.is_import);
+    assert_eq!(import.kind, ts_rust::ModuleRequestKind::TypeImport);
     assert_eq!(
         target_path(&graph, "basic/main.ts", "./point"),
         fixture("basic/point.ts")
@@ -450,6 +451,37 @@ fn petgraph_orders_the_components_dependencies_first() {
 }
 
 #[test]
+fn complete_project_reports_do_not_depend_on_entry_order() {
+    let first = build(&["cycles/entry.ts"]);
+    let second = build(&["cycles/ring_c.ts", "cycles/leaf.ts", "cycles/entry.ts"]);
+    let first_report = check_project(&first);
+    let second_report = check_project(&second);
+    let signature = |graph: &ModuleGraph, report: &ts_rust::ProjectReport| {
+        let mut rows = report
+            .files
+            .iter()
+            .map(|file| {
+                let path = graph
+                    .files()
+                    .path(file.file_id)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                (path, format!("{:?}:{:?}", file.outcome, file.reads))
+            })
+            .collect::<Vec<_>>();
+        // FileIds are assigned from the entry list, so they are not an invariant when
+        // callers supply the same entries in a different order. Compare by path.
+        rows.sort_by(|left, right| left.0.cmp(&right.0));
+        rows
+    };
+    assert_eq!(
+        signature(&first, &first_report),
+        signature(&second, &second_report)
+    );
+}
+
+#[test]
 fn a_deleted_file_counts_as_changed() {
     let dir = scratch_dir("deleted-file");
     let path = dir.join("a.ts");
@@ -461,4 +493,297 @@ fn a_deleted_file_counts_as_changed() {
     assert_eq!(graph.changed_files(), vec![FileId::new(0)]);
 
     let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn export_star_as_creates_a_portable_namespace_value() {
+    let graph = build(&["export-star-as/barrel.ts", "export-star-as/consumer.ts"]);
+    let report = check_project(&graph);
+    let consumer_id = id_of(&graph, "export-star-as/consumer.ts");
+    let consumer = report
+        .files
+        .iter()
+        .find(|file| file.file_id == consumer_id)
+        .expect("consumer is reported");
+    let FileOutcome::Checked(diagnostics) = &consumer.outcome else {
+        panic!("consumer failed: {consumer:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        2,
+        "the namespace should expose both values and types; only the two intentional mismatches should fail: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn overloaded_exports_preserve_each_signature_across_files() {
+    let graph = build(&["overloads/consumer.ts"]);
+    let report = check_project(&graph);
+    let consumer_id = id_of(&graph, "overloads/consumer.ts");
+    let consumer = report
+        .files
+        .iter()
+        .find(|file| file.file_id == consumer_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &consumer.outcome else {
+        panic!("{consumer:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "both overloads should be callable: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn default_expression_exports_its_inferred_type() {
+    let graph = build(&["default-expression/consumer.ts"]);
+    let report = check_project(&graph);
+    let consumer_id = id_of(&graph, "default-expression/consumer.ts");
+    let consumer = report
+        .files
+        .iter()
+        .find(|file| file.file_id == consumer_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &consumer.outcome else {
+        panic!("{consumer:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the default should retain its numeric type: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn anonymous_default_function_exports_its_inferred_signature() {
+    let graph = build(&["default-function/consumer.ts"]);
+    let report = check_project(&graph);
+    let consumer_id = id_of(&graph, "default-function/consumer.ts");
+    let consumer = report
+        .files
+        .iter()
+        .find(|file| file.file_id == consumer_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &consumer.outcome else {
+        panic!("{consumer:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the inferred callable signature should cross files: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn graph_retains_static_dynamic_side_effect_reexport_and_import_equals_kinds() {
+    use ts_rust::ModuleRequestKind as Kind;
+    let graph = build(&["edge-kinds/entry.ts"]);
+    assert_eq!(
+        edge(&graph, "edge-kinds/entry.ts", "./polyfill").kind,
+        Kind::SideEffectImport
+    );
+    assert_eq!(
+        edge(&graph, "edge-kinds/entry.ts", "./lazy").kind,
+        Kind::DynamicImport
+    );
+    assert_eq!(
+        edge(&graph, "edge-kinds/entry.ts", "./exports").kind,
+        Kind::ReExport
+    );
+    assert_eq!(
+        edge(&graph, "edge-kinds/entry.ts", "./legacy").kind,
+        Kind::ImportEquals
+    );
+}
+
+#[test]
+fn separate_ambient_module_blocks_union_their_export_tables() {
+    let graph = build(&["ambient-merge/consumer.ts", "ambient-merge/modules.d.ts"]);
+    let report = check_project(&graph);
+    let consumer_id = id_of(&graph, "ambient-merge/consumer.ts");
+    let consumer = report
+        .files
+        .iter()
+        .find(|file| file.file_id == consumer_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &consumer.outcome else {
+        panic!("{consumer:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "both ambient blocks should be importable; only the intentional mismatch should fail: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn module_augmentation_merges_into_the_resolved_target_module() {
+    use ts_rust::ModuleRequestKind as Kind;
+    let graph = build(&["augmentations/consumer.ts"]);
+    assert_eq!(
+        edge(&graph, "augmentations/augmentation.ts", "./base").kind,
+        Kind::SideEffectImport
+    );
+    assert!(
+        graph
+            .edges(id_of(&graph, "augmentations/augmentation.ts"))
+            .iter()
+            .any(|edge| {
+                edge.specifier == "./base"
+                    && edge.kind == Kind::ModuleAugmentation
+                    && edge.target.is_some()
+            })
+    );
+    let report = check_project(&graph);
+    let consumer_id = id_of(&graph, "augmentations/consumer.ts");
+    let consumer = report
+        .files
+        .iter()
+        .find(|file| file.file_id == consumer_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &consumer.outcome else {
+        panic!("{consumer:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the added field is visible and still type-checked: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn umd_global_namespace_is_available_to_scripts_but_not_external_modules() {
+    let graph = build(&["umd/api.d.ts", "umd/script.ts", "umd/module.ts"]);
+    let report = check_project(&graph);
+    let script_id = id_of(&graph, "umd/script.ts");
+    let script = report
+        .files
+        .iter()
+        .find(|file| file.file_id == script_id)
+        .unwrap();
+    let FileOutcome::Checked(script_diagnostics) = &script.outcome else {
+        panic!("{script:?}");
+    };
+    assert_eq!(
+        script_diagnostics.len(),
+        1,
+        "Api is global in a script, with only the intentional property mismatch: {script_diagnostics:?}"
+    );
+
+    let module_id = id_of(&graph, "umd/module.ts");
+    let module = report
+        .files
+        .iter()
+        .find(|file| file.file_id == module_id)
+        .unwrap();
+    let FileOutcome::Checked(module_diagnostics) = &module.outcome else {
+        panic!("{module:?}");
+    };
+    assert!(
+        module_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("Api")),
+        "UMD globals should not leak into external modules: {module_diagnostics:?}"
+    );
+}
+
+#[test]
+fn umd_global_can_be_a_callable_export_assignment() {
+    let graph = build(&[
+        "umd-callable/api.d.ts",
+        "umd-callable/script.ts",
+        "umd-callable/module.ts",
+    ]);
+    let report = check_project(&graph);
+    let script_id = id_of(&graph, "umd-callable/script.ts");
+    let script = report
+        .files
+        .iter()
+        .find(|file| file.file_id == script_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &script.outcome else {
+        panic!("{script:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "the callable UMD global should retain its signature: {diagnostics:?}"
+    );
+
+    let module_id = id_of(&graph, "umd-callable/module.ts");
+    let module = report
+        .files
+        .iter()
+        .find(|file| file.file_id == module_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &module.outcome else {
+        panic!("{module:?}");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("Legacy")),
+        "UMD globals must not leak into external modules: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn export_assignment_object_exposes_named_properties() {
+    let graph = build(&["export-assignment/consumer.ts"]);
+    let report = check_project(&graph);
+    let consumer_id = id_of(&graph, "export-assignment/consumer.ts");
+    let consumer = report
+        .files
+        .iter()
+        .find(|file| file.file_id == consumer_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &consumer.outcome else {
+        panic!("{consumer:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "named properties of export= object should be typed: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn export_assignment_expression_preserves_known_object_properties() {
+    let graph = build(&["export-assignment-expression/consumer.ts"]);
+    let report = check_project(&graph);
+    let consumer_id = id_of(&graph, "export-assignment-expression/consumer.ts");
+    let consumer = report
+        .files
+        .iter()
+        .find(|file| file.file_id == consumer_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &consumer.outcome else {
+        panic!("{consumer:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "known properties of an expression-valued export= should retain their types: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn export_star_as_preserves_known_members_from_a_partial_module() {
+    let graph = build(&["export-star-partial/consumer.ts"]);
+    let report = check_project(&graph);
+    let consumer_id = id_of(&graph, "export-star-partial/consumer.ts");
+    let consumer = report
+        .files
+        .iter()
+        .find(|file| file.file_id == consumer_id)
+        .unwrap();
+    let FileOutcome::Checked(diagnostics) = &consumer.outcome else {
+        panic!("{consumer:?}");
+    };
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "known namespace members should remain typed even while the source export list is partial: {diagnostics:?}"
+    );
 }
