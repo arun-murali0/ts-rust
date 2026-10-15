@@ -204,7 +204,7 @@ fn declare_values<'ast>(
                 }
             }
             TopLevelItem::Function(func) => declare_function(func, ctx),
-            TopLevelItem::Class(class) => declare_class_constructor(class, ctx),
+            TopLevelItem::Class(class) => declare_class_constructor(class, items, ctx),
             TopLevelItem::ExternalModule(module) => {
                 if let Some(body) = &module.body {
                     ctx.namespace.push_scope(&module_scope(&module.id.value));
@@ -428,23 +428,25 @@ pub(super) fn declare_function(func: &Function<'_>, ctx: &mut CheckContext<'_, '
     let Some(symbol_id) = name.symbol_id.get() else {
         return;
     };
-    // A generic function's own type parameters need to be resolvable
-    // by name while its parameter and return type annotations are
-    // being resolved, then removed again immediately afterward so
-    // they do not leak into any other declaration's resolution.
+    if let Some(function_type) = resolve_function_type(func, ctx) {
+        ctx.symbols.declare(symbol_id, function_type);
+    }
+}
+
+/// Resolve a function's declared signature without requiring it to have a local symbol.
+/// Export serialization uses this for overload signatures and named-default edge cases;
+/// ordinary declarations still go through `declare_function` above.
+pub(super) fn resolve_function_type(
+    func: &Function<'_>,
+    ctx: &mut CheckContext<'_, '_>,
+) -> Option<crate::arena::TypeId> {
     let scope = ctx.namespace.push_type_params(&mut ctx.arena, func);
     let params = resolve_function_params(&func.params, &mut ctx.namespace, &mut ctx.arena);
     let return_type = match &func.return_type {
         Some(rt) => resolve_type_annotation(rt, &mut ctx.namespace, &mut ctx.arena),
-        // Problem: with no return annotation the function was left undeclared, so
-        // its body was never checked and a call to it read as an unknown type.
-        // Picked: declare it with `any` as a placeholder return type; the body is
-        // then checked against `any` (so nothing in it is a false mismatch) and
-        // check_function_declaration re-declares the function with the union of
-        // what the body returned once it has been walked.
-        // Cost: a call checked before the body is walked sees `any`, and an async
-        // or generator function stays undeclared because its real return type
-        // (a Promise or an iterator) is not something this checker models.
+        // Without a return annotation this is only a placeholder. The body pass replaces
+        // it for named functions, but export-only anonymous/overload signatures have no
+        // symbol-backed body inference and must not claim that placeholder is a real API.
         None if func.r#async || func.generator => None,
         None => Some(ctx.arena.any()),
     };
@@ -454,27 +456,25 @@ pub(super) fn declare_function(func: &Function<'_>, ctx: &mut CheckContext<'_, '
         &mut ctx.arena,
     );
     ctx.namespace.pop_type_params(scope);
-    // Any parameter or the return type failing to resolve, an unknown
-    // name in an annotation for example, means the whole function is
-    // left undeclared rather than declared with a guessed type. A
-    // later call to it will report an honest unresolved-name problem
-    // instead of silently passing or failing arity checks it should
-    // not be subject to.
     let (Some(params), Some(return_type)) = (params, return_type) else {
-        return;
+        return None;
     };
-    let function_type = ctx
-        .arena
-        .alloc(crate::types::Type::Function(crate::types::FunctionType {
-            params,
-            return_type,
-            type_params,
-            is_untyped: false,
-        }));
-    ctx.symbols.declare(symbol_id, function_type);
+    Some(
+        ctx.arena
+            .alloc(crate::types::Type::Function(crate::types::FunctionType {
+                params,
+                return_type,
+                type_params,
+                is_untyped: false,
+            })),
+    )
 }
 
-fn declare_class_constructor(class: &Class<'_>, ctx: &mut CheckContext<'_, '_>) {
+fn declare_class_constructor<'a>(
+    class: &'a Class<'a>,
+    items: &[(TopLevelItem<'a>, bool)],
+    ctx: &mut CheckContext<'_, '_>,
+) {
     let Some(name) = class.id.as_ref() else {
         return;
     };
@@ -493,15 +493,7 @@ fn declare_class_constructor(class: &Class<'_>, ctx: &mut CheckContext<'_, '_>) 
         &mut ctx.namespace,
         &mut ctx.arena,
     );
-    let (constructor_params, constructor_is_untyped) = match find_constructor(class) {
-        None => (Vec::new(), false),
-        Some(ctor) => {
-            match resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena) {
-                Some(params) => (params, false),
-                None => (Vec::new(), true),
-            }
-        }
-    };
+    let (constructor_params, constructor_is_untyped) = constructor_params_of(class, items, ctx);
     ctx.namespace.pop_type_params(class_scope);
     let constructor_type =
         ctx.arena
@@ -512,6 +504,55 @@ fn declare_class_constructor(class: &Class<'_>, ctx: &mut CheckContext<'_, '_>) 
                 is_untyped: constructor_is_untyped,
             }));
     ctx.symbols.declare(symbol_id, constructor_type);
+}
+
+// The parameters `new C(...)` takes. A class with a constructor takes that one's. A class
+// without one takes what the class it extends takes, so `class D extends B { }` is built
+// with whatever B's constructor wants.
+//
+// Problem: such a class was given no parameters, so `new D(1)` was TS2554 when B takes one.
+// Picked: walk up `extends` through the classes of this file to the first constructor. What
+// cannot be followed answers "untyped", which accepts any arguments: a base that is not in
+// this list (imported, global, an expression), a generic base (its parameters may name its
+// own type parameters, which mean something else here), or a chain too long to be real. A
+// wrong guess can then only hide an error, never invent one.
+fn constructor_params_of<'a>(
+    class: &'a Class<'a>,
+    items: &[(TopLevelItem<'a>, bool)],
+    ctx: &mut CheckContext<'_, '_>,
+) -> (Vec<crate::types::Param>, bool) {
+    const UNTYPED: (Vec<crate::types::Param>, bool) = (Vec::new(), true);
+    let mut current = class;
+    for _ in 0..32 {
+        if let Some(ctor) = find_constructor(current) {
+            return match resolve_function_params(&ctor.params, &mut ctx.namespace, &mut ctx.arena) {
+                Some(params) => (params, false),
+                None => UNTYPED,
+            };
+        }
+        let Some(heritage) = &current.heritage else {
+            return (Vec::new(), false);
+        };
+        let oxc_ast::ast::Expression::Identifier(base_name) = &heritage.expression else {
+            return UNTYPED;
+        };
+        let base = items.iter().find_map(|(item, _)| match item {
+            TopLevelItem::Class(candidate)
+                if candidate
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| id.name == base_name.name) =>
+            {
+                Some(*candidate)
+            }
+            _ => None,
+        });
+        match base {
+            Some(base) if base.type_parameters.is_none() => current = base,
+            _ => return UNTYPED,
+        }
+    }
+    UNTYPED
 }
 
 pub(super) fn find_constructor<'a>(

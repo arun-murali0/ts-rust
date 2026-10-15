@@ -64,6 +64,11 @@ pub struct CheckContext<'ast, 'src> {
     // Cost: a caller checked before the body is walked sees the placeholder `any`.
     pub inferred_returns: Option<Vec<TypeId>>,
 
+    // Inferred signatures for anonymous default function declarations, keyed by their
+    // source start offset. They have no SymbolId, but their bodies still need checking
+    // before the portable export table is written.
+    pub exported_function_types: FxHashMap<u32, TypeId>,
+
     pub current_class_instance: Option<TypeId>,
 
     // True while checking the body of a function whose `this` has no type at all:
@@ -134,6 +139,11 @@ pub struct CheckContext<'ast, 'src> {
     // without its own `declare`, so a class there has no property initializers to demand
     // (TS2564) and a private member of it is not an implicit-any report (TS7006).
     pub ambient_depth: u32,
+
+    /// Global value bindings exposed by `export as namespace` in a project dependency.
+    /// These are consulted only when Oxc has no lexical symbol for the identifier, so a
+    /// local declaration still shadows a UMD global normally.
+    pub global_values: FxHashMap<String, TypeId>,
 }
 
 const CANCEL_CHECK_INTERVAL: u32 = 32;
@@ -177,6 +187,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             relation_cache: RelationCache::default(),
             current_return_type: None,
             inferred_returns: None,
+            exported_function_types: FxHashMap::default(),
             current_class_instance: None,
             implicit_this: false,
             next_function_has_no_this: false,
@@ -192,6 +203,7 @@ impl<'ast, 'src> CheckContext<'ast, 'src> {
             importer: Importer::new(),
             imported_names: FxHashMap::default(),
             ambient_depth: 0,
+            global_values: FxHashMap::default(),
         }
     }
 

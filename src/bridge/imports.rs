@@ -24,7 +24,7 @@ use oxc_ast::ast::{
 };
 
 use crate::keys::{DeclKey, DeclKind};
-use crate::portable::{DeclProvider, ImportSource, ModuleExports};
+use crate::portable::{DeclProvider, GlobalNamespace, ImportSource, ModuleExports};
 use crate::types::{ObjectType, PropertyEntry, Type};
 
 use super::context::CheckContext;
@@ -33,6 +33,28 @@ pub(super) fn bind_imports<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCo
     let Some(source) = ctx.imports else {
         return;
     };
+    // UMD aliases are global names for script consumers. An external module is isolated
+    // unless the compiler option allowUmdGlobalAccess is enabled (not modelled here), so
+    // do not inject those globals into files that already have import/export syntax.
+    let is_external_module = program.body.iter().any(|statement| {
+        matches!(
+            statement,
+            Statement::ImportDeclaration(_)
+                | Statement::ExportDeclaration(_)
+                | Statement::ExportNamedDeclaration(_)
+                | Statement::ExportDefaultDeclaration(_)
+                | Statement::ExportAllDeclaration(_)
+                | Statement::ExportFromDeclaration(_)
+                | Statement::TSExportAssignment(_)
+                | Statement::TSNamespaceExportDeclaration(_)
+                | Statement::TSImportEqualsDeclaration(_)
+        )
+    });
+    if !is_external_module {
+        for global in source.global_namespaces() {
+            bind_global_namespace(ctx, source, &global);
+        }
+    }
     for stmt in &program.body {
         match stmt {
             Statement::ImportDeclaration(decl) => {
@@ -80,6 +102,83 @@ pub(super) fn bind_imports<'ast>(program: &'ast Program<'ast>, ctx: &mut CheckCo
             _ => {}
         }
     }
+}
+
+fn bind_global_namespace<'ast>(
+    ctx: &mut CheckContext<'ast, '_>,
+    source: &dyn ImportSource,
+    global: &GlobalNamespace,
+) {
+    let provider: &dyn DeclProvider = source;
+    let prefix = format!("{}.", global.name);
+    let mut properties = Vec::new();
+    let mut seen_values = std::collections::HashSet::new();
+
+    for (name, key) in &global.members {
+        let Some(decl) = provider.decl(*key) else {
+            continue;
+        };
+        match decl.kind {
+            DeclKind::Interface | DeclKind::Class | DeclKind::Alias | DeclKind::Enum => {
+                let qualified = format!("{prefix}{name}");
+                bind_key_as(ctx, source, *key, &qualified, None, false);
+            }
+            DeclKind::Function | DeclKind::Var | DeclKind::Namespace => {
+                if !seen_values.insert(name.clone()) {
+                    continue;
+                }
+                let value_type = match decl.kind {
+                    DeclKind::Function | DeclKind::Var => {
+                        ctx.importer.import_decl(&mut ctx.arena, provider, *key)
+                    }
+                    DeclKind::Namespace => None,
+                    _ => None,
+                };
+                if let Some(type_id) = value_type {
+                    properties.push(PropertyEntry {
+                        name: name.as_str().into(),
+                        type_id,
+                        optional: false,
+                        is_method: false,
+                    });
+                }
+            }
+        }
+        // An enum has both a type-side declaration and a value-side object. The latter
+        // is represented by the same portable enum declaration and is rebuilt here.
+        if decl.kind == DeclKind::Enum && seen_values.insert(name.clone()) {
+            if let Some((_, type_id)) = ctx.importer.import_enum(&mut ctx.arena, provider, *key) {
+                properties.push(PropertyEntry {
+                    name: name.as_str().into(),
+                    type_id,
+                    optional: false,
+                    is_method: false,
+                });
+            }
+        }
+    }
+
+    let namespace_shape = ctx.arena.alloc(Type::Object(ObjectType::new(properties)));
+    let assignment_value = global
+        .export_assignment
+        .and_then(|key| ctx.importer.import_decl(&mut ctx.arena, provider, key));
+    let empty_namespace = matches!(
+        ctx.arena.get(namespace_shape),
+        Type::Object(object) if object.properties.is_empty()
+    );
+    let value = match assignment_value {
+        Some(assigned)
+            if empty_namespace || ctx.arena.structurally_equal(assigned, namespace_shape) =>
+        {
+            assigned
+        }
+        Some(assigned) => ctx
+            .arena
+            .alloc_intersection(vec![assigned, namespace_shape])
+            .unwrap_or(assigned),
+        None => namespace_shape,
+    };
+    ctx.global_values.insert(global.name.clone(), value);
 }
 
 fn module_export_name(name: &ModuleExportName<'_>) -> String {
@@ -281,6 +380,46 @@ fn bind_key<'ast>(
     );
 }
 
+// Merge two imported interface/class object shapes. A module augmentation contributes
+// properties that the original declaration did not have; the original declaration wins
+// for a duplicate non-method member (which is separately an invalid declaration merge),
+// while duplicate methods are represented as overload alternatives.
+fn merge_imported_object_shapes(
+    arena: &mut crate::arena::TypeArena,
+    original: crate::arena::TypeId,
+    addition: crate::arena::TypeId,
+) -> Option<crate::arena::TypeId> {
+    let crate::types::Type::Object(original) = arena.get(original).clone() else {
+        return None;
+    };
+    let crate::types::Type::Object(addition) = arena.get(addition).clone() else {
+        return None;
+    };
+    let mut properties = original.properties.to_vec();
+    for added in addition.properties.iter() {
+        if let Some(existing) = properties
+            .iter_mut()
+            .find(|property| property.name == added.name)
+        {
+            if existing.is_method
+                && added.is_method
+                && !arena.structurally_equal(existing.type_id, added.type_id)
+            {
+                existing.type_id = arena
+                    .alloc_intersection(vec![existing.type_id, added.type_id])
+                    .unwrap_or(existing.type_id);
+            }
+            continue;
+        }
+        properties.push(added.clone());
+    }
+    Some(
+        arena.alloc(crate::types::Type::Object(crate::types::ObjectType::new(
+            properties,
+        ))),
+    )
+}
+
 // Binds the declaration under `key` to `name`, with `symbol` as the value's symbol when it
 // has one (a qualified name like `ns.User` has a type and no symbol).
 fn bind_key_as<'ast>(
@@ -292,6 +431,7 @@ fn bind_key_as<'ast>(
     type_only: bool,
 ) {
     let provider: &dyn DeclProvider = source;
+    let previous_keys = ctx.imported_names.get(name).cloned().unwrap_or_default();
     let Some(decl) = provider.decl(key) else {
         return;
     };
@@ -314,7 +454,67 @@ fn bind_key_as<'ast>(
                 .importer
                 .generic_params(&mut ctx.arena, provider, key)
                 .unwrap_or_default();
-            ctx.namespace.insert_imported(name, type_id, params);
+
+            let mergeable = matches!(decl.kind, DeclKind::Interface | DeclKind::Class)
+                && previous_keys.iter().any(|previous| {
+                    provider.decl(*previous).is_some_and(|previous_decl| {
+                        matches!(previous_decl.kind, DeclKind::Interface | DeclKind::Class)
+                    })
+                });
+            let incoming_is_generic = !params.is_empty();
+            let mut binding_type = type_id;
+            let mut binding_params = params;
+            if mergeable {
+                let previous_generic = ctx.namespace.imported_generic(name);
+                if let crate::namespace::Resolution::Resolved(previous_type) =
+                    ctx.namespace.resolve(name, &mut ctx.arena)
+                {
+                    let merge_input = match (&previous_generic, &binding_params[..]) {
+                        (Some(previous), current)
+                            if previous.params.len() == current.len() && !current.is_empty() =>
+                        {
+                            // The declarations live in different modules, so their type
+                            // parameters have different identities. Align parameters by
+                            // position before merging the additional properties. Keep
+                            // unbound method-level parameters intact.
+                            let substitutions = current
+                                .iter()
+                                .zip(&previous.params)
+                                .map(|(incoming, existing)| (incoming.id, existing.node))
+                                .collect::<Vec<_>>();
+                            crate::semantic::substitute_bound_type_params(
+                                &mut ctx.arena,
+                                type_id,
+                                &substitutions,
+                            )
+                        }
+                        (None, current) if current.is_empty() => type_id,
+                        // A mismatched generic arity cannot be merged soundly. Preserve
+                        // the first declaration instead of silently replacing its shape.
+                        _ => previous_type,
+                    };
+                    if let Some(merged) =
+                        merge_imported_object_shapes(&mut ctx.arena, previous_type, merge_input)
+                    {
+                        binding_type = merged;
+                        if let Some(previous) = previous_generic {
+                            binding_params = previous.params.clone();
+                        } else if incoming_is_generic {
+                            // This branch is only reached when there was no prior generic
+                            // shape. Do not replace the existing declaration on mismatch.
+                            binding_type = previous_type;
+                            binding_params = Vec::new();
+                        }
+                    } else {
+                        binding_type = previous_type;
+                        binding_params = previous_generic
+                            .map(|previous| previous.params.clone())
+                            .unwrap_or_default();
+                    }
+                }
+            }
+            ctx.namespace
+                .insert_imported(name, binding_type, binding_params);
         }
         // `import type { f }` brings in no value, only the right to name types.
         DeclKind::Function | DeclKind::Var if !type_only => {
@@ -322,7 +522,22 @@ fn bind_key_as<'ast>(
                 return;
             };
             if let Some(symbol_id) = symbol {
-                ctx.symbols.declare(symbol_id, type_id);
+                if decl.kind == DeclKind::Function
+                    && let Some(existing) = ctx.symbols.get(symbol_id)
+                    && matches!(
+                        ctx.arena.get(existing),
+                        crate::types::Type::Function(_) | crate::types::Type::Intersection(_)
+                    )
+                    && matches!(ctx.arena.get(type_id), crate::types::Type::Function(_))
+                {
+                    let combined = ctx
+                        .arena
+                        .alloc_intersection(vec![existing, type_id])
+                        .unwrap_or(type_id);
+                    ctx.symbols.declare(symbol_id, combined);
+                } else {
+                    ctx.symbols.declare(symbol_id, type_id);
+                }
             }
         }
         // An enum is a type and a value under one name; `import type` brings in the type.
