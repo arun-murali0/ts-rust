@@ -73,7 +73,13 @@ fn bind_pattern_in(
 
             let non_nullish = narrow_to_non_nullish(&mut ctx.arena, type_id);
             let effective = ctx.arena.alloc_union(vec![non_nullish, default_type]);
-            bind_pattern_in(&assignment.left, effective, from_array_element, scoping, ctx);
+            bind_pattern_in(
+                &assignment.left,
+                effective,
+                from_array_element,
+                scoping,
+                ctx,
+            );
         }
     }
 }
