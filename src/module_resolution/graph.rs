@@ -5,7 +5,7 @@ use crate::project::ProjectFiles;
 use crate::topology::ModuleTopology;
 use crate::types::FileId;
 
-use super::discovery::{ModuleRequest, scan_module_requests};
+use super::discovery::{ModuleRequest, ModuleRequestKind, scan_module_requests};
 use super::error::ModuleError;
 use super::metadata::{FileFingerprint, FileState, content_hash};
 use super::resolver::ModuleResolver;
@@ -20,6 +20,7 @@ pub struct ModuleEdge {
     pub target: Option<FileId>,
     pub is_type: bool,
     pub is_import: bool,
+    pub kind: ModuleRequestKind,
 }
 
 // The files reachable from a project's entry points and the imports between them.
@@ -96,6 +97,7 @@ impl ModuleGraph {
                         target,
                         is_type: request.is_type,
                         is_import: request.is_import,
+                        kind: request.kind,
                     });
                 }
             }
@@ -317,8 +319,10 @@ impl ModuleGraph {
         for position in 0..self.len() {
             let id = file_id(position);
             topology.add_file(id);
-            for dependency in self.dependencies(id) {
-                topology.add_dependency(id, *dependency);
+            for edge in &self.edges[index_of(id)] {
+                if let Some(target) = edge.target {
+                    topology.add_typed_dependency(id, target, edge.kind);
+                }
             }
         }
         topology
@@ -594,7 +598,7 @@ fn slice_of<T>(table: &[Vec<T>], id: FileId) -> &[T] {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModuleEdge, ModuleGraph, file_id};
+    use super::{ModuleEdge, ModuleGraph, ModuleRequestKind, file_id};
     use crate::project::ProjectFiles;
     use crate::types::FileId;
 
@@ -612,6 +616,7 @@ mod tests {
                 target: Some(file_id(*to)),
                 is_type: false,
                 is_import: true,
+                kind: ModuleRequestKind::StaticImport,
             });
         }
         let states = Vec::new();
