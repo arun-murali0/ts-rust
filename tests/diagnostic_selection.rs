@@ -110,3 +110,34 @@ fn number_method_argument_must_be_a_number() {
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].0, Some(2345), "{found:?}");
 }
+
+// The string methods are found with their argument and result types; a wrong one is reported
+// as in tsc, and a method a string does not have is still missing.
+#[test]
+fn string_methods_are_found() {
+    let found = errors(
+        "declare const s: string;\nconst a = s.startsWith('a');\nconst b = s.split(',').length;\n\
+         const c = 'x'.padStart(3, '0');\nconst d = s.replace('a', 'b').trim().toUpperCase();\n\
+         const e = s.slice(1);\nconst f = s.indexOf('a', 2) + 1;\nconst g = s.at(0);\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn string_method_argument_and_result_types_are_checked() {
+    let found = errors(
+        "declare const s: string;\nconst a: number = s.startsWith('a');\nconst b = s.startsWith(1);\n",
+    );
+    let codes: Vec<_> = found.iter().map(|(code, _)| *code).collect();
+    assert_eq!(codes, [Some(2322), Some(2345)], "{found:?}");
+}
+
+#[test]
+fn a_method_a_string_does_not_have_is_still_missing() {
+    let found = errors("declare const s: string;\nconst a = s.nope();\nconst b = s.toFixed(1);\n");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(
+        found.iter().all(|(code, _)| *code == Some(2339)),
+        "{found:?}"
+    );
+}
