@@ -75,9 +75,12 @@ fn lookup_member(arena: &mut TypeArena, type_id: TypeId, property_name: &str) ->
         Type::Object(object) => {
             match object.properties.iter().find(|p| *p.name == *property_name) {
                 Some(property) => Some(property.type_id),
-                None => arena
-                    .record_value_type(effective)
-                    .or_else(|| universal_member(arena, effective, property_name)),
+                // The members every value has come before a Record's value type: tsc
+                // looks a name up on the object's own members and on `Object` before it
+                // falls back to an index signature, so `rec.hasOwnProperty(k)` on a
+                // `Record<string, string>` is the method, not a string.
+                None => universal_member(arena, effective, property_name)
+                    .or_else(|| arena.record_value_type(effective)),
             }
         }
         Type::Union(members) => {
