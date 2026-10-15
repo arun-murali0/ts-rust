@@ -3,7 +3,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use ts_rust::{Diagnostic, FileOutcome, ModuleGraph, ModuleResolver, Severity, check_project};
+use ts_rust::{
+    Diagnostic, FileOutcome, ModuleGraph, ModuleResolver, Severity, check_project,
+    check_project_bounded,
+};
 
 // Step 6c: check_project passes what each file exports to the files that import it.
 // Every test writes a small project into its own directory under the target tree, builds
@@ -37,7 +40,60 @@ fn run(test: &str, files: &[(&str, &str)]) -> Checked {
     Checked { graph, report }
 }
 
+// The same as `run`, with every cycle limited to `max_cycle_rounds` rechecks, so a cycle
+// that needs more than that runs out of rounds.
+fn run_bounded(test: &str, files: &[(&str, &str)], max_cycle_rounds: usize) -> Checked {
+    let (root, paths) = write(test, files);
+    let graph = ModuleGraph::build(&paths, &ModuleResolver::new())
+        .expect("the project builds")
+        .with_root(root);
+    let report = check_project_bounded(&graph, Some(max_cycle_rounds));
+    Checked { graph, report }
+}
+
+// A ring of `count` modules, each re-exporting the next with `export *`, where the last
+// one declares `Deep`, and an entry file that imports `Deep` from the first and misuses
+// it. `Deep` can only reach the first module by travelling once around the ring.
+fn star_ring(count: usize) -> Vec<(String, String)> {
+    let mut sources: Vec<(String, String)> = Vec::new();
+    for index in 0..count {
+        let next = (index + 1) % count;
+        let mut source = format!("export * from './m{next}';");
+        if index == count - 1 {
+            source.push_str("\nexport interface Deep { value: number }");
+        }
+        sources.push((format!("m{index}.ts"), source));
+    }
+    sources.push((
+        "entry.ts".to_string(),
+        "import { Deep } from './m0'; const value: Deep = { value: 'wrong' };".to_string(),
+    ));
+    sources
+}
+
+fn as_files(sources: &[(String, String)]) -> Vec<(&str, &str)> {
+    sources
+        .iter()
+        .map(|(name, source)| (name.as_str(), source.as_str()))
+        .collect()
+}
+
 impl Checked {
+    // The file names of the cycle members the run reported as not settled, sorted.
+    fn unsettled_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .report
+            .unsettled
+            .iter()
+            .map(|id| {
+                let path = self.graph.files().path(*id).unwrap();
+                path.file_name().unwrap().to_string_lossy().into_owned()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
     fn diagnostics(&self, file: &str) -> &[Diagnostic] {
         for report in &self.report.files {
             let path = self.graph.files().path(report.file_id).unwrap();
@@ -610,6 +666,61 @@ fn members_of_a_cycle_use_each_others_exports() {
         project.errors("b.ts").is_empty(),
         "{:?}",
         project.errors("b.ts")
+    );
+}
+
+#[test]
+fn star_exports_propagate_through_a_cycle_longer_than_four_modules() {
+    // Every module re-exports the next one. The final module contributes `Deep`, so the
+    // export has to travel around a seven-module cycle before entry.ts can use it. A fixed
+    // four-round settle silently leaves the early modules with incomplete exports.
+    let sources = star_ring(7);
+    let project = run("long-cycle-star-propagation", &as_files(&sources));
+    let errors = project.errors("entry.ts");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code.tsc_code(), Some(2322), "{errors:?}");
+}
+
+#[test]
+fn a_cycle_that_settles_is_not_reported_as_unsettled() {
+    let sources = star_ring(7);
+    let project = run("long-cycle-settles", &as_files(&sources));
+    assert!(
+        project.report.unsettled.is_empty(),
+        "{:?}",
+        project.unsettled_names()
+    );
+}
+
+#[test]
+fn a_cycle_that_runs_out_of_rounds_is_reported_and_exports_as_incomplete() {
+    // Two rechecks cannot carry `Deep` around a seven-module ring, so the exports are still
+    // changing when the bound runs out. That has to be said, not passed off as the final
+    // answer, and the files that import from the ring must not be told that a name is
+    // missing from a module whose export list is known to be partial.
+    let sources = star_ring(7);
+    let project = run_bounded("long-cycle-runs-out", &as_files(&sources), 2);
+
+    let expected: Vec<String> = (0..7).map(|index| format!("m{index}.ts")).collect();
+    assert_eq!(project.unsettled_names(), expected);
+
+    let errors = project.errors("entry.ts");
+    assert!(
+        errors
+            .iter()
+            .all(|d| d.code.tsc_code() != Some(2305) && d.code.tsc_code() != Some(2307)),
+        "an import from an unsettled cycle must not report a missing name or module: {errors:?}"
+    );
+}
+
+#[test]
+fn a_file_outside_the_cycle_is_never_listed_as_unsettled() {
+    let sources = star_ring(7);
+    let project = run_bounded("long-cycle-entry-not-listed", &as_files(&sources), 2);
+    assert!(
+        !project.unsettled_names().contains(&"entry.ts".to_string()),
+        "{:?}",
+        project.unsettled_names()
     );
 }
 

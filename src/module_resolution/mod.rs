@@ -12,8 +12,8 @@ mod graph;
 mod metadata;
 mod resolver;
 
-pub use check::{FileOutcome, FileReport, ProjectReport, check_project};
-pub use discovery::{ModuleRequest, ModuleScan, scan_module_requests};
+pub use check::{FileOutcome, FileReport, ProjectReport, check_project, check_project_bounded};
+pub use discovery::{ModuleRequest, ModuleRequestKind, ModuleScan, scan_module_requests};
 pub use error::ModuleError;
 pub use graph::{ModuleEdge, ModuleGraph};
 pub use metadata::{FileFingerprint, content_hash};

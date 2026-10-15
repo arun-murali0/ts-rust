@@ -102,6 +102,7 @@ const KIND_PACKAGE: u8 = 0x02;
 const KIND_EXTERNAL: u8 = 0x03;
 const KIND_BUILTIN: u8 = 0x04;
 const KIND_AMBIENT: u8 = 0x05;
+const KIND_AMBIENT_CHILD: u8 = 0x06;
 
 impl ModuleKey {
     /// `path` is relative to the project root, with `/` separators.
@@ -132,6 +133,19 @@ impl ModuleKey {
     pub fn ambient(specifier: &str) -> Self {
         let mut w = StreamWriter::new();
         w.u8(KIND_AMBIENT).str(specifier);
+        Self(w.finish())
+    }
+
+    /// A block that declares or augments an ambient module. The host module and the
+    /// deterministic ordinal distinguish repeated `declare module "x"` blocks, including
+    /// declarations of the same name in separate files. The ordinal is counted per
+    /// specifier within one file, so adding an unrelated declaration does not renumber it.
+    pub(crate) fn ambient_child(specifier: &str, owner: ModuleKey, ordinal: u32) -> Self {
+        let mut w = StreamWriter::new();
+        w.u8(KIND_AMBIENT_CHILD)
+            .str(specifier)
+            .raw128(owner.as_u128())
+            .u32(ordinal);
         Self(w.finish())
     }
 
