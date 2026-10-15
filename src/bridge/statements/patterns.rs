@@ -136,6 +136,18 @@ fn bind_array_pattern(
     let (element_type, is_real_array) = match ctx.arena.get(type_id) {
         Type::Array(element) => (*element, true),
         Type::Any | Type::Error => (type_id, false),
+        // Problem: `const [, a] = x || []` with `x: any` reported TS2488 on `never[] | any`.
+        // tsc folds any union that has an `any` member into `any`, and destructuring it is
+        // fine; this checker keeps the members apart.
+        // Picked: read such a union as `any` here, rather than change how unions are built
+        // for every other use.
+        Type::Union(members)
+            if members
+                .iter()
+                .any(|member| matches!(ctx.arena.get(*member), Type::Any)) =>
+        {
+            (ctx.arena.any(), false)
+        }
         // Problem: `var [a, [b]] = [1, ["x"]]` reported TS2488 on the inner pattern. With no
         // tuple type, the literal is `(number | string[])[]`, so the inner pattern's source
         // is a union with `number` in it; tsc has `[number, string[]]` and sees the array.
