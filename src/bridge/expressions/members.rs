@@ -114,11 +114,12 @@ fn lookup_member(arena: &mut TypeArena, type_id: TypeId, property_name: &str) ->
                 ),
             }
         }
-        // A primitive, a function or an array has the members every value has.
+        // A string has the string methods, and every primitive, function and array has the
+        // members every value has.
+        Type::String | Type::StringLiteral(_) => string_member(arena, property_name)
+            .or_else(|| universal_member(arena, effective, property_name)),
         Type::Number
-        | Type::String
         | Type::Boolean
-        | Type::StringLiteral(_)
         | Type::NumberLiteral(_)
         | Type::BooleanLiteral(_)
         | Type::Function(_)
@@ -127,13 +128,103 @@ fn lookup_member(arena: &mut TypeArena, type_id: TypeId, property_name: &str) ->
     }
 }
 
+// Problem: `s.startsWith('a')`, `s.split(',')` and the rest of the string methods reported
+// "Property does not exist", because a string only had `length`.
+// Picked: the methods of tsc's default library, by name. An argument that names a plain string or
+// number is typed so a wrong one is rejected as tsc rejects it; one that may be a RegExp, a
+// function or either (`split`, `replace`, `match`) is `any`.
+// Cost: `match` and `matchAll` return `any` rather than the match array, so what is done with
+// their result is unchecked; methods the library only adds for later targets are all offered.
+fn string_member(arena: &mut TypeArena, property_name: &str) -> Option<TypeId> {
+    use crate::types::{FunctionType, Param};
+    // One letter per parameter: s string, n number, a any, and a lowercase letter that is
+    // optional in capitals (S, N, A). `*` before a letter makes it a rest parameter.
+    // The result letter: s string, n number, b boolean, a any, l string[], u number | undefined,
+    // v string | undefined.
+    let (params, result) = match property_name {
+        "charAt" => ("n", 's'),
+        "charCodeAt" => ("n", 'n'),
+        "codePointAt" => ("n", 'u'),
+        "at" => ("n", 'v'),
+        "concat" => ("*s", 's'),
+        "indexOf" | "lastIndexOf" => ("sN", 'n'),
+        "includes" | "startsWith" | "endsWith" => ("sN", 'b'),
+        "slice" => ("NN", 's'),
+        "substring" => ("nN", 's'),
+        "substr" => ("nN", 's'),
+        "split" => ("aN", 'l'),
+        "trim" | "trimStart" | "trimEnd" | "trimLeft" | "trimRight" | "toUpperCase"
+        | "toLowerCase" | "toLocaleUpperCase" | "toLocaleLowerCase" => ("", 's'),
+        "padStart" | "padEnd" => ("nS", 's'),
+        "repeat" => ("n", 's'),
+        "replace" | "replaceAll" => ("aa", 's'),
+        "match" | "matchAll" => ("a", 'a'),
+        "search" => ("a", 'n'),
+        "localeCompare" => ("s*a", 'n'),
+        "normalize" => ("S", 's'),
+        _ => return None,
+    };
+    let any = arena.any();
+    let mut list = Vec::new();
+    let mut rest = false;
+    for letter in params.chars() {
+        if letter == '*' {
+            rest = true;
+            continue;
+        }
+        let base = match letter.to_ascii_lowercase() {
+            's' => arena.string(),
+            'n' => arena.number(),
+            _ => any,
+        };
+        let type_id = if rest {
+            arena.alloc(Type::Array(base))
+        } else {
+            base
+        };
+        list.push(Param {
+            type_id,
+            optional: letter.is_ascii_uppercase(),
+            rest,
+            name: None,
+        });
+        rest = false;
+    }
+    let undefined = arena.undefined();
+    let return_type = match result {
+        's' => arena.string(),
+        'n' => arena.number(),
+        'b' => arena.boolean(),
+        'l' => {
+            let string = arena.string();
+            arena.alloc(Type::Array(string))
+        }
+        'u' => {
+            let number = arena.number();
+            arena.alloc_union(vec![number, undefined])
+        }
+        'v' => {
+            let string = arena.string();
+            arena.alloc_union(vec![string, undefined])
+        }
+        _ => any,
+    };
+    Some(arena.alloc(Type::Function(FunctionType {
+        params: list,
+        return_type,
+        type_params: Vec::new(),
+        is_untyped: false,
+    })))
+}
+
 // Problem: `x.toString()` on a number, an enum object or a class reported "Property
 // 'toString' does not exist", because a type only has the members written for it and no
 // type carried the ones every value inherits from Object (and every function from Function).
 // Picked: answer those few by name, loosely typed: arguments are `any` and the results are
 // what the method returns, or `any` where that depends on the receiver.
-// Cost: `(1).toString(1, 2)` and a wrong argument type are not caught, and a method such
-// as `toFixed` that only some primitives have is still missing.
+// Cost: `(1).toString(1, 2)` and a wrong argument type are not caught, and a method that only
+// strings or booleans have (`startsWith`, `padStart`) is still missing; numbers get toFixed,
+// toExponential and toPrecision.
 fn universal_member(
     arena: &mut TypeArena,
     receiver: TypeId,
@@ -148,6 +239,23 @@ fn universal_member(
         rest: true,
         name: None,
     };
+    // The methods only a number has. Their one argument is an optional number, as in tsc.
+    let on_number = matches!(arena.get(receiver), Type::Number | Type::NumberLiteral(_));
+    if on_number && matches!(property_name, "toFixed" | "toExponential" | "toPrecision") {
+        let digits = Param {
+            type_id: arena.number(),
+            optional: true,
+            rest: false,
+            name: None,
+        };
+        let string = arena.string();
+        return Some(arena.alloc(Type::Function(FunctionType {
+            params: vec![digits],
+            return_type: string,
+            type_params: Vec::new(),
+            is_untyped: false,
+        })));
+    }
     let result = match property_name {
         "toString" | "toLocaleString" => arena.string(),
         "valueOf" => any,

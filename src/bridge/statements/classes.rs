@@ -30,6 +30,14 @@ fn has_getter_named(class: &oxc_ast::ast::Class<'_>, key: &oxc_ast::ast::Propert
     })
 }
 
+// `private m()` and `#m()` both: the two ways a class member is private to its class.
+fn is_private_member(method: &oxc_ast::ast::MethodDefinition<'_>) -> bool {
+    matches!(
+        method.accessibility,
+        Some(oxc_ast::ast::TSAccessibility::Private)
+    ) || matches!(method.key, PropertyKey::PrivateIdentifier(_))
+}
+
 pub(super) fn check_class_declaration(
     class: &oxc_ast::ast::Class<'_>,
     scoping: &Scoping,
@@ -46,6 +54,15 @@ pub(super) fn check_class_declaration(
             if matches!(method.kind, oxc_ast::ast::MethodDefinitionKind::Set)
                 && has_getter_named(class, &method.key)
             {
+                continue;
+            }
+            // Problem: `declare class C { private m(a); }` read as an implicit any, but tsc
+            // never reports one for a parameter of a private member in an ambient context
+            // (declarationBelongsToPrivateAmbientMember in its checker): a private member
+            // is not part of the shape callers see, so its types are not asked for.
+            // Picked: skip a private method or constructor, `private` or `#name`, of a class
+            // that is ambient by `declare` or by sitting in a `declare namespace`/`module`.
+            if is_private_member(method) && (class.declare || ctx.ambient_depth > 0) {
                 continue;
             }
             report_implicit_any_params(&method.value.params, ctx);
@@ -249,6 +266,9 @@ pub(super) fn check_class_declaration(
 // nested function or arrow also never count, matching tsc, since they may run
 // after the constructor has finished.
 //
+// Nothing is reported for a class that is ambient, whether by its own `declare` or by sitting
+// in a `declare namespace` / `declare module`.
+//
 // A property is skipped, without an error, when any of these hold: it is static
 // or `declare`d or abstract, it has an initializer, it is optional (`x?: T`), it
 // carries the definite assignment assertion (`x!: T`), it has no type annotation
@@ -258,7 +278,9 @@ fn report_uninitialized_properties(
     class: &oxc_ast::ast::Class<'_>,
     ctx: &mut CheckContext<'_, '_>,
 ) {
-    if class.declare {
+    // A class in a `declare namespace` or `declare module "x"` is ambient without a
+    // `declare` of its own, and an ambient class has no constructor body to assign in.
+    if class.declare || ctx.ambient_depth > 0 {
         return;
     }
 
