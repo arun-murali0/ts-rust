@@ -132,8 +132,9 @@ fn lookup_member(arena: &mut TypeArena, type_id: TypeId, property_name: &str) ->
 // type carried the ones every value inherits from Object (and every function from Function).
 // Picked: answer those few by name, loosely typed: arguments are `any` and the results are
 // what the method returns, or `any` where that depends on the receiver.
-// Cost: `(1).toString(1, 2)` and a wrong argument type are not caught, and a method such
-// as `toFixed` that only some primitives have is still missing.
+// Cost: `(1).toString(1, 2)` and a wrong argument type are not caught, and a method that only
+// strings or booleans have (`startsWith`, `padStart`) is still missing; numbers get toFixed,
+// toExponential and toPrecision.
 fn universal_member(
     arena: &mut TypeArena,
     receiver: TypeId,
@@ -148,6 +149,23 @@ fn universal_member(
         rest: true,
         name: None,
     };
+    // The methods only a number has. Their one argument is an optional number, as in tsc.
+    let on_number = matches!(arena.get(receiver), Type::Number | Type::NumberLiteral(_));
+    if on_number && matches!(property_name, "toFixed" | "toExponential" | "toPrecision") {
+        let digits = Param {
+            type_id: arena.number(),
+            optional: true,
+            rest: false,
+            name: None,
+        };
+        let string = arena.string();
+        return Some(arena.alloc(Type::Function(FunctionType {
+            params: vec![digits],
+            return_type: string,
+            type_params: Vec::new(),
+            is_untyped: false,
+        })));
+    }
     let result = match property_name {
         "toString" | "toLocaleString" => arena.string(),
         "valueOf" => any,

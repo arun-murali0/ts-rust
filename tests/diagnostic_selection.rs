@@ -85,3 +85,28 @@ fn the_arguments_object_is_not_an_unknown_name() {
     let found = errors("function f() { return arguments.length; }\n");
     assert!(found.is_empty(), "{found:?}");
 }
+
+// The methods only a number has are found on a number and on a numeric literal, and are not
+// found on other types; a non-number argument is rejected as tsc does.
+#[test]
+fn number_methods_are_found_on_numbers() {
+    let found = errors(
+        "declare const n: number;\nconst a = n.toFixed(2);\nconst b = (1.5).toExponential();\n\
+         const c = n.toPrecision(3);\n",
+    );
+    assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn number_methods_are_not_found_on_a_string() {
+    let found = errors("declare const s: string;\nconst a = s.toFixed(2);\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, Some(2339), "{found:?}");
+}
+
+#[test]
+fn number_method_argument_must_be_a_number() {
+    let found = errors("declare const n: number;\nconst a = n.toFixed('2');\n");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, Some(2345), "{found:?}");
+}
