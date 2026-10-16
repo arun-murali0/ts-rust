@@ -18,6 +18,7 @@ mod namespace;
 #[allow(dead_code)]
 mod portable;
 mod project;
+mod scc;
 #[cfg(feature = "scratchpad")]
 mod scratchpad;
 mod semantic;
@@ -44,7 +45,9 @@ pub use diagnostic_view::{DiagnosticView, Position, Range};
 pub use diagnostics::{Diagnostic, Severity};
 pub use error::CheckerError;
 
-pub use keys::{DeclKey, DeclKind, ENC_VERSION, ModuleKey, NodeHash, SigHash, TypeParamKey};
+pub use keys::{
+    CycleKey, DeclKey, DeclKind, ENC_VERSION, ModuleKey, NodeHash, SigHash, TypeParamKey,
+};
 pub use line_index::LineIndex;
 pub use portable::{
     DeclProvider, GlobalNamespace, ImportSource, ModuleExports, PNode, PParam, PProp, PTypeParam,
@@ -79,7 +82,7 @@ pub use module_resolution::{
 pub use module_resolution::check_project_bounded;
 
 pub use arena::TypeArenaStats;
-pub use bridge::CheckMetrics;
+pub use bridge::{CheckMetrics, IncompleteReason};
 pub use namespace::NamespaceStats;
 pub use project::ProjectFiles;
 pub use semantic::queries::QueryStats;

@@ -22,6 +22,7 @@ struct Options {
     project: String,
     flat: bool,
     cycles: bool,
+    partial: bool,
 }
 
 // Set once from `--tsc-codes`: print each diagnostic under the tsc code it maps to.
@@ -251,6 +252,23 @@ fn check_with_modules(files: &[PathBuf], options: &Options) -> Result<Tally, Str
         );
     }
 
+    if options.partial {
+        for file in &report.files {
+            if file.incomplete_reasons.is_empty() {
+                continue;
+            }
+            let Some(path) = graph.files().path(file.file_id) else {
+                continue;
+            };
+            let why: Vec<&str> = file
+                .incomplete_reasons
+                .iter()
+                .map(|reason| reason.describe())
+                .collect();
+            println!("{}: exports partial: {}", path.display(), why.join("; "));
+        }
+    }
+
     let cycles = graph.cycles();
     if options.cycles {
         for cycle in &cycles {
@@ -278,6 +296,7 @@ fn parse_options(args: &[String]) -> Option<Options> {
         project,
         flat: args.iter().any(|arg| arg == "--flat"),
         cycles: args.iter().any(|arg| arg == "--cycles"),
+        partial: args.iter().any(|arg| arg == "--partial"),
     })
 }
 
@@ -329,7 +348,7 @@ fn print_help() {
     println!(
         "ts-rust: a from-scratch TypeScript type checker (experimental CLI)\n\n\
          USAGE:\n    \
-         ts-rust --project <path-to-tsconfig.json> [--flat] [--cycles] [--tsc-codes]\n\n\
+         ts-rust --project <path-to-tsconfig.json> [--flat] [--cycles] [--partial] [--tsc-codes]\n\n\
          OPTIONS:\n    \
          --project <path>    Locate the project root from a tsconfig.json path.\n                         \
          Its contents are not parsed; every .ts/.tsx file under\n                         \
@@ -339,6 +358,8 @@ fn print_help() {
          The only mode in a build without the `module-resolution`\n                         \
          feature.\n    \
          --cycles            Print each import cycle (module graph builds only).\n    \
+         --partial           Print each file whose exports are partial, and why\n                         \
+         (module graph builds only).\n    \
          --tsc-codes         Print each diagnostic under the tsc code it maps to\n                         \
          (TS2322) instead of ts-rust's own (TSR1003).\n    \
          -h, --help          Show this message.\n\n\

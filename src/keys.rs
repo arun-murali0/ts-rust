@@ -55,6 +55,10 @@ key128!(
     /// Merkle hash of one type node (LLD 3.2).
     NodeHash
 );
+key128!(
+    /// Identity of an import cycle: the keys of its members, sorted, hashed together.
+    CycleKey
+);
 
 // The byte stream a hash is computed over. Integers are little endian, strings and
 // byte runs carry a u32 length first, so no two field layouts can read the same.
@@ -237,6 +241,24 @@ impl DeclKey {
         w.u8(0xDD).raw128(parent.as_u128()).u32(path.len() as u32);
         for byte in path {
             w.u8(*byte);
+        }
+        Self(w.finish())
+    }
+}
+
+impl CycleKey {
+    /// The key of the cycle whose members have these module keys. The order they are given
+    /// in does not matter and a repeated key counts once, so the same set of modules gives
+    /// the same key wherever the project is checked out and however the files were found.
+    pub fn of(members: &[ModuleKey]) -> Self {
+        let mut sorted: Vec<u128> = members.iter().map(|member| member.as_u128()).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        let mut w = StreamWriter::new();
+        w.u8(0xDE)
+            .u32(u32::try_from(sorted.len()).expect("fewer than 2^32 members"));
+        for member in sorted {
+            w.raw128(member);
         }
         Self(w.finish())
     }
