@@ -108,10 +108,12 @@ fn env_number(name: &str, default: usize) -> usize {
 #[test]
 fn a_sample_of_the_corpus_runs_to_an_end_one_file_at_a_time() {
     let cases = ts_files(&corpus().join("typescript-6.0.3"));
-    if cases.is_empty() {
-        eprintln!("tests/typescript-testcases is not present; nothing to run");
-        return;
-    }
+    // The corpus is part of the repository. A test that passes because it found nothing to
+    // run says nothing, so a checkout without it fails here and does not look green.
+    assert!(
+        !cases.is_empty(),
+        "tests/typescript-testcases/typescript-6.0.3 has no .ts files"
+    );
     let stride = env_number("TS_RUST_CORPUS_STRIDE", 500).max(1);
     let offset = env_number("TS_RUST_CORPUS_OFFSET", 0);
     let mut failures = Vec::new();
@@ -137,10 +139,10 @@ fn a_sample_of_the_corpus_runs_to_an_end_one_file_at_a_time() {
 #[test]
 fn the_known_crashers_no_longer_abort_when_run_one_at_a_time() {
     let cases = ts_files(&corpus().join("known-crashers-6.0.3"));
-    if cases.is_empty() {
-        eprintln!("tests/typescript-testcases/known-crashers-6.0.3 is not present");
-        return;
-    }
+    assert!(
+        !cases.is_empty(),
+        "tests/typescript-testcases/known-crashers-6.0.3 has no .ts files"
+    );
     let mut failures = Vec::new();
     for file in &cases {
         if let Some(why) = lost(&run_alone(file, "crashers")) {
