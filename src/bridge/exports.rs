@@ -38,6 +38,75 @@ use crate::types::{ObjectType, PropertyEntry, Type, TypeParameterId};
 
 use super::context::CheckContext;
 
+/// Why a unit's export list is partial, one reason for each way the collector gives up on
+/// something. A partial list is safe, because a dependent that sees a name missing from one
+/// stays quiet about it, but a reason says what to build next and lets a test pin each case.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IncompleteReason {
+    /// The checker panicked on the file, so nothing about it can be trusted.
+    CheckerCrashed,
+    /// An exported declaration of a kind the portable form does not carry.
+    UnsupportedDeclaration,
+    /// `export const {} = x`: a pattern that binds no name.
+    EmptyBindingPattern,
+    /// `declare module "x";` with no body: the module exists and every import from it is any.
+    ShorthandAmbientModule,
+    /// `export default function () {}` with no body and no return annotation: its return
+    /// type would have to be inferred from a body that has no symbol.
+    AnonymousDefaultWithoutSignature,
+    /// A default export of a declaration kind with no portable form.
+    UnsupportedDefaultExport,
+    /// `export = x` where x is not an object value: it can carry properties the model
+    /// cannot list.
+    NonObjectExportAssignment,
+    /// `export { x }` where x is not declared in the file.
+    UnknownLocalExport,
+    /// An import exported again whose source module has no known exports.
+    UnresolvedReExport,
+    /// A declaration file with no export statement: tsc exports its unmarked declarations,
+    /// and which they are cannot be told from here.
+    DeclarationFileWithoutExportStatement,
+    /// An exported declaration the portable form could not be built for.
+    UnrepresentableDeclaration,
+    /// `export * from` a module whose export list is partial or not known.
+    StarFromPartialModule,
+    /// `export * as ns from` a module whose export list is partial or not known.
+    NamespaceStarFromPartialModule,
+}
+
+impl IncompleteReason {
+    /// A short phrase for a report, in the form "the list is partial because ...".
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::CheckerCrashed => "the checker crashed on the file",
+            Self::UnsupportedDeclaration => "an exported declaration kind is not supported",
+            Self::EmptyBindingPattern => "an exported destructuring pattern binds no name",
+            Self::ShorthandAmbientModule => "a shorthand ambient module lists no names",
+            Self::AnonymousDefaultWithoutSignature => {
+                "an anonymous default function has no signature to export"
+            }
+            Self::UnsupportedDefaultExport => "a default export of an unsupported kind",
+            Self::NonObjectExportAssignment => "`export =` of a value that may carry properties",
+            Self::UnknownLocalExport => "an export names something not declared in the file",
+            Self::UnresolvedReExport => "a re-exported import has no known source",
+            Self::DeclarationFileWithoutExportStatement => {
+                "a declaration file with no export statement exports its unmarked names"
+            }
+            Self::UnrepresentableDeclaration => "an exported declaration has no portable form",
+            Self::StarFromPartialModule => "`export *` from a module with a partial list",
+            Self::NamespaceStarFromPartialModule => {
+                "`export * as ns` from a module with a partial list"
+            }
+        }
+    }
+}
+
+fn note(reasons: &mut Vec<IncompleteReason>, reason: IncompleteReason) {
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+}
+
 /// What `collect_exports` found: the declarations, the names they are exported under,
 /// and whether anything exported had to be left out.
 #[derive(Default)]
@@ -48,7 +117,8 @@ pub(crate) struct ExportTable {
     /// tells them apart. A name that is an import exported again maps to a key whose
     /// declaration is in another unit's `decls`.
     pub names: Vec<(String, DeclKey)>,
-    pub incomplete: bool,
+    /// Why the list is partial; empty when it is complete. See `IncompleteReason`.
+    pub incomplete_reasons: Vec<IncompleteReason>,
     /// True when the collector ran at all (the unit had a module key). A table that
     /// was never collected is not a complete list of nothing.
     pub collected: bool,
@@ -59,6 +129,16 @@ pub(crate) struct ExportTable {
     pub augmentations: Vec<(String, ExportTable)>,
     /// UMD names introduced by `export as namespace`.
     pub umd_namespaces: Vec<String>,
+}
+
+impl ExportTable {
+    pub(crate) fn is_incomplete(&self) -> bool {
+        !self.incomplete_reasons.is_empty()
+    }
+
+    pub(crate) fn mark(&mut self, reason: IncompleteReason) {
+        note(&mut self.incomplete_reasons, reason);
+    }
 }
 
 // A top-level declaration the exports may be built from, and the names it is exported
@@ -292,7 +372,7 @@ fn push_declaration<'ast>(
     // The declaration is in an ambient context (a declaration file, or a `declare module`
     // block), where the members of a namespace are exported unless some are marked.
     ambient: bool,
-    incomplete: &mut bool,
+    incomplete: &mut Vec<IncompleteReason>,
 ) {
     let named = |name: &str| {
         if exported {
@@ -329,7 +409,7 @@ fn push_declaration<'ast>(
                     names,
                 );
             } else if exported {
-                *incomplete = true;
+                note(incomplete, IncompleteReason::UnsupportedDeclaration);
             }
         }
         Declaration::VariableDeclaration(v) => {
@@ -337,7 +417,7 @@ fn push_declaration<'ast>(
                 let mut bindings = Vec::new();
                 collect_binding_identifiers(&declarator.id, &mut bindings);
                 if bindings.is_empty() && exported {
-                    *incomplete = true;
+                    note(incomplete, IncompleteReason::EmptyBindingPattern);
                 }
                 for (name, symbol) in bindings {
                     let names = named(&name);
@@ -363,7 +443,7 @@ fn push_declaration<'ast>(
             if let Some(id) = &c.id {
                 push_class(items, seen, &id.name, id.symbol_id.get(), named(&id.name));
             } else if exported {
-                *incomplete = true;
+                note(incomplete, IncompleteReason::UnsupportedDeclaration);
             }
         }
         Declaration::TSNamespaceDeclaration(ns) => {
@@ -372,7 +452,7 @@ fn push_declaration<'ast>(
         // A module block has a value side the portable form does not carry yet. Not exported, they are nothing to us.
         _ => {
             if exported {
-                *incomplete = true;
+                note(incomplete, IncompleteReason::UnsupportedDeclaration);
             }
         }
     }
@@ -434,7 +514,7 @@ fn collect_ambient<'ast>(
         let Some(body) = &module.body else {
             let result = ExportTable {
                 collected: true,
-                incomplete: true,
+                incomplete_reasons: vec![IncompleteReason::ShorthandAmbientModule],
                 ..ExportTable::default()
             };
             let destination = if is_module {
@@ -519,7 +599,7 @@ fn collect_in<'ast>(
                 &export.declaration,
                 true,
                 definition,
-                &mut table.incomplete,
+                &mut table.incomplete_reasons,
             ),
             Statement::ExportDefaultDeclaration(export) => match &export.declaration {
                 ExportDefaultDeclarationKind::FunctionDeclaration(f) if f.id.is_some() => {
@@ -548,7 +628,7 @@ fn collect_in<'ast>(
                             vec!["default".to_string()],
                         );
                     } else {
-                        table.incomplete = true;
+                        table.mark(IncompleteReason::AnonymousDefaultWithoutSignature);
                     }
                 }
                 ExportDefaultDeclarationKind::TSInterfaceDeclaration(d) => {
@@ -614,7 +694,7 @@ fn collect_in<'ast>(
                 }
                 // Anonymous function/class declarations still need a dedicated portable
                 // callable/class-signature representation; don't pretend they're complete.
-                _ => table.incomplete = true,
+                _ => table.mark(IncompleteReason::UnsupportedDefaultExport),
             },
             Statement::ExportNamedDeclaration(named) => {
                 for spec in &named.specifiers {
@@ -838,7 +918,7 @@ fn collect_in<'ast>(
             // this portable model cannot prove that it has no named/static properties
             // (functions can carry properties too). Keep the module partial rather than
             // incorrectly diagnosing every named import as definitely absent.
-            table.incomplete = true;
+            table.mark(IncompleteReason::NonObjectExportAssignment);
         }
     }
 
@@ -901,7 +981,7 @@ fn collect_in<'ast>(
                 }
             }
             // An unknown local name is an error tsc reports; there is nothing to export.
-            _ => table.incomplete = true,
+            _ => table.mark(IncompleteReason::UnknownLocalExport),
         }
     }
     // `export { a } from "./a"`: the other module's own export, under its own key.
@@ -912,7 +992,7 @@ fn collect_in<'ast>(
                 .map(|imports| imports.export_keys(&source, &spec.local))
                 .unwrap_or_default();
             if keys.is_empty() {
-                table.incomplete = true;
+                table.mark(IncompleteReason::UnresolvedReExport);
             }
             for key in keys {
                 table.names.push((spec.exported.clone(), key));
@@ -959,7 +1039,7 @@ fn collect_in<'ast>(
         _ => false,
     });
     if definition && !has_export_statement && items.iter().any(|item| item.exported_as.is_empty()) {
-        table.incomplete = true;
+        table.mark(IncompleteReason::DeclarationFileWithoutExportStatement);
     }
 
     // Every interface and alias of the file is registered, exported or not: an exported
@@ -1002,7 +1082,7 @@ fn collect_in<'ast>(
         };
         match built.and_then(|p| register(&mut keys, ctx, p)) {
             Some(p) => pending.push(p),
-            None if exported => table.incomplete = true,
+            None if exported => table.mark(IncompleteReason::UnrepresentableDeclaration),
             None => {}
         }
     }
@@ -1036,7 +1116,9 @@ fn collect_in<'ast>(
                 order.push(p.key);
                 written.insert(p.key, (decl, p.exported_as));
             }
-            None if !p.exported_as.is_empty() => table.incomplete = true,
+            None if !p.exported_as.is_empty() => {
+                table.mark(IncompleteReason::UnrepresentableDeclaration)
+            }
             None => {}
         }
     }
@@ -1071,7 +1153,7 @@ fn collect_in<'ast>(
         let imports = ctx.imports;
         let known = imports.map(|i| i.module_exports(&source));
         if !matches!(known, Some(ModuleExports::Known { complete: true })) {
-            table.incomplete = true;
+            table.mark(IncompleteReason::StarFromPartialModule);
         }
         let local: std::collections::HashSet<String> = order
             .iter()
@@ -1101,7 +1183,7 @@ fn collect_in<'ast>(
     for (alias, source) in namespace_stars {
         let known = ctx.imports.map(|imports| imports.module_exports(&source));
         if !matches!(known, Some(ModuleExports::Known { complete: true })) {
-            table.incomplete = true;
+            table.mark(IncompleteReason::NamespaceStarFromPartialModule);
         }
         let existing_names: std::collections::HashSet<String> =
             table.names.iter().map(|(name, _)| name.clone()).collect();

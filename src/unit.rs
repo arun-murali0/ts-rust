@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 use crate::arena::TypeArena;
-use crate::bridge::{self, Checked};
+use crate::bridge::{self, Checked, ExportTable, IncompleteReason};
 use crate::diagnostic_messages::messages;
 use crate::diagnostics::{Diagnostic, Severity};
 use crate::error::CheckerError;
@@ -90,6 +90,10 @@ impl<'a> UnitContext<'a> {
 pub struct UnitOutput {
     pub diagnostics: Vec<Diagnostic>,
     pub incomplete: bool,
+    // Why the unit is partial, sorted and without duplicates: the reasons of its own export
+    // list and of the `declare module` blocks and augmentations in it. Empty when the
+    // exports are complete.
+    pub incomplete_reasons: Vec<IncompleteReason>,
     // The unit's exported declarations as owned, arena-free data (LLD 3.4). Filled when
     // the unit has a module key: annotated interfaces, aliases, functions and constants.
     // Anything exported that the portable form cannot carry yet is left out and sets
@@ -193,36 +197,41 @@ impl Worker {
         let ran = catch_unwind(AssertUnwindSafe(|| self.run_unit(ctx, check)));
 
         match ran {
-            Ok(Ok(Some((diagnostics, _metrics, table)))) => Ok(UnitOutput {
-                diagnostics,
-                incomplete: table.incomplete,
-                exports: table.decls,
-                export_names: table.names,
-                exports_complete: table.collected && !table.incomplete,
-                ambient: table
-                    .ambient
-                    .into_iter()
-                    .map(|(specifier, ambient)| AmbientExports {
-                        specifier,
-                        complete: ambient.collected && !ambient.incomplete,
-                        exports: ambient.decls,
-                        export_names: ambient.names,
-                        augmentation: false,
-                    })
-                    .collect(),
-                umd_namespaces: table.umd_namespaces,
-                augmentations: table
-                    .augmentations
-                    .into_iter()
-                    .map(|(specifier, augmentation)| AmbientExports {
-                        specifier,
-                        complete: augmentation.collected && !augmentation.incomplete,
-                        exports: augmentation.decls,
-                        export_names: augmentation.names,
-                        augmentation: true,
-                    })
-                    .collect(),
-            }),
+            Ok(Ok(Some((diagnostics, _metrics, table)))) => {
+                let partial = table.is_incomplete();
+                let reasons = all_reasons(&table);
+                Ok(UnitOutput {
+                    diagnostics,
+                    incomplete: partial,
+                    incomplete_reasons: reasons,
+                    exports: table.decls,
+                    export_names: table.names,
+                    exports_complete: table.collected && !partial,
+                    ambient: table
+                        .ambient
+                        .into_iter()
+                        .map(|(specifier, ambient)| AmbientExports {
+                            specifier,
+                            complete: ambient.collected && !ambient.is_incomplete(),
+                            exports: ambient.decls,
+                            export_names: ambient.names,
+                            augmentation: false,
+                        })
+                        .collect(),
+                    umd_namespaces: table.umd_namespaces,
+                    augmentations: table
+                        .augmentations
+                        .into_iter()
+                        .map(|(specifier, augmentation)| AmbientExports {
+                            specifier,
+                            complete: augmentation.collected && !augmentation.is_incomplete(),
+                            exports: augmentation.decls,
+                            export_names: augmentation.names,
+                            augmentation: true,
+                        })
+                        .collect(),
+                })
+            }
             Ok(Ok(None)) => Err(UnitError::Cancelled),
             Ok(Err(error)) => Err(error.into()),
             Err(_panic) => {
@@ -239,6 +248,17 @@ impl Default for Worker {
     }
 }
 
+// The reasons of the unit's own list and of every ambient block and augmentation in it.
+fn all_reasons(table: &ExportTable) -> Vec<IncompleteReason> {
+    let mut reasons = table.incomplete_reasons.clone();
+    for (_, block) in table.ambient.iter().chain(table.augmentations.iter()) {
+        reasons.extend(block.incomplete_reasons.iter().copied());
+    }
+    reasons.sort();
+    reasons.dedup();
+    reasons
+}
+
 fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
     let message = messages::internal_checker_error();
     UnitOutput {
@@ -251,6 +271,7 @@ fn crashed(ctx: &UnitContext<'_>) -> UnitOutput {
             end: 0,
         }],
         incomplete: true,
+        incomplete_reasons: vec![IncompleteReason::CheckerCrashed],
         exports: Vec::new(),
         export_names: Vec::new(),
         exports_complete: false,

@@ -24,6 +24,7 @@ use crate::types::FileId;
 use crate::unit::CancelToken;
 use context::CheckContext;
 pub(crate) use exports::ExportTable;
+pub use exports::IncompleteReason;
 
 pub use parse::parse;
 

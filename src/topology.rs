@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use petgraph::Direction;
-use petgraph::algo::tarjan_scc;
 use petgraph::graph::{DiGraph, NodeIndex};
 
 use crate::module_resolution::ModuleRequestKind;
@@ -96,15 +95,30 @@ impl ModuleTopology {
     /// every component its files import. Members are in id order. Files that are not
     /// in a cycle are components of one.
     pub fn components(&self) -> Vec<Vec<FileId>> {
-        // petgraph emits components in reverse topological order of the condensation,
-        // which for importer -> imported edges is dependencies first. LLD 4.1 asks for
-        // that to be asserted and not assumed, so components_come_dependencies_first
-        // below pins it for the pinned version.
-        tarjan_scc(&self.graph)
+        // The search is the one the module graph uses, run over the nodes in the order
+        // they were added. There is one implementation of it, and `scc` tests it on random
+        // graphs, so this view and the graph cannot disagree about a cycle.
+        let adjacency: Vec<Vec<usize>> = self
+            .graph
+            .node_indices()
+            .map(|node| {
+                let mut targets: Vec<usize> = self
+                    .graph
+                    .neighbors_directed(node, Direction::Outgoing)
+                    .map(|neighbor| neighbor.index())
+                    .collect();
+                targets.sort_unstable();
+                targets.dedup();
+                targets
+            })
+            .collect();
+        crate::scc::components(&adjacency)
             .into_iter()
             .map(|component| {
-                let mut members: Vec<FileId> =
-                    component.into_iter().map(|node| self.graph[node]).collect();
+                let mut members: Vec<FileId> = component
+                    .into_iter()
+                    .map(|position| self.graph[NodeIndex::new(position)])
+                    .collect();
                 members.sort();
                 members
             })

@@ -681,6 +681,74 @@ fn star_exports_propagate_through_a_cycle_longer_than_four_modules() {
     assert_eq!(errors[0].code.tsc_code(), Some(2322), "{errors:?}");
 }
 
+// An inferred return type crosses a cycle by iteration: the first pass reads the other file
+// as unknown, the next sees its inferred return type, and the cycle settles on the
+// answer a single pass in the right order would have given.
+#[test]
+fn an_inferred_return_type_crosses_a_cycle_once_it_settles() {
+    let project = run(
+        "cycle-inferred-return",
+        &[
+            (
+                "a.ts",
+                "import { g } from './b';\nexport function f() { return g(); }\nconst s: string = f();",
+            ),
+            (
+                "b.ts",
+                "import { f } from './a';\nexport function g() { return 1; }\nexport const keep = f;",
+            ),
+        ],
+    );
+    assert!(
+        project.report.unsettled.is_empty(),
+        "{:?}",
+        project.unsettled_names()
+    );
+    let errors = project.errors("a.ts");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].code.tsc_code(), Some(2322), "{errors:?}");
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
+// Two functions whose return types are each inferred from the other have no answer. tsc
+// reports TS7023 on both. ts-rust reads them as any, which loses that error but never
+// invents one, and the cycle still settles instead of running out of rounds.
+#[test]
+fn mutually_inferred_return_types_read_as_any_and_the_cycle_settles() {
+    let project = run(
+        "cycle-circular-return",
+        &[
+            (
+                "a.ts",
+                "import { g } from './b';\nexport function f() { return g(); }",
+            ),
+            (
+                "b.ts",
+                "import { f } from './a';\nexport function g() { return f(); }\nconst n: number = g();",
+            ),
+        ],
+    );
+    assert!(
+        project.report.unsettled.is_empty(),
+        "{:?}",
+        project.unsettled_names()
+    );
+    assert!(
+        project.errors("a.ts").is_empty(),
+        "{:?}",
+        project.errors("a.ts")
+    );
+    assert!(
+        project.errors("b.ts").is_empty(),
+        "{:?}",
+        project.errors("b.ts")
+    );
+}
+
 #[test]
 fn a_cycle_that_settles_is_not_reported_as_unsettled() {
     let sources = star_ring(7);
@@ -1323,9 +1391,11 @@ fn a_property_missing_from_an_export_equals_value_is_reported() {
     assert_eq!(codes, vec![Some(2339)], "{:?}", project.errors("b.ts"));
 }
 
-// A dynamic import with a string argument is a dependency edge like any other.
+// A dynamic import with a string argument finds its file and is checked with the rest, but
+// it does not order the files: nothing reads what `import("x")` exports, so making b wait
+// for a would only let a dynamic import close a cycle.
 #[test]
-fn a_dynamic_import_is_a_dependency_of_the_importing_file() {
+fn a_dynamic_import_finds_the_file_but_does_not_order_it() {
     let project = run(
         "dynamic",
         &[
@@ -1355,7 +1425,13 @@ fn a_dynamic_import_is_a_dependency_of_the_importing_file() {
             })
             .unwrap()
     };
-    assert_eq!(project.graph.dependencies(id_of("b.ts")), &[id_of("a.ts")]);
+    assert!(project.graph.dependencies(id_of("b.ts")).is_empty());
+    assert!(project.graph.dependents(id_of("a.ts")).is_empty());
+    // The edge is still there, which is how a.ts was found and why it is checked.
+    let edges = project.graph.edges(id_of("b.ts"));
+    assert_eq!(edges.len(), 1, "{edges:?}");
+    assert_eq!(edges[0].target, Some(id_of("a.ts")));
+    assert_eq!(project.report.files.len(), 2);
 }
 
 // `export = x`: the module is that one declaration.

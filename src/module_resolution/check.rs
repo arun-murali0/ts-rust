@@ -3,6 +3,7 @@ use std::sync::{Arc, OnceLock};
 
 use rayon::prelude::*;
 
+use crate::bridge::IncompleteReason;
 use crate::diagnostics::Diagnostic;
 use crate::error::CheckerError;
 use crate::fxhash::FxHashMap;
@@ -32,6 +33,9 @@ pub struct FileReport {
     /// and the finer one: a change that leaves all of these signatures alone cannot
     /// change this file's diagnostics (LLD 6.2).
     pub reads: Vec<DeclKey>,
+    /// Why this file's exports are partial, sorted and without duplicates; empty when they
+    /// are complete. A file that imports a partial one stays quiet about a missing name.
+    pub incomplete_reasons: Vec<IncompleteReason>,
 }
 
 #[derive(Debug, Default)]
@@ -825,6 +829,7 @@ fn check_file(
 ) -> (FileReport, Option<UnitExports>) {
     let mut unit_exports = None;
     let mut reads = Vec::new();
+    let mut incomplete_reasons = Vec::new();
     let outcome = match graph.files().path(id) {
         None => FileOutcome::ReadFailed(format!("no path recorded for file {}", id.index())),
         Some(path) => match fs::read_to_string(path) {
@@ -847,6 +852,7 @@ fn check_file(
                 reads = imports.take_reads();
                 match checked {
                     Ok(output) => {
+                        incomplete_reasons = output.incomplete_reasons.clone();
                         unit_exports = Some(UnitExports {
                             names: output.export_names,
                             decls: output.exports,
@@ -871,6 +877,7 @@ fn check_file(
             file_id: id,
             outcome,
             reads,
+            incomplete_reasons,
         },
         unit_exports,
     )

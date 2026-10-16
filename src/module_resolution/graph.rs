@@ -30,12 +30,23 @@ pub struct ModuleEdge {
 // `dependencies` and `dependents` are the resolved edges with duplicates removed (two
 // statements importing the same file are one dependency), in both directions, so
 // "what must be checked first" and "what is affected by a change" are each one lookup.
+// A dynamic import is not one of them: nothing reads what `import("x")` exports yet, so
+// ordering by it would only invent cycles. The edge stays in `edges`, which is what the
+// walk that finds files follows, so the file is still found, checked and reported.
+//
+// `sccs`, `scc_of` and `layers` are worked out once, when the graph is built: the
+// components dependencies first (which is also a topological order of them), the
+// component of each file, and the files grouped for checking. They are plain arrays, so a
+// caller that asks twice does not search twice.
 #[derive(Debug)]
 pub struct ModuleGraph {
     files: ProjectFiles,
     edges: Vec<Vec<ModuleEdge>>,
     dependencies: Vec<Vec<FileId>>,
     dependents: Vec<Vec<FileId>>,
+    sccs: Vec<Vec<FileId>>,
+    scc_of: Vec<u32>,
+    layers: Vec<Vec<FileId>>,
     states: Vec<FileState>,
     syntax_errors: Vec<bool>,
     // The project root, an input of the graph (LLD 3.1.1). None until a caller sets it
@@ -172,8 +183,11 @@ impl ModuleGraph {
         let mut dependencies = Vec::with_capacity(edges.len());
         let mut dependents = vec![Vec::new(); edges.len()];
         for (position, file_edges) in edges.iter().enumerate() {
-            let mut targets: Vec<FileId> =
-                file_edges.iter().filter_map(|edge| edge.target).collect();
+            let mut targets: Vec<FileId> = file_edges
+                .iter()
+                .filter(|edge| edge.kind != ModuleRequestKind::DynamicImport)
+                .filter_map(|edge| edge.target)
+                .collect();
             targets.sort();
             targets.dedup();
             // Importers are visited in id order, so each dependents list ends up sorted
@@ -183,11 +197,30 @@ impl ModuleGraph {
             }
             dependencies.push(targets);
         }
+
+        let adjacency: Vec<Vec<usize>> = dependencies
+            .iter()
+            .map(|targets| targets.iter().map(|target| index_of(*target)).collect())
+            .collect();
+        let components = crate::scc::components(&adjacency);
+        let scc_of = crate::scc::component_of(adjacency.len(), &components);
+        let layers = crate::scc::layers(&adjacency, &components)
+            .into_iter()
+            .map(|layer| layer.into_iter().map(file_id).collect())
+            .collect();
+        let sccs = components
+            .into_iter()
+            .map(|component| component.into_iter().map(file_id).collect())
+            .collect();
+
         Self {
             files,
             edges,
             dependencies,
             dependents,
+            sccs,
+            scc_of,
+            layers,
             states,
             syntax_errors,
             root: None,
@@ -320,6 +353,10 @@ impl ModuleGraph {
             let id = file_id(position);
             topology.add_file(id);
             for edge in &self.edges[index_of(id)] {
+                // The same edges that order the graph, so both agree on cycles.
+                if edge.kind == ModuleRequestKind::DynamicImport {
+                    continue;
+                }
                 if let Some(target) = edge.target {
                     topology.add_typed_dependency(id, target, edge.kind);
                 }
@@ -332,123 +369,48 @@ impl ModuleGraph {
     /// imports itself is a group of one. Members are sorted, and so are the groups.
     pub fn cycles(&self) -> Vec<Vec<FileId>> {
         let mut cycles: Vec<Vec<FileId>> = self
-            .components()
-            .into_iter()
+            .sccs
+            .iter()
             .filter(|component| {
                 component.len() > 1 || self.dependencies(component[0]).contains(&component[0])
             })
+            .cloned()
             .collect();
         cycles.sort();
         cycles
+    }
+
+    /// Every strongly connected component, a file that is in no cycle being a component of
+    /// one. Dependencies first: a component comes after every component it imports from,
+    /// so the list is also a topological order. Members are sorted.
+    pub fn sccs(&self) -> &[Vec<FileId>] {
+        &self.sccs
+    }
+
+    /// The position of the component of `id` in `sccs`.
+    pub fn scc_of(&self, id: FileId) -> usize {
+        self.scc_of
+            .get(index_of(id))
+            .map_or(0, |index| *index as usize)
+    }
+
+    /// A stable identity for the cycle made of `members`, from the keys of its members and
+    /// not from their order or from where the project lives: the same files in any order,
+    /// under any root, give the same key, and adding or removing a member changes it. None
+    /// if a member has no module key (see `module_key`), since a wrong key is worse than none.
+    pub fn cycle_key(&self, members: &[FileId]) -> Option<crate::keys::CycleKey> {
+        let keys: Option<Vec<crate::keys::ModuleKey>> = members
+            .iter()
+            .map(|member| self.module_key(*member))
+            .collect();
+        Some(crate::keys::CycleKey::of(&keys?))
     }
 
     /// Files grouped so that everything in a layer depends only on earlier layers,
     /// except for imports among members of one cycle, which share a layer. A file
     /// that merely imports a cycle comes after it and is not part of it.
     pub fn layers(&self) -> Vec<Vec<FileId>> {
-        let components = self.components();
-        let mut component_of: Vec<usize> = vec![0; self.len()];
-        for (position, component) in components.iter().enumerate() {
-            for member in component {
-                component_of[index_of(*member)] = position;
-            }
-        }
-
-        // `components` lists a component after every component it imports from, so each
-        // depth is final by the time something imports it.
-        let mut depth: Vec<usize> = vec![0; components.len()];
-        let mut layers: Vec<Vec<FileId>> = Vec::new();
-        for (position, component) in components.iter().enumerate() {
-            let mut level = 0usize;
-            for member in component {
-                for dependency in self.dependencies(*member) {
-                    let other = component_of[index_of(*dependency)];
-                    if other != position {
-                        level = level.max(depth[other] + 1);
-                    }
-                }
-            }
-            depth[position] = level;
-            if layers.len() <= level {
-                layers.resize_with(level + 1, Vec::new);
-            }
-            layers[level].extend(component.iter().copied());
-        }
-        for layer in &mut layers {
-            layer.sort();
-        }
-        layers
-    }
-
-    // Strongly connected components, Tarjan's algorithm with an explicit stack. An
-    // import chain is as deep as the project's longest dependency path, and recursion
-    // would put that on the thread's call stack, where a long enough chain overflows it.
-    //
-    // Components come out in reverse topological order: one is emitted only after every
-    // component it imports from. `layers` relies on that.
-    fn components(&self) -> Vec<Vec<FileId>> {
-        const UNVISITED: u32 = u32::MAX;
-
-        let count = self.len();
-        let mut order = vec![UNVISITED; count];
-        let mut low_link = vec![0u32; count];
-        let mut on_stack = vec![false; count];
-        let mut stack: Vec<usize> = Vec::new();
-        let mut components = Vec::new();
-        let mut next_order = 0u32;
-        // Each frame is a file and how many of its dependencies have been looked at.
-        let mut frames: Vec<(usize, usize)> = Vec::new();
-
-        for root in 0..count {
-            if order[root] != UNVISITED {
-                continue;
-            }
-            order[root] = next_order;
-            low_link[root] = next_order;
-            next_order += 1;
-            stack.push(root);
-            on_stack[root] = true;
-            frames.push((root, 0));
-
-            while let Some(frame) = frames.last_mut() {
-                let node = frame.0;
-                let dependencies = &self.dependencies[node];
-                if frame.1 < dependencies.len() {
-                    let next = index_of(dependencies[frame.1]);
-                    frame.1 += 1;
-                    if order[next] == UNVISITED {
-                        order[next] = next_order;
-                        low_link[next] = next_order;
-                        next_order += 1;
-                        stack.push(next);
-                        on_stack[next] = true;
-                        frames.push((next, 0));
-                    } else if on_stack[next] {
-                        low_link[node] = low_link[node].min(order[next]);
-                    }
-                    continue;
-                }
-
-                frames.pop();
-                if let Some(parent) = frames.last() {
-                    let parent = parent.0;
-                    low_link[parent] = low_link[parent].min(low_link[node]);
-                }
-                if low_link[node] == order[node] {
-                    let mut component = Vec::new();
-                    while let Some(member) = stack.pop() {
-                        on_stack[member] = false;
-                        component.push(file_id(member));
-                        if member == node {
-                            break;
-                        }
-                    }
-                    component.sort();
-                    components.push(component);
-                }
-            }
-        }
-        components
+        self.layers.clone()
     }
 }
 
