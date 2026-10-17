@@ -63,6 +63,22 @@
 // threads (RAYON_NUM_THREADS); tsc is single-threaded, so --threads 1 is the like-for-like
 // figure and the default (every core) is what a user gets.
 //
+// --summary prints only numbers and no per-file tables or JSON: how many files were
+// compared, how many MATCH / MESSAGE DIFFERS / CODE DIFFERS / GAP / FALSE POSITIVE / MIXED,
+// the error counts on both sides, and the wall time and peak memory of ts-rust and of tsc.
+// Every line is `name: value` with the unit after the number (ms or MB), so it is easy to
+// diff two runs or grep. ts-rust and tsc each run as one process over every file, so there
+// is no peak per file; `avg_peak_mb_per_file` is the process peak divided by the file count,
+// a rough figure.
+//
+// --background starts the same comparison detached and returns at once, so a run over the
+// whole corpus does not hold the terminal. Everything after it behaves as given, except that
+// --summary is added when no output flag was named. The run gets its own folder under
+// .harness/runs/ with progress.log (the status lines), output.txt (what stdout would have
+// shown, a --json document included), command.txt, pid and, once it ends, exit-code.
+// --status [run-folder] reads one back: running, done or failed, the last progress line, and
+// the output itself when it is a short summary. Without a folder it reads the newest run.
+//
 // --flat runs ts-rust with its own --flat option: every file is checked on its own, with no
 // module graph, which is how tsc's test suite works (each case is its own Program, and
 // hundreds of cases declare the same global names). Without it ts-rust builds the module
@@ -73,12 +89,13 @@
 // --timeout S stops a ts-rust or tsc child that has run for S seconds and reports it, so
 // one hang names itself instead of freezing the whole comparison. The default is no limit.
 //
-// Usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache] [--module] [--flat] [--runs N] [--threads N] [--timeout S]
+// Usage: node compare.js --status [run-folder]
+//        node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream | --summary] [--background] [--only-differ] [--differ] [--no-cache] [--module] [--flat] [--runs N] [--threads N] [--timeout S]
 
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { spawnSync } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const ts = require("typescript");
 const {
   checkFiles,
@@ -107,6 +124,9 @@ function intFlag(name) {
 const strictOnly = args.includes("--strict-only");
 const asJson = args.includes("--json");
 const jsonStream = args.includes("--json-stream");
+// Numbers only (see the doc comment above); quiet is every mode that replaces the tables.
+const summaryOnly = args.includes("--summary");
+const quiet = asJson || jsonStream || summaryOnly;
 const onlyDiffer = args.includes("--only-differ");
 const showDiffer = args.includes("--differ");
 // tsc results are cached per fixture (see check-fixtures.js); --no-cache forces a full run.
@@ -120,10 +140,106 @@ const flatMode = args.includes("--flat");
 // Seconds before a child process is stopped; null means no limit.
 const timeoutSeconds = intFlag("--timeout");
 
+// === Background runs and their status ======================================
+
+const RUNS_DIR = path.join(".harness", "runs");
+
+function readIfExists(file) {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function printStatus(folderArg) {
+  let dir = folderArg;
+  if (!dir) {
+    const runs = fs.existsSync(RUNS_DIR) ? fs.readdirSync(RUNS_DIR).sort() : [];
+    if (runs.length === 0) {
+      console.error(`error: no background runs under ${RUNS_DIR}`);
+      process.exit(2);
+    }
+    dir = path.join(RUNS_DIR, runs[runs.length - 1]);
+  }
+  if (!fs.existsSync(dir)) {
+    console.error(`error: no such run folder: ${dir}`);
+    process.exit(2);
+  }
+  const exitCode = readIfExists(path.join(dir, "exit-code"));
+  const pid = Number((readIfExists(path.join(dir, "pid")) || "").trim());
+  let state;
+  if (exitCode !== null) state = exitCode.trim() === "0" ? "done" : "failed";
+  else if (pid && pidAlive(pid)) state = "running";
+  else state = "stopped without finishing";
+  const progress = (readIfExists(path.join(dir, "progress.log")) || "")
+    .split("\n")
+    .filter((line) => line.trim() !== "");
+  const outputPath = path.join(dir, "output.txt");
+  const outputSize = fs.existsSync(outputPath) ? fs.statSync(outputPath).size : 0;
+  console.log(`run: ${dir}`);
+  console.log(`state: ${state}`);
+  if (exitCode !== null) console.log(`exit_code: ${exitCode.trim()}`);
+  console.log(`last_progress: ${progress.length ? progress[progress.length - 1] : "none yet"}`);
+  // A summary is a few lines and is shown here; JSON (a document or a stream) can be
+  // megabytes and is only named.
+  const output = outputSize > 0 && outputSize <= 8192 ? readIfExists(outputPath) : null;
+  if (state !== "running" && output !== null && !output.startsWith("{")) {
+    console.log("");
+    process.stdout.write(output);
+  } else {
+    console.log(`output: ${outputPath} (${outputSize} bytes)`);
+  }
+  process.exit(state === "failed" ? 1 : 0);
+}
+
+function startBackground() {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const dir = path.join(RUNS_DIR, stamp);
+  fs.mkdirSync(dir, { recursive: true });
+  const childArgs = args.filter((a) => a !== "--background");
+  if (!asJson && !jsonStream && !summaryOnly) childArgs.push("--summary");
+  fs.writeFileSync(
+    path.join(dir, "command.txt"),
+    `node ${[__filename, ...childArgs].join(" ")}\n`,
+  );
+  const out = fs.openSync(path.join(dir, "output.txt"), "w");
+  const err = fs.openSync(path.join(dir, "progress.log"), "w");
+  // The shell writes the exit code once node ends, which is how --status tells a finished
+  // run from one that was killed.
+  const child = spawn(
+    "sh",
+    ["-c", '"$@"; echo $? > "$EXIT_FILE"', "sh", process.execPath, __filename, ...childArgs],
+    {
+      detached: true,
+      stdio: ["ignore", out, err],
+      env: { ...process.env, EXIT_FILE: path.join(dir, "exit-code") },
+    },
+  );
+  fs.writeFileSync(path.join(dir, "pid"), `${child.pid}\n`);
+  child.unref();
+  console.log(`started in the background, pid ${child.pid}`);
+  console.log(`run: ${dir}`);
+  console.log("check with: ./scripts/compare-local.sh --status");
+  process.exit(0);
+}
+
+if (args.includes("--status")) printStatus(positional[0]);
+if (args.includes("--background")) startBackground();
+
 const [target, tsRustBin] = positional;
 if (!target || !tsRustBin) {
   console.error(
-    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream] [--only-differ] [--differ] [--no-cache] [--module] [--flat] [--runs N] [--threads N] [--timeout S]",
+    "usage: node compare.js <target-dir-or-file> <ts-rust-binary> [--strict-only] [--json | --json-stream | --summary] [--background] [--only-differ] [--differ] [--no-cache] [--module] [--flat] [--runs N] [--threads N] [--timeout S]",
   );
   process.exit(2);
 }
@@ -135,9 +251,9 @@ function median(values) {
   const mid = v.length >> 1;
   return v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2;
 }
-if (asJson && jsonStream) {
+if ([asJson, jsonStream, summaryOnly].filter(Boolean).length > 1) {
   console.error(
-    "error: --json and --json-stream are mutually exclusive -- pick one",
+    "error: --json, --json-stream and --summary are mutually exclusive -- pick one",
   );
   process.exit(2);
 }
@@ -156,7 +272,7 @@ const c = NO_COLOR
     };
 
 function log(msg = "") {
-  if (!asJson && !jsonStream) console.log(msg);
+  if (!quiet) console.log(msg);
 }
 function jsonLine(obj) {
   if (jsonStream) console.log(JSON.stringify(obj));
@@ -570,7 +686,7 @@ function renderFile(file, tsRustLines, tscLines) {
   const t = tier(file);
 
   if (t !== currentTier) {
-    if (!asJson && !jsonStream) {
+    if (!quiet) {
       flushTier();
       pendingTierHeader = `${c.bold}== ${t} ==${c.reset}`;
       tierTable = newTierTable();
@@ -583,7 +699,7 @@ function renderFile(file, tsRustLines, tscLines) {
     exactFiles++;
     verdictCounts.MATCH++;
     if (!onlyDiffer) jsonLine({ file, verdict: "MATCH", lines: [] });
-    if (!asJson && !jsonStream && !onlyDiffer && !showDiffer) {
+    if (!quiet && !onlyDiffer && !showDiffer) {
       ensureTierHeader();
       tierFileCount++;
       const clean = `${c.dim}did not produce any error or warning${c.reset}`;
@@ -689,7 +805,7 @@ function renderFile(file, tsRustLines, tscLines) {
     jsonLine(fileReport);
   }
 
-  if (asJson || jsonStream) return;
+  if (quiet) return;
   if ((onlyDiffer || showDiffer) && fileExact) return;
 
   ensureTierHeader();
@@ -747,7 +863,9 @@ function renderFile(file, tsRustLines, tscLines) {
 }
 
 // Merges one file's tsc diagnostics with ts-rust's and renders the result.
+let tscErrorCount = 0;
 function onTscFile(fsPath, fileResults) {
+  tscErrorCount += fileResults.filter((d) => d.category === "Error").length;
   const file = stat.isFile() ? target : path.relative(process.cwd(), fsPath);
   const tscLines = byLine(
     fileResults
@@ -978,6 +1096,44 @@ if (jsonStream) {
   // before it. A consumer distinguishes it from a file line by the
   // presence of `summary` rather than `file`.
   console.log(JSON.stringify({ summary: summaryObject() }));
+  process.exit(0);
+}
+
+if (summaryOnly) {
+  const p = performance;
+  const n = files.length;
+  const mb = (kb) => (kb === null ? "n/a" : `${(kb / 1024).toFixed(1)} MB`);
+  const avgMb = (kb) =>
+    kb === null || n === 0 ? "n/a" : `${(kb / 1024 / n).toFixed(2)} MB`;
+  const ms = (v) => `${v} ms`;
+  const perFile = (v) => (n === 0 ? "n/a" : `${(v / n).toFixed(2)} ms`);
+  const rows = [
+    ["files", n],
+    ["match", verdictCounts.MATCH],
+    ["message_differs", verdictCounts["MESSAGE DIFFERS"]],
+    ["code_differs", verdictCounts["CODE DIFFERS"]],
+    ["gap", verdictCounts.GAP],
+    ["false_positive", verdictCounts["FALSE POSITIVE"]],
+    ["mixed", verdictCounts.MIXED],
+    ["files_agree_on_error_lines", totalAgree],
+    ["files_differ_on_error_lines", totalDiffer],
+    ["lines_exact", exactLines],
+    ["lines_compared", comparedLines],
+    ["ts_rust_errors", tsRustDiags.length],
+    ["tsc_errors", tscErrorCount],
+    ["ts_rust_time", ms(p.tsRust.wallMs)],
+    ["ts_rust_time_per_file", perFile(p.tsRust.wallMs)],
+    ["ts_rust_peak_mb", mb(p.tsRust.maxRssKb)],
+    ["ts_rust_avg_peak_mb_per_file", avgMb(p.tsRust.maxRssKb)],
+    ["tsc_time", ms(p.tsc.wallMs)],
+    ["tsc_time_per_file", perFile(p.tsc.wallMs)],
+    ["tsc_peak_mb", mb(p.tsc.maxRssKb)],
+    ["tsc_avg_peak_mb_per_file", avgMb(p.tsc.maxRssKb)],
+    ["tsc_from_cache", p.tsc.fromCache],
+    ["times_faster", p.timesFaster ?? "n/a"],
+    ["times_less_memory", p.timesLessMemory ?? "n/a"],
+  ];
+  for (const [name, value] of rows) console.log(`${name}: ${value}`);
   process.exit(0);
 }
 
