@@ -1,0 +1,48 @@
+name: CodeQL
+
+# Replaces the default setup, which has no way to skip files. Its JavaScript and TypeScript
+# extractor crashed on tests/typescript-testcases (10,000 TypeScript compiler test files, many
+# of them broken on purpose). The paths-ignore below keeps it to the code that is ours.
+# Turn the default setup off first (Settings > Code security > CodeQL analysis), or GitHub
+# rejects the results of this workflow.
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, rust]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          config: |
+            paths-ignore:
+              - tests/typescript-testcases
+              - tests/fixtures
+              - tests/tsc-conformance
+              - tests/module-resolution-fixtures
+              - examples/cfg_sample.ts
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
