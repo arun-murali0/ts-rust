@@ -1,5 +1,6 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
+use std::time::Duration;
 use ts_rust::{ModuleGraph, ModuleResolver, check_project};
 
 #[path = "support/project_fixtures.rs"]
@@ -248,7 +249,11 @@ fn bench_end_to_end(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default();
+    config = Criterion::default()
+        .sample_size(50)
+        .warm_up_time(Duration::from_secs(3))
+        .measurement_time(Duration::from_secs(10))
+        .noise_threshold(0.02);
     targets = bench_build,
         bench_graph_queries,
         bench_check_project,

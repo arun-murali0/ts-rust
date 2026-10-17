@@ -75,6 +75,14 @@ name = "checker_iai"
 harness = false
 
 [[bench]]
+name = "corpus_benchmark"
+harness = false
+
+[[bench]]
+name = "corpus_iai"
+harness = false
+
+[[bench]]
 name = "module_graph_benchmark"
 harness = false
 required-features = ["module-resolution"]
@@ -90,7 +98,7 @@ harness = false
 required-features = ["module-resolution", "incremental", "scratchpad"]
 
 [features]
-default = []
+default = ["module-resolution"]
 wasm = [
     "dep:wasm-bindgen",
     "dep:serde",
@@ -99,9 +107,9 @@ wasm = [
 ]
 dhat-heap = ["dep:dhat"]
 
-# Project-level module resolution and the module graph. Off by default because it
-# reads the filesystem through oxc_resolver, which single-file, in-memory and wasm
-# callers neither have nor want.
+# Project-level module resolution and the module graph. On by default since the checker
+# is cross-file now. It reads the filesystem through oxc_resolver, so single-file,
+# in-memory and wasm callers build with --no-default-features.
 module-resolution = ["dep:oxc_resolver", "dep:rayon", "dep:petgraph"]
 
 # Salsa inputs and memoized queries over project files. A shell around the checker for

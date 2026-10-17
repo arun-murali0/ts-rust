@@ -2,6 +2,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use ts_rust::{
     FileId, IncrementalDatabase, ModuleGraph, ModuleResolver, SourceKind, WorkerScratch, source_len,
 };
@@ -120,7 +121,11 @@ fn bench_incremental(c: &mut Criterion) {
 
 criterion_group! {
     name = benches;
-    config = Criterion::default();
+    config = Criterion::default()
+        .sample_size(50)
+        .warm_up_time(Duration::from_secs(3))
+        .measurement_time(Duration::from_secs(10))
+        .noise_threshold(0.02);
     targets = bench_topology,
         bench_scratchpad,
         bench_incremental

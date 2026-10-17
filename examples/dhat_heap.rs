@@ -4,13 +4,13 @@
 //     CARGO_PROFILE_RELEASE_DEBUG=true \
 //       cargo run --release --example dhat_heap --features dhat-heap
 //
-//     # the same, plus the multi-file project workloads:
+//     # plus the foundation layers (the bump scratchpad; module-resolution is on by default):
 //     CARGO_PROFILE_RELEASE_DEBUG=true \
-//       cargo run --release --example dhat_heap --features dhat-heap,module-resolution
+//       cargo run --release --example dhat_heap --features dhat-heap,scratchpad
 //
-//     # plus the foundation layers (petgraph topology and the bump scratchpad):
+//     # without the multi-file project workloads:
 //     CARGO_PROFILE_RELEASE_DEBUG=true \
-//       cargo run --release --example dhat_heap --features dhat-heap,module-resolution,scratchpad
+//       cargo run --release --example dhat_heap --no-default-features --features dhat-heap
 //
 //     # one workload only, so dhat-heap.json and the peak are about it alone:
 //     CARGO_PROFILE_RELEASE_DEBUG=true \
@@ -20,6 +20,16 @@
 // `dhat-heap` feature the same workloads run with no profiler and print only
 // their diagnostic counts, which is the cheap way to check that a change to the
 // arena did not change what the checker reports.
+//
+// Every line ends with the time that workload took and the process's peak resident memory
+// so far (VmHWM on Linux, n/a elsewhere). Like dhat's peak, the memory figure covers the whole
+// run up to that line, so it is about one workload only when one is selected. The profiler
+// slows the run down, so the times are for comparing workloads with each other; the criterion
+// benches are the place for speed.
+//
+// `corpus_slice` checks the same slice of the TypeScript corpus as benches/corpus_benchmark.rs
+// (TS_RUST_CORPUS_STRIDE and TS_RUST_CORPUS_OFFSET pick it) and adds one line with the file
+// count and how many files the checker refused.
 //
 // With `module-resolution` there are also project workloads, which write a project
 // to the temp directory and report two lines each: `<label>/graph` for discovering and
@@ -33,11 +43,15 @@
 
 use std::hint::black_box;
 use std::process;
+use std::time::Instant;
 
 use ts_rust::TypeChecker;
 
 #[path = "../benches/support/complex_fixtures.rs"]
 mod complex_fixtures;
+
+#[path = "../benches/support/corpus_fixtures.rs"]
+mod corpus_fixtures;
 
 #[cfg(feature = "module-resolution")]
 #[path = "../benches/support/project_fixtures.rs"]
@@ -53,6 +67,33 @@ use complex_fixtures::{
 #[global_allocator]
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
 
+// Peak resident memory of the process so far, from the kernel's high-water mark.
+fn peak_rss() -> String {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status.lines().find_map(|line| {
+                let kb: f64 = line
+                    .strip_prefix("VmHWM:")?
+                    .trim()
+                    .strip_suffix("kB")?
+                    .trim()
+                    .parse()
+                    .ok()?;
+                Some(format!("{:.1} MB", kb / 1024.0))
+            })
+        })
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn cost(started: Instant) -> String {
+    format!(
+        "{:>10.1} ms  rss {:>9}",
+        started.elapsed().as_secs_f64() * 1000.0,
+        peak_rss()
+    )
+}
+
 // `report_peak` is only meaningful when a single workload runs: dhat's peak is
 // the peak of the whole run so far, not of one workload, so with several
 // workloads it would just be the largest of them repeated on every line.
@@ -61,7 +102,9 @@ fn run_and_report(checker: &TypeChecker, label: &str, source: &str, report_peak:
     #[cfg(feature = "dhat-heap")]
     let before = dhat::HeapStats::get();
 
+    let started = Instant::now();
     let result = checker.check_source(black_box(source), "heap_profile.ts");
+    let cost = cost(started);
 
     // Read before `result` is dropped. The allocation totals only count
     // allocations, so dropping it later would not change them either way.
@@ -77,9 +120,9 @@ fn run_and_report(checker: &TypeChecker, label: &str, source: &str, report_peak:
     };
 
     #[cfg(feature = "dhat-heap")]
-    print_stats(label, &before, &after, report_peak, diagnostics);
+    print_stats(label, &before, &after, report_peak, diagnostics, &cost);
     #[cfg(not(feature = "dhat-heap"))]
-    println!("{label:<40} {diagnostics:>4} diagnostics");
+    println!("{label:<40} {diagnostics:>4} diagnostics  {cost}");
 
     let _ = black_box(result);
 }
@@ -91,16 +134,19 @@ fn print_stats(
     after: &dhat::HeapStats,
     report_peak: bool,
     diagnostics: usize,
+    cost: &str,
 ) {
     let blocks = after.total_blocks - before.total_blocks;
     let bytes = after.total_bytes - before.total_bytes;
     if report_peak {
         println!(
-            "{label:<40} {blocks:>9} blocks {bytes:>12} bytes  peak {:>11} bytes  {diagnostics:>4} diagnostics",
+            "{label:<40} {blocks:>9} blocks {bytes:>12} bytes  peak {:>11} bytes  {diagnostics:>4} diagnostics  {cost}",
             after.max_bytes
         );
     } else {
-        println!("{label:<40} {blocks:>9} blocks {bytes:>12} bytes  {diagnostics:>4} diagnostics");
+        println!(
+            "{label:<40} {blocks:>9} blocks {bytes:>12} bytes  {diagnostics:>4} diagnostics  {cost}"
+        );
     }
 }
 
@@ -117,6 +163,7 @@ fn run_project_and_report(label: &str, project: &project_fixtures::Project, repo
     #[cfg(feature = "dhat-heap")]
     let before_graph = dhat::HeapStats::get();
 
+    let started = Instant::now();
     let graph = match ModuleGraph::build(black_box(&project.entries), &resolver) {
         Ok(graph) => graph,
         Err(error) => panic!("heap workload `{label}` could not build its graph: {error}"),
@@ -124,8 +171,11 @@ fn run_project_and_report(label: &str, project: &project_fixtures::Project, repo
 
     #[cfg(feature = "dhat-heap")]
     let after_graph = dhat::HeapStats::get();
+    let graph_cost = cost(started);
 
+    let check_started = Instant::now();
     let report = check_project(black_box(&graph));
+    let check_cost = cost(check_started);
 
     #[cfg(feature = "dhat-heap")]
     let after_check = dhat::HeapStats::get();
@@ -143,7 +193,14 @@ fn run_project_and_report(label: &str, project: &project_fixtures::Project, repo
     #[cfg(feature = "dhat-heap")]
     {
         let graph_label = format!("{label}/graph ({files} files)");
-        print_stats(&graph_label, &before_graph, &after_graph, report_peak, 0);
+        print_stats(
+            &graph_label,
+            &before_graph,
+            &after_graph,
+            report_peak,
+            0,
+            &graph_cost,
+        );
         let check_label = format!("{label}/check");
         print_stats(
             &check_label,
@@ -151,12 +208,61 @@ fn run_project_and_report(label: &str, project: &project_fixtures::Project, repo
             &after_check,
             report_peak,
             diagnostics,
+            &check_cost,
         );
     }
     #[cfg(not(feature = "dhat-heap"))]
-    println!("{label:<40} {diagnostics:>4} diagnostics ({files} files)");
+    println!(
+        "{label:<40} {diagnostics:>4} diagnostics ({files} files)  graph {graph_cost}  check {check_cost}"
+    );
 
     let _ = black_box(report);
+}
+
+// The corpus slice is checked one file at a time, like the criterion bench, and reported as
+// one line: allocation totals for the whole slice, then the file count and how many files
+// the checker refused. A refused file is counted and not a panic, since the corpus is full
+// of broken code on purpose.
+#[cfg_attr(not(feature = "dhat-heap"), allow(unused_variables))]
+fn run_corpus_and_report(
+    checker: &TypeChecker,
+    files: &[corpus_fixtures::CorpusFile],
+    report_peak: bool,
+) {
+    #[cfg(feature = "dhat-heap")]
+    let before = dhat::HeapStats::get();
+
+    let started = Instant::now();
+    let mut diagnostics = 0usize;
+    let mut refused = 0usize;
+    for file in files {
+        match checker.check_source(black_box(&file.source), black_box(&file.name)) {
+            Ok(checked) => diagnostics += checked.diagnostics.len(),
+            Err(_) => refused += 1,
+        }
+    }
+    let cost = cost(started);
+
+    #[cfg(feature = "dhat-heap")]
+    {
+        let after = dhat::HeapStats::get();
+        print_stats(
+            "corpus_slice",
+            &before,
+            &after,
+            report_peak,
+            diagnostics,
+            &cost,
+        );
+    }
+    #[cfg(not(feature = "dhat-heap"))]
+    println!("{:<40} {diagnostics:>4} diagnostics  {cost}", "corpus_slice");
+
+    println!(
+        "{:<40} {} files, {refused} refused by the checker",
+        "corpus_slice/files",
+        files.len()
+    );
 }
 
 // Labels of the foundation workloads below, so a filter that names only one of them is
@@ -179,19 +285,21 @@ fn measure<R>(label: &str, work: impl FnOnce() -> R) -> R {
     #[cfg(feature = "dhat-heap")]
     let before = dhat::HeapStats::get();
 
+    let started = Instant::now();
     let out = black_box(work());
+    let cost = cost(started);
 
     #[cfg(feature = "dhat-heap")]
     {
         let after = dhat::HeapStats::get();
         println!(
-            "{label:<40} {:>9} blocks {:>12} bytes",
+            "{label:<40} {:>9} blocks {:>12} bytes  {cost}",
             after.total_blocks - before.total_blocks,
             after.total_bytes - before.total_bytes
         );
     }
     #[cfg(not(feature = "dhat-heap"))]
-    println!("{label:<40} ran");
+    println!("{label:<40} ran  {cost}");
 
     out
 }
@@ -328,6 +436,9 @@ fn main() {
             .is_none_or(|wanted| label.contains(wanted))
     };
 
+    // Read before the profiler starts, for the same reason as the sources above.
+    let corpus = wanted("corpus_slice").then(|| corpus_fixtures::corpus_slice(100));
+
     let selected: Vec<&(&str, String)> = workloads
         .iter()
         .filter(|(label, _)| wanted(label))
@@ -341,7 +452,11 @@ fn main() {
 
     let foundation_selected = FOUNDATION_LABELS.iter().any(|label| wanted(label));
 
-    if selected.is_empty() && selected_projects.is_empty() && !foundation_selected {
+    if selected.is_empty()
+        && selected_projects.is_empty()
+        && !foundation_selected
+        && corpus.is_none()
+    {
         eprintln!(
             "no workload label contains {:?}; available:",
             filter.unwrap_or_default()
@@ -353,6 +468,7 @@ fn main() {
         for (label, _) in &projects {
             eprintln!("  {label}");
         }
+        eprintln!("  corpus_slice");
         for label in FOUNDATION_LABELS {
             eprintln!("  {label}");
         }
@@ -374,6 +490,10 @@ fn main() {
     }
     #[cfg(not(feature = "module-resolution"))]
     let _ = selected_projects;
+
+    if let Some(files) = &corpus {
+        run_corpus_and_report(&checker, files, single);
+    }
 
     run_foundation(&wanted);
 }

@@ -1,6 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
-use ts_rust::TypeChecker;
+use std::time::Duration;
+use ts_rust::{FileId, TypeChecker};
 
 #[path = "support/complex_fixtures.rs"]
 mod complex_fixtures;
@@ -179,11 +180,53 @@ fn bench_parse_and_bind(c: &mut Criterion) {
     });
 }
 
+// `check_source` above builds a new type arena on every call, which is what a one-shot CLI
+// run pays. A session keeps its arena between calls, which is what an editor or a watch mode
+// pays after the first check, and the gap between the two is the cost of starting cold.
+fn bench_check_session_warm(c: &mut Criterion) {
+    let checker = TypeChecker::new();
+
+    macro_rules! bench_warm_source {
+        ($name:expr, $source:expr) => {{
+            let source = $source;
+            let mut session = checker.session(FileId::new(0));
+
+            c.bench_function($name, |b| {
+                b.iter(|| {
+                    let result = session.check_source(black_box(&source), "bench_warm.ts");
+
+                    assert!(
+                        result.is_ok(),
+                        "benchmark source failed to check: {result:?}"
+                    );
+
+                    black_box(result)
+                })
+            });
+        }};
+    }
+
+    bench_warm_source!("check_session_warm/realistic_50_functions", realistic_source());
+
+    bench_warm_source!("check_session_warm/large_1000_functions", large_source(1_000));
+
+    bench_warm_source!(
+        "check_session_warm/connected_application_scale_50",
+        connected_application_source(50)
+    );
+}
+
+// A longer warm-up and measurement window and a looser noise threshold than the defaults,
+// so one busy moment on the machine is less likely to be reported as a change.
 criterion_group! {
     name = benches;
-    config = Criterion::default();
+    config = Criterion::default()
+        .warm_up_time(Duration::from_secs(3))
+        .measurement_time(Duration::from_secs(10))
+        .noise_threshold(0.02);
     targets = bench_check_source,
         bench_check_source_complex,
+        bench_check_session_warm,
         bench_parse_and_bind
 }
 
