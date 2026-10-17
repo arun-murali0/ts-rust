@@ -20,6 +20,8 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    env:
+      NODE_OPTIONS: --max-old-space-size=8192
     permissions:
       security-events: write
       contents: read
@@ -37,11 +39,11 @@ jobs:
           build-mode: none
           config: |
             paths-ignore:
-              - tests/typescript-testcases
-              - tests/fixtures
-              - tests/tsc-conformance
-              - tests/module-resolution-fixtures
-              - examples/cfg_sample.ts
+              - 'tests/typescript-testcases/**'
+              - 'tests/fixtures/**'
+              - 'tests/tsc-conformance/**'
+              - 'tests/module-resolution-fixtures/**'
+              - 'examples/cfg_sample.ts'
 
       - uses: github/codeql-action/analyze@v4
         with:
